@@ -2,9 +2,9 @@ use crate::state::DaemonState;
 use std::sync::Arc;
 use ws_ckpt_common::{
     load_config_file, ConfigReport, ErrorCode, Request, Response, StatusReport, WorkspaceInfo,
-    BTRFS_IMG_PATH, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
-    DEFAULT_AUTO_CLEANUP_KEEP, DEFAULT_FS_WARN_THRESHOLD_PERCENT,
-    DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_CAPACITY_PERCENT, DEFAULT_IMG_MIN_SIZE_GB,
+    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_AUTO_CLEANUP_KEEP,
+    DEFAULT_FS_WARN_THRESHOLD_PERCENT, DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT,
+    DEFAULT_IMG_SIZE_GB,
 };
 
 pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Response {
@@ -216,13 +216,18 @@ fn handle_config(state: &Arc<DaemonState>) -> Response {
             health_check_interval_secs: cfg.health_check_interval_secs,
             fs_warn_threshold_percent: cfg.fs_warn_threshold_percent,
             img_path: cfg.img_path.clone(),
-            img_min_size_gb: cfg.img_min_size_gb,
-            img_capacity_percent: cfg.img_capacity_percent,
+            img_size: cfg.img_size,
+            img_max_percent: cfg.img_max_percent,
         },
     }
 }
 
 /// Handle the ReloadConfig request: re-read config file and update runtime config.
+///
+/// NOTE: BtrfsLoop image fields (`img_size`, `img_max_percent`) take effect
+/// only during daemon bootstrap. If they differ from the currently loaded values, a
+/// warning is emitted to tell the operator that a daemon restart is required for the
+/// new values to be applied (via img resize at bootstrap).
 fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
     match load_config_file(std::path::Path::new(CONFIG_FILE_PATH)) {
         Ok(file_config) => {
@@ -240,26 +245,45 @@ fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
             cfg.fs_warn_threshold_percent = file_config
                 .fs_warn_threshold_percent
                 .unwrap_or(DEFAULT_FS_WARN_THRESHOLD_PERCENT);
+
+            // img_* fields are bootstrap-only; compare against the new file values and
+            // warn if they changed. We do NOT mutate cfg.img_size / cfg.img_max_percent
+            // here because bootstrap has already consumed them; the loop image size is
+            // fixed until the next restart (at which point bootstrap will reconcile it).
+            //
+            // Both fields participate in the target formula:
+            //   target = min(img_size * GiB, total * img_max_percent / 100)
+            // so a change to either one will affect the reconciled image size after
+            // `systemctl restart ws-ckpt`.
             let btrfs_loop = file_config.backend.btrfs_loop.as_ref();
-            cfg.img_path = btrfs_loop
-                .and_then(|b| b.img_path.clone())
-                .unwrap_or_else(|| BTRFS_IMG_PATH.to_string());
-            cfg.img_min_size_gb = btrfs_loop
-                .and_then(|b| b.img_min_size_gb)
-                .unwrap_or(DEFAULT_IMG_MIN_SIZE_GB);
-            cfg.img_capacity_percent = btrfs_loop
-                .and_then(|b| b.img_capacity_percent)
-                .unwrap_or(DEFAULT_IMG_CAPACITY_PERCENT * 100.0);
+            let new_img_size = btrfs_loop
+                .and_then(|b| b.img_size)
+                .unwrap_or(DEFAULT_IMG_SIZE_GB);
+            let new_img_max_percent = btrfs_loop
+                .and_then(|b| b.img_max_percent)
+                .unwrap_or(DEFAULT_IMG_MAX_PERCENT * 100.0);
+            if new_img_size != cfg.img_size
+                || (new_img_max_percent - cfg.img_max_percent).abs() > f64::EPSILON
+            {
+                tracing::warn!(
+                    "BtrfsLoop image sizing changed in config file (img_size: {} -> {} GB, \
+                     img_max_percent: {} -> {}). These are bootstrap-only settings; \
+                     restart ws-ckpt daemon to apply the new target \
+                     min(img_size GB, total * img_max_percent%).",
+                    cfg.img_size,
+                    new_img_size,
+                    cfg.img_max_percent,
+                    new_img_max_percent,
+                );
+            }
+
             tracing::info!(
                 "Config reloaded: keep={}, cleanup_interval={}s, health_interval={}s, \
-                 fs_warn={}%, img_path={}, img_min_size={}GB, img_capacity={}%",
+                 fs_warn={}% (img fields are bootstrap-only; restart required to apply)",
                 cfg.auto_cleanup_keep,
                 cfg.auto_cleanup_interval_secs,
                 cfg.health_check_interval_secs,
                 cfg.fs_warn_threshold_percent,
-                cfg.img_path,
-                cfg.img_min_size_gb,
-                cfg.img_capacity_percent
             );
             Response::ReloadConfigOk
         }
@@ -296,8 +320,8 @@ mod tests {
             backend_type: "auto".to_string(),
             fs_warn_threshold_percent: 90.0,
             img_path: "/data/ws-ckpt/btrfs-data.img".to_string(),
-            img_min_size_gb: 30,
-            img_capacity_percent: 30.0,
+            img_size: 30,
+            img_max_percent: 40.0,
             min_free_bytes: 512 * 1024 * 1024,
             min_free_percent: 1.0,
         }

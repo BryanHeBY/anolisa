@@ -19,8 +19,8 @@ pub const BTRFS_IMG_PATH: &str = "/data/ws-ckpt/btrfs-data.img";
 pub const BTRFS_IMG_DIR: &str = "/data/ws-ckpt";
 pub const CONFIG_FILE_PATH: &str = "/etc/ws-ckpt/config.toml";
 pub const DEFAULT_FS_WARN_THRESHOLD_PERCENT: f64 = 90.0;
-pub const DEFAULT_IMG_MIN_SIZE_GB: u64 = 30;
-pub const DEFAULT_IMG_CAPACITY_PERCENT: f64 = 0.3; // 30% as fraction for calculation
+pub const DEFAULT_IMG_SIZE_GB: u64 = 30;
+pub const DEFAULT_IMG_MAX_PERCENT: f64 = 0.4; // 40% as fraction for calculation
 
 // ── Error type ──
 
@@ -230,8 +230,8 @@ pub struct ConfigReport {
     pub health_check_interval_secs: u64,
     pub fs_warn_threshold_percent: f64,
     pub img_path: String,
-    pub img_min_size_gb: u64,
-    pub img_capacity_percent: f64,
+    pub img_size: u64,
+    pub img_max_percent: f64,
 }
 
 // ── Daemon config ──
@@ -251,12 +251,13 @@ pub struct DaemonConfig {
     pub backend_type: String,
     /// Filesystem usage warning threshold (percentage, 0-100)
     pub fs_warn_threshold_percent: f64,
-    /// Loop image file path
+    /// Loop image file path (runtime-only; always `BTRFS_IMG_PATH`, not user-configurable)
     pub img_path: String,
-    /// Minimum image size in GB
-    pub img_min_size_gb: u64,
-    /// Image size as percentage of partition capacity (0-100, e.g. 30 means 30%)
-    pub img_capacity_percent: f64,
+    /// Target image size in GB. The on-disk image is grown/shrunk to match this at bootstrap.
+    pub img_size: u64,
+    /// Initial-creation cap as percentage of host partition capacity (0-100).
+    /// Only consulted on the very first bootstrap when the image does not yet exist.
+    pub img_max_percent: f64,
     /// Minimum free space in bytes (used by health-check reporting, does NOT block checkpoint)
     pub min_free_bytes: u64,
     /// Minimum free space percentage 0-100 (used by health-check reporting, does NOT block checkpoint)
@@ -283,14 +284,17 @@ pub const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 300;
 // ── Config file ──
 
 /// BtrfsLoop backend-specific configuration.
+///
+/// NOTE: These fields only take effect during daemon bootstrap.
+/// Changing them via `ReloadConfig` will emit a warning and require a daemon restart.
+/// The img file path is fixed to `BTRFS_IMG_PATH` and is not user-configurable.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct BtrfsLoopConfig {
-    /// Loop image file path
-    pub img_path: Option<String>,
-    /// Minimum image size in GB
-    pub img_min_size_gb: Option<u64>,
-    /// Image size as percentage of partition capacity (0-100, e.g. 30 means 30%)
-    pub img_capacity_percent: Option<f64>,
+    /// Target image size in GB. Used as the reconcile target at bootstrap.
+    pub img_size: Option<u64>,
+    /// Initial-creation cap as percentage of host partition capacity (0-100).
+    /// Only consulted on the very first bootstrap when the image does not yet exist.
+    pub img_max_percent: Option<f64>,
 }
 
 /// Backend configuration section in config file.
@@ -367,9 +371,9 @@ impl Default for DaemonConfig {
             backend_type: "auto".to_string(),
             fs_warn_threshold_percent: DEFAULT_FS_WARN_THRESHOLD_PERCENT,
             img_path: BTRFS_IMG_PATH.to_string(),
-            img_min_size_gb: DEFAULT_IMG_MIN_SIZE_GB,
-            img_capacity_percent: DEFAULT_IMG_CAPACITY_PERCENT * 100.0, // stored as 0-100
-            min_free_bytes: 512 * 1024 * 1024,                          // 512 MB
+            img_size: DEFAULT_IMG_SIZE_GB,
+            img_max_percent: DEFAULT_IMG_MAX_PERCENT * 100.0, // stored as 0-100
+            min_free_bytes: 512 * 1024 * 1024,                // 512 MB
             min_free_percent: 1.0,
         }
     }
@@ -1087,8 +1091,8 @@ mod tests {
                 health_check_interval_secs: 300,
                 fs_warn_threshold_percent: 90.0,
                 img_path: "/data/ws-ckpt/btrfs-data.img".to_string(),
-                img_min_size_gb: 30,
-                img_capacity_percent: 30.0,
+                img_size: 30,
+                img_max_percent: 40.0,
             },
         };
         let decoded = round_trip_response(&resp);

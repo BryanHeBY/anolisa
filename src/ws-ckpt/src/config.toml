@@ -8,18 +8,23 @@
 # fs_warn_threshold_percent = 90      # Filesystem usage warning threshold (%)
 
 # ── Backend selection ──
-# [backend]
+# Section headers below are always active so that uncommenting a single
+# field below them takes effect immediately. Empty sections behave exactly
+# the same as omitted sections (all fields fall back to defaults).
+[backend]
 # type = "auto"                       # "auto" | "btrfs-base" | "btrfs-loop" | "overlayfs"
 
 # ── BtrfsLoop backend ──
-# [backend.btrfs-loop]
-# img_path = "/data/ws-ckpt/btrfs-data.img"  # Loop image file path
-# img_min_size_gb = 30                        # Minimum image size (GB)
-# img_capacity_percent = 30                   # Image size as % of partition
+# NOTE: The following fields only take effect during daemon bootstrap.
+# To apply changes you MUST run `systemctl restart ws-ckpt` to restart the daemon.
+[backend.btrfs-loop]
+# img_size = 30                               # Absolute cap: image size (GB)
+# img_max_percent = 40                        # Percentage cap: % of host partition total capacity
+#                                             # Actual target = min(img_size GB, total * img_max_percent%)
 
 # ── BtrfsBase backend ──
-# [backend.btrfs-base]
+[backend.btrfs-base]
 # btrfs_mount = "/data"               # (reserved) Target btrfs partition
 
 # ── OverlayFS backend ──
-# [backend.overlayfs]                 # (reserved, not yet implemented)
+[backend.overlayfs]                   # (reserved, not yet implemented)

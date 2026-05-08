@@ -65,12 +65,16 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
     }
 
     // 4. Rebuild state from disk
-    // For BtrfsLoop, ensure the filesystem is mounted BEFORE rebuild_from_disk,
-    // because rebuild_from_disk scans snapshots_root which lives on the mounted filesystem.
+    // For BtrfsLoop, run bootstrap unconditionally on every start so that:
+    //   * the image is mounted before `rebuild_from_disk` scans snapshots_root,
+    //   * `reconcile_img_size` runs even when the previous instance left the
+    //     filesystem mounted (a `systemctl restart` does NOT unmount), so
+    //     config changes to img_size / img_max_percent take effect on the
+    //     very next restart instead of being silently skipped.
+    // bootstrap() is idempotent: each step (image creation, mount, reconcile,
+    // snapshots dir) checks current state before acting.
     if detect_result.backend.backend_type() == ws_ckpt_common::backend::BackendType::BtrfsLoop {
-        if !bootstrap::is_mounted(&config.mount_path.to_string_lossy()).await? {
-            crate::bootstrap::bootstrap(&config).await?;
-        }
+        crate::bootstrap::bootstrap(&config).await?;
     }
     let state = Arc::new(DaemonState::rebuild_from_disk(config, detect_result.backend).await?);
 

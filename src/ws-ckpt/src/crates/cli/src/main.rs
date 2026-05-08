@@ -11,8 +11,8 @@ use ws_ckpt_common::{
     decode_payload, encode_frame, load_config_file, save_config_file, ChangeType, DaemonConfig,
     ErrorCode, Request, Response, BTRFS_IMG_PATH, CONFIG_FILE_PATH,
     DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_AUTO_CLEANUP_KEEP,
-    DEFAULT_FS_WARN_THRESHOLD_PERCENT, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
-    DEFAULT_IMG_CAPACITY_PERCENT, DEFAULT_IMG_MIN_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
+    DEFAULT_FS_WARN_THRESHOLD_PERCENT, DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT,
+    DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
 };
 
 // Note: auto-cleanup feature is disabled. The --auto-cleanup-keep and
@@ -153,17 +153,13 @@ enum Commands {
         #[arg(long)]
         fs_warn_threshold_percent: Option<f64>,
 
-        /// Set loop image file path
+        /// Set target image size in GB (image will be grown/shrunk at next daemon restart)
         #[arg(long)]
-        img_path: Option<String>,
+        img_size: Option<u64>,
 
-        /// Set minimum image size in GB
+        /// Set initial-creation cap as percentage of host partition (0-100); only used on first bootstrap
         #[arg(long)]
-        img_min_size_gb: Option<u64>,
-
-        /// Set image size as percentage of partition capacity (0-100)
-        #[arg(long)]
-        img_capacity_percent: Option<f64>,
+        img_max_percent: Option<f64>,
     },
 
     /// Recover workspace to a normal directory (undo init)
@@ -225,24 +221,19 @@ async fn run(cli: Cli) -> Result<()> {
                 fs_warn_threshold_percent: file_config
                     .fs_warn_threshold_percent
                     .unwrap_or(DEFAULT_FS_WARN_THRESHOLD_PERCENT),
-                img_path: file_config
+                img_path: BTRFS_IMG_PATH.to_string(),
+                img_size: file_config
                     .backend
                     .btrfs_loop
                     .as_ref()
-                    .and_then(|b| b.img_path.clone())
-                    .unwrap_or_else(|| BTRFS_IMG_PATH.to_string()),
-                img_min_size_gb: file_config
+                    .and_then(|b| b.img_size)
+                    .unwrap_or(DEFAULT_IMG_SIZE_GB),
+                img_max_percent: file_config
                     .backend
                     .btrfs_loop
                     .as_ref()
-                    .and_then(|b| b.img_min_size_gb)
-                    .unwrap_or(DEFAULT_IMG_MIN_SIZE_GB),
-                img_capacity_percent: file_config
-                    .backend
-                    .btrfs_loop
-                    .as_ref()
-                    .and_then(|b| b.img_capacity_percent)
-                    .unwrap_or(DEFAULT_IMG_CAPACITY_PERCENT * 100.0),
+                    .and_then(|b| b.img_max_percent)
+                    .unwrap_or(DEFAULT_IMG_MAX_PERCENT * 100.0),
                 min_free_bytes: 512 * 1024 * 1024,
                 min_free_percent: 1.0,
             };
@@ -336,15 +327,13 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Config {
             health_check_interval,
             fs_warn_threshold_percent,
-            img_path,
-            img_min_size_gb,
-            img_capacity_percent,
+            img_size,
+            img_max_percent,
         } => {
             if health_check_interval.is_none()
                 && fs_warn_threshold_percent.is_none()
-                && img_path.is_none()
-                && img_min_size_gb.is_none()
-                && img_capacity_percent.is_none()
+                && img_size.is_none()
+                && img_max_percent.is_none()
             {
                 // View mode: read config file and show
                 handle_config_view()?;
@@ -353,9 +342,8 @@ async fn run(cli: Cli) -> Result<()> {
                 handle_config_update(
                     health_check_interval,
                     fs_warn_threshold_percent,
-                    img_path,
-                    img_min_size_gb,
-                    img_capacity_percent,
+                    img_size,
+                    img_max_percent,
                 )
                 .await?;
             }
@@ -731,15 +719,12 @@ fn handle_config_view() -> Result<()> {
         .fs_warn_threshold_percent
         .unwrap_or(DEFAULT_FS_WARN_THRESHOLD_PERCENT);
     let btrfs_loop = fc.backend.btrfs_loop.as_ref();
-    let img_path = btrfs_loop
-        .and_then(|b| b.img_path.clone())
-        .unwrap_or_else(|| BTRFS_IMG_PATH.to_string());
-    let img_min = btrfs_loop
-        .and_then(|b| b.img_min_size_gb)
-        .unwrap_or(DEFAULT_IMG_MIN_SIZE_GB);
-    let img_cap = btrfs_loop
-        .and_then(|b| b.img_capacity_percent)
-        .unwrap_or(DEFAULT_IMG_CAPACITY_PERCENT * 100.0);
+    let img_size = btrfs_loop
+        .and_then(|b| b.img_size)
+        .unwrap_or(DEFAULT_IMG_SIZE_GB);
+    let img_max = btrfs_loop
+        .and_then(|b| b.img_max_percent)
+        .unwrap_or(DEFAULT_IMG_MAX_PERCENT * 100.0);
 
     println!("\x1b[1mDaemon Configuration\x1b[0m");
     println!("  Config file:             {}", CONFIG_FILE_PATH);
@@ -790,27 +775,22 @@ fn handle_config_view() -> Result<()> {
         }
     );
     println!(
-        "  Image path:              {}{}",
-        img_path,
-        if btrfs_loop.and_then(|b| b.img_path.as_ref()).is_none() {
+        "  Image path:              {} (fixed, not configurable)",
+        BTRFS_IMG_PATH
+    );
+    println!(
+        "  Image size:              {} GB{}",
+        img_size,
+        if btrfs_loop.and_then(|b| b.img_size).is_none() {
             " (default)"
         } else {
             ""
         }
     );
     println!(
-        "  Image min size:          {} GB{}",
-        img_min,
-        if btrfs_loop.and_then(|b| b.img_min_size_gb).is_none() {
-            " (default)"
-        } else {
-            ""
-        }
-    );
-    println!(
-        "  Image capacity:          {}%{}",
-        img_cap,
-        if btrfs_loop.and_then(|b| b.img_capacity_percent).is_none() {
+        "  Image max percent:       {}%{}",
+        img_max,
+        if btrfs_loop.and_then(|b| b.img_max_percent).is_none() {
             " (default)"
         } else {
             ""
@@ -823,9 +803,8 @@ fn handle_config_view() -> Result<()> {
 async fn handle_config_update(
     health_check_interval: Option<u64>,
     fs_warn_threshold_percent: Option<f64>,
-    img_path: Option<String>,
-    img_min_size_gb: Option<u64>,
-    img_capacity_percent: Option<f64>,
+    img_size: Option<u64>,
+    img_max_percent: Option<f64>,
 ) -> Result<()> {
     let path = std::path::Path::new(CONFIG_FILE_PATH);
 
@@ -842,20 +821,16 @@ async fn handle_config_update(
     }
     // Record whether any btrfs-loop image settings are being changed,
     // as these only take effect at daemon bootstrap (not on reload).
-    let has_img_settings =
-        img_path.is_some() || img_min_size_gb.is_some() || img_capacity_percent.is_some();
+    let has_img_settings = img_size.is_some() || img_max_percent.is_some();
 
     // Handle btrfs-loop settings
     if has_img_settings {
         let mut bl = fc.backend.btrfs_loop.unwrap_or_default();
-        if let Some(p) = img_path {
-            bl.img_path = Some(p);
+        if let Some(s) = img_size {
+            bl.img_size = Some(s);
         }
-        if let Some(s) = img_min_size_gb {
-            bl.img_min_size_gb = Some(s);
-        }
-        if let Some(c) = img_capacity_percent {
-            bl.img_capacity_percent = Some(c);
+        if let Some(c) = img_max_percent {
+            bl.img_max_percent = Some(c);
         }
         fc.backend.btrfs_loop = Some(bl);
     }
@@ -1493,15 +1468,13 @@ mod tests {
             Commands::Config {
                 health_check_interval,
                 fs_warn_threshold_percent,
-                img_path,
-                img_min_size_gb,
-                img_capacity_percent,
+                img_size,
+                img_max_percent,
             } => {
                 assert!(health_check_interval.is_none());
                 assert!(fs_warn_threshold_percent.is_none());
-                assert!(img_path.is_none());
-                assert!(img_min_size_gb.is_none());
-                assert!(img_capacity_percent.is_none());
+                assert!(img_size.is_none());
+                assert!(img_max_percent.is_none());
             }
             _ => panic!("expected Config"),
         }
@@ -1516,11 +1489,9 @@ mod tests {
             "120",
             "--fs-warn-threshold-percent",
             "85",
-            "--img-path",
-            "/data/custom.img",
-            "--img-min-size-gb",
-            "50",
-            "--img-capacity-percent",
+            "--img-size",
+            "30",
+            "--img-max-percent",
             "40",
         ])
         .unwrap();
@@ -1528,15 +1499,13 @@ mod tests {
             Commands::Config {
                 health_check_interval,
                 fs_warn_threshold_percent,
-                img_path,
-                img_min_size_gb,
-                img_capacity_percent,
+                img_size,
+                img_max_percent,
             } => {
                 assert_eq!(health_check_interval, Some(120));
                 assert_eq!(fs_warn_threshold_percent, Some(85.0));
-                assert_eq!(img_path.as_deref(), Some("/data/custom.img"));
-                assert_eq!(img_min_size_gb, Some(50));
-                assert_eq!(img_capacity_percent, Some(40.0));
+                assert_eq!(img_size, Some(30));
+                assert_eq!(img_max_percent, Some(40.0));
             }
             _ => panic!("expected Config"),
         }

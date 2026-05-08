@@ -376,8 +376,8 @@ mod tests {
             backend_type: "auto".to_string(),
             fs_warn_threshold_percent: 90.0,
             img_path: "/data/ws-ckpt/btrfs-data.img".to_string(),
-            img_min_size_gb: 30,
-            img_capacity_percent: 30.0,
+            img_size: 30,
+            img_max_percent: 40.0,
             min_free_bytes: 512 * 1024 * 1024,
             min_free_percent: 1.0,
         }
@@ -515,8 +515,8 @@ mod tests {
             backend_type: "auto".to_string(),
             fs_warn_threshold_percent: 90.0,
             img_path: "/data/ws-ckpt/btrfs-data.img".to_string(),
-            img_min_size_gb: 30,
-            img_capacity_percent: 30.0,
+            img_size: 30,
+            img_max_percent: 40.0,
             min_free_bytes: 512 * 1024 * 1024,
             min_free_percent: 1.0,
         };
