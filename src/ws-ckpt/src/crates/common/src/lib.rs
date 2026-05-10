@@ -219,6 +219,163 @@ pub struct StatusReport {
     pub fs_used_bytes: u64,
 }
 
+/// Auto-cleanup retention policy (mutually-exclusive modes):
+/// - `Count(N)` ← TOML integer: keep N most-recent non-pinned snapshots.
+/// - `Age { raw, secs }` ← TOML string (`"30d"`, units `s/m/h/d/w`): purge non-pinned
+///   snapshots older than `secs`. `raw` is the user's original string (round-trip +
+///   display); `secs` is pre-parsed once at deserialize time. Strict — no count floor.
+///
+/// Invariant (Age): `parse_duration_secs(&raw) == Ok(secs)`, enforced by the only
+/// public constructor [`CleanupRetention::age`] and by Deserialize.
+///
+/// Serde: bincode lacks `deserialize_any`, so we dispatch on `is_human_readable()` —
+/// TOML/JSON use raw u32/String + Visitor; bincode uses a tagged wire enum carrying
+/// only `raw` (secs re-derived on receive).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CleanupRetention {
+    /// Count mode: keep N most recent non-pinned snapshots (0 = disabled).
+    Count(u32),
+    /// Age mode: keep snapshots within `secs` seconds. `raw` is the user's original
+    /// string (e.g. "30d", "2w") preserved for round-trip and display.
+    Age { raw: String, secs: u64 },
+}
+
+impl CleanupRetention {
+    /// Construct an [`Age`](Self::Age) variant from a duration string, parsing and
+    /// caching the seconds value. Returns an error if `raw` is not a valid duration.
+    pub fn age(raw: impl Into<String>) -> Result<Self, String> {
+        let raw = raw.into();
+        let secs = parse_duration_secs(&raw)?;
+        Ok(Self::Age { raw, secs })
+    }
+
+    /// Whether this retention policy disables auto-cleanup entirely:
+    /// `Count(0)` or `Age { secs: 0, .. }`.
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, Self::Count(0) | Self::Age { secs: 0, .. })
+    }
+}
+
+/// Tagged wire representation used for binary (bincode) encoding only.
+/// Only `raw` is transported; `secs` is re-derived from `raw` on the receiving side.
+#[derive(Serialize, Deserialize)]
+enum CleanupRetentionWire {
+    Count(u32),
+    Age(String),
+}
+
+impl Serialize for CleanupRetention {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        if ser.is_human_readable() {
+            match self {
+                Self::Count(n) => ser.serialize_u32(*n),
+                Self::Age { raw, .. } => ser.serialize_str(raw),
+            }
+        } else {
+            let wire = match self {
+                Self::Count(n) => CleanupRetentionWire::Count(*n),
+                Self::Age { raw, .. } => CleanupRetentionWire::Age(raw.clone()),
+            };
+            wire.serialize(ser)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CleanupRetention {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        if de.is_human_readable() {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = CleanupRetention;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    write!(
+                        f,
+                        "a non-negative integer (count mode) or a duration string like \"30d\" (age mode)"
+                    )
+                }
+                fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                    if v > u32::MAX as u64 {
+                        return Err(E::custom(format!(
+                            "auto_cleanup_keep count {} exceeds u32::MAX",
+                            v
+                        )));
+                    }
+                    Ok(CleanupRetention::Count(v as u32))
+                }
+                fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                    if !(0..=u32::MAX as i64).contains(&v) {
+                        return Err(E::custom(format!(
+                            "auto_cleanup_keep count {} out of u32 range",
+                            v
+                        )));
+                    }
+                    Ok(CleanupRetention::Count(v as u32))
+                }
+                fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                    // Pre-validate + cache the seconds value so the value is rejected
+                    // at config load / reload time and the runtime path avoids re-parsing.
+                    CleanupRetention::age(v)
+                        .map_err(|e| E::custom(format!("auto_cleanup_keep age mode: {}", e)))
+                }
+                fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+                    CleanupRetention::age(v)
+                        .map_err(|e| E::custom(format!("auto_cleanup_keep age mode: {}", e)))
+                }
+            }
+            de.deserialize_any(V)
+        } else {
+            let wire = CleanupRetentionWire::deserialize(de)?;
+            match wire {
+                CleanupRetentionWire::Count(n) => Ok(CleanupRetention::Count(n)),
+                CleanupRetentionWire::Age(raw) => CleanupRetention::age(raw).map_err(|e| {
+                    serde::de::Error::custom(format!("auto_cleanup_keep age mode: {}", e))
+                }),
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for CleanupRetention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Count(n) => write!(f, "{}", n),
+            Self::Age { raw, .. } => write!(f, "\"{}\"", raw),
+        }
+    }
+}
+
+/// Parse a duration string like `30d`, `2w`, `3600s`, `5m`, `12h` into seconds.
+/// Bare numbers without a unit are rejected to force explicit semantics.
+pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty duration".to_string());
+    }
+    let bytes = s.as_bytes();
+    let last = bytes[bytes.len() - 1];
+    if !last.is_ascii_alphabetic() {
+        return Err(format!("duration '{}' missing unit suffix (s/m/h/d/w)", s));
+    }
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| format!("duration '{}': invalid number '{}'", s, num_str))?;
+    let secs = match unit.to_ascii_lowercase().as_str() {
+        "s" => n,
+        "m" => n.saturating_mul(60),
+        "h" => n.saturating_mul(3600),
+        "d" => n.saturating_mul(86400),
+        "w" => n.saturating_mul(604800),
+        u => {
+            return Err(format!(
+                "duration '{}': invalid unit '{}' (expected s/m/h/d/w)",
+                s, u
+            ))
+        }
+    };
+    Ok(secs)
+}
+
 /// Report of the current daemon configuration (returned by `Config` request).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ConfigReport {
@@ -226,7 +383,7 @@ pub struct ConfigReport {
     pub socket_path: String,
     pub log_level: String,
     pub auto_cleanup: bool,
-    pub auto_cleanup_keep: u32,
+    pub auto_cleanup_keep: CleanupRetention,
     pub auto_cleanup_interval_secs: u64,
     pub health_check_interval_secs: u64,
     pub fs_warn_threshold_percent: f64,
@@ -243,8 +400,7 @@ pub struct DaemonConfig {
     pub socket_path: PathBuf,
     pub log_level: String,
     pub auto_cleanup: bool,
-    /// Number of recent unpinned snapshots to keep during auto-cleanup (pinned snapshots are excluded from this count)
-    pub auto_cleanup_keep: u32,
+    pub auto_cleanup_keep: CleanupRetention,
     /// Interval in seconds between auto-cleanup runs
     pub auto_cleanup_interval_secs: u64,
     /// Interval in seconds between health checks
@@ -280,8 +436,14 @@ impl DaemonConfig {
 }
 
 pub const DEFAULT_AUTO_CLEANUP: bool = false;
-pub const DEFAULT_AUTO_CLEANUP_KEEP: u32 = 20;
-pub const DEFAULT_AUTO_CLEANUP_INTERVAL_SECS: u64 = 600;
+/// Default count for `CleanupRetention::Count` when no retention is configured.
+pub const DEFAULT_AUTO_CLEANUP_KEEP_COUNT: u32 = 20;
+/// Factory for the default `CleanupRetention` (Count mode, 20 snapshots).
+pub fn default_auto_cleanup_keep() -> CleanupRetention {
+    CleanupRetention::Count(DEFAULT_AUTO_CLEANUP_KEEP_COUNT)
+}
+/// Default interval between auto-cleanup runs: 24 hours (86_400 seconds).
+pub const DEFAULT_AUTO_CLEANUP_INTERVAL_SECS: u64 = 86_400;
 pub const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 300;
 
 // ── Config file ──
@@ -328,7 +490,7 @@ impl Default for BackendConfig {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct FileConfig {
     pub auto_cleanup: Option<bool>,
-    pub auto_cleanup_keep: Option<u32>,
+    pub auto_cleanup_keep: Option<CleanupRetention>,
     pub auto_cleanup_interval_secs: Option<u64>,
     pub health_check_interval_secs: Option<u64>,
     /// Filesystem usage warning threshold (percentage, 0-100)
@@ -370,7 +532,7 @@ impl Default for DaemonConfig {
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
             log_level: "info".to_string(),
             auto_cleanup: DEFAULT_AUTO_CLEANUP,
-            auto_cleanup_keep: DEFAULT_AUTO_CLEANUP_KEEP,
+            auto_cleanup_keep: default_auto_cleanup_keep(),
             auto_cleanup_interval_secs: DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
             health_check_interval_secs: DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
             backend_type: "auto".to_string(),
@@ -1092,8 +1254,8 @@ mod tests {
                 socket_path: "/run/ws-ckpt/ws-ckpt.sock".to_string(),
                 log_level: "info".to_string(),
                 auto_cleanup: false,
-                auto_cleanup_keep: 20,
-                auto_cleanup_interval_secs: 600,
+                auto_cleanup_keep: CleanupRetention::Count(20),
+                auto_cleanup_interval_secs: 86_400,
                 health_check_interval_secs: 300,
                 fs_warn_threshold_percent: 90.0,
                 img_path: "/data/ws-ckpt/btrfs-data.img".to_string(),
@@ -1105,8 +1267,8 @@ mod tests {
         match decoded {
             Response::ConfigOk { config } => {
                 assert_eq!(config.mount_path, "/mnt/btrfs-workspace");
-                assert_eq!(config.auto_cleanup_keep, 20);
-                assert_eq!(config.auto_cleanup_interval_secs, 600);
+                assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(20));
+                assert_eq!(config.auto_cleanup_interval_secs, 86_400);
             }
             _ => panic!("expected ConfigOk variant"),
         }
@@ -1131,7 +1293,7 @@ mod tests {
     #[test]
     fn file_config_toml_round_trip() {
         let fc = FileConfig {
-            auto_cleanup_keep: Some(30),
+            auto_cleanup_keep: Some(CleanupRetention::Count(30)),
             auto_cleanup_interval_secs: Some(300),
             health_check_interval_secs: Some(180),
             ..Default::default()
@@ -1142,12 +1304,75 @@ mod tests {
     }
 
     #[test]
+    fn file_config_toml_age_mode_round_trip() {
+        let fc = FileConfig {
+            auto_cleanup_keep: Some(CleanupRetention::age("30d").unwrap()),
+            ..Default::default()
+        };
+        let s = toml::to_string(&fc).unwrap();
+        let parsed: FileConfig = toml::from_str(&s).unwrap();
+        assert_eq!(parsed, fc);
+    }
+
+    #[test]
+    fn file_config_toml_rejects_invalid_age_string() {
+        // Bare number (missing unit suffix)
+        let err = toml::from_str::<FileConfig>("auto_cleanup_keep = \"10\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("missing unit suffix"),
+            "expected missing-unit error, got: {}",
+            err
+        );
+        // Unknown unit
+        let err = toml::from_str::<FileConfig>("auto_cleanup_keep = \"30x\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("invalid unit"),
+            "expected invalid-unit error, got: {}",
+            err
+        );
+        // Garbage
+        let err = toml::from_str::<FileConfig>("auto_cleanup_keep = \"abc\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("invalid number"),
+            "expected invalid-number error, got: {}",
+            err
+        );
+    }
+
+    #[test]
     fn file_config_partial_toml() {
         let s = "auto_cleanup_keep = 50\n";
         let fc: FileConfig = toml::from_str(s).unwrap();
-        assert_eq!(fc.auto_cleanup_keep, Some(50));
+        assert_eq!(fc.auto_cleanup_keep, Some(CleanupRetention::Count(50)));
         assert_eq!(fc.auto_cleanup_interval_secs, None);
         assert_eq!(fc.health_check_interval_secs, None);
+    }
+
+    #[test]
+    fn file_config_age_mode_toml() {
+        let s = "auto_cleanup_keep = \"2w\"\n";
+        let fc: FileConfig = toml::from_str(s).unwrap();
+        assert_eq!(
+            fc.auto_cleanup_keep,
+            Some(CleanupRetention::age("2w").unwrap())
+        );
+    }
+
+    #[test]
+    fn parse_duration_accepts_units() {
+        assert_eq!(parse_duration_secs("30s").unwrap(), 30);
+        assert_eq!(parse_duration_secs("5m").unwrap(), 300);
+        assert_eq!(parse_duration_secs("2h").unwrap(), 7200);
+        assert_eq!(parse_duration_secs("30d").unwrap(), 2_592_000);
+        assert_eq!(parse_duration_secs("2w").unwrap(), 1_209_600);
+    }
+
+    #[test]
+    fn parse_duration_rejects_bad_input() {
+        assert!(parse_duration_secs("").is_err());
+        assert!(parse_duration_secs("30").is_err()); // missing unit
+        assert!(parse_duration_secs("abc").is_err());
+        assert!(parse_duration_secs("30y").is_err()); // year not supported
     }
 
     #[test]
@@ -1167,7 +1392,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let fc = FileConfig {
-            auto_cleanup_keep: Some(15),
+            auto_cleanup_keep: Some(CleanupRetention::Count(15)),
             auto_cleanup_interval_secs: Some(120),
             health_check_interval_secs: Some(60),
             ..Default::default()
@@ -1182,7 +1407,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sub").join("dir").join("config.toml");
         let fc = FileConfig {
-            auto_cleanup_keep: Some(5),
+            auto_cleanup_keep: Some(CleanupRetention::Count(5)),
             auto_cleanup_interval_secs: None,
             health_check_interval_secs: None,
             ..Default::default()

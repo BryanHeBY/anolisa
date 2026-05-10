@@ -1,9 +1,9 @@
 use crate::state::DaemonState;
 use std::sync::Arc;
 use ws_ckpt_common::{
-    load_config_file, ConfigReport, ErrorCode, Request, Response, StatusReport, WorkspaceInfo,
-    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
-    DEFAULT_AUTO_CLEANUP_KEEP, DEFAULT_FS_WARN_THRESHOLD_PERCENT,
+    default_auto_cleanup_keep, load_config_file, ConfigReport, ErrorCode, Request, Response,
+    StatusReport, WorkspaceInfo, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
+    DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_FS_WARN_THRESHOLD_PERCENT,
     DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
 };
 
@@ -212,7 +212,7 @@ fn handle_config(state: &Arc<DaemonState>) -> Response {
             socket_path: state.socket_path.to_string_lossy().to_string(),
             log_level: cfg.log_level.clone(),
             auto_cleanup: cfg.auto_cleanup,
-            auto_cleanup_keep: cfg.auto_cleanup_keep,
+            auto_cleanup_keep: cfg.auto_cleanup_keep.clone(),
             auto_cleanup_interval_secs: cfg.auto_cleanup_interval_secs,
             health_check_interval_secs: cfg.health_check_interval_secs,
             fs_warn_threshold_percent: cfg.fs_warn_threshold_percent,
@@ -236,7 +236,8 @@ fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
             cfg.auto_cleanup = file_config.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP);
             cfg.auto_cleanup_keep = file_config
                 .auto_cleanup_keep
-                .unwrap_or(DEFAULT_AUTO_CLEANUP_KEEP);
+                .clone()
+                .unwrap_or_else(default_auto_cleanup_keep);
             cfg.auto_cleanup_interval_secs = file_config
                 .auto_cleanup_interval_secs
                 .unwrap_or(DEFAULT_AUTO_CLEANUP_INTERVAL_SECS);
@@ -309,7 +310,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use ws_ckpt_common::backend::StorageBackend;
-    use ws_ckpt_common::{DaemonConfig, ErrorCode, Request, Response};
+    use ws_ckpt_common::{CleanupRetention, DaemonConfig, ErrorCode, Request, Response};
 
     fn test_backend() -> Arc<dyn StorageBackend> {
         // Use BtrfsBase to avoid triggering lazy bootstrap in dispatch tests
@@ -325,8 +326,8 @@ mod tests {
             socket_path: PathBuf::from("/tmp/test.sock"),
             log_level: "info".to_string(),
             auto_cleanup: false,
-            auto_cleanup_keep: 20,
-            auto_cleanup_interval_secs: 600,
+            auto_cleanup_keep: CleanupRetention::Count(20),
+            auto_cleanup_interval_secs: 86_400,
             health_check_interval_secs: 300,
             backend_type: "auto".to_string(),
             fs_warn_threshold_percent: 90.0,
@@ -599,8 +600,8 @@ mod tests {
         match resp {
             Response::ConfigOk { config } => {
                 assert_eq!(config.mount_path, "/tmp/test-mount");
-                assert_eq!(config.auto_cleanup_keep, 20);
-                assert_eq!(config.auto_cleanup_interval_secs, 600);
+                assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(20));
+                assert_eq!(config.auto_cleanup_interval_secs, 86_400);
             }
             _ => panic!("expected ConfigOk, got {:?}", resp),
         }

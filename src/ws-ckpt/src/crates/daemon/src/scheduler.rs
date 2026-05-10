@@ -8,6 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::btrfs_ops;
 use crate::state::DaemonState;
+use ws_ckpt_common::CleanupRetention;
 
 /// Start background scheduler tasks: orphan cleanup on boot, periodic auto-cleanup,
 /// and periodic health checks.
@@ -42,17 +43,21 @@ pub fn start_scheduler(state: Arc<DaemonState>) {
     info!("Background scheduler started");
 }
 
-/// Auto-cleanup loop. Re-reads `auto_cleanup` and `auto_cleanup_interval_secs`
-/// at the top of every iteration. Disabled state parks on `config_notify`; an
-/// active interval races `sleep` against `config_notify` so a reload takes
-/// effect immediately instead of on the next tick boundary.
+/// Auto-cleanup loop: each iteration re-reads `auto_cleanup`,
+/// `auto_cleanup_interval_secs`, and `auto_cleanup_keep.is_disabled()`.
+/// Disabled parks on `config_notify`; active races `sleep` vs `config_notify`
+/// for immediate reload.
 async fn auto_cleanup_loop(state: Arc<DaemonState>) {
     loop {
-        let (enabled, interval) = {
+        let (enabled, interval, keep_disabled) = {
             let cfg = state.config.read().unwrap();
-            (cfg.auto_cleanup, cfg.auto_cleanup_interval_secs)
+            (
+                cfg.auto_cleanup,
+                cfg.auto_cleanup_interval_secs,
+                cfg.auto_cleanup_keep.is_disabled(),
+            )
         };
-        if !enabled || interval == 0 {
+        if !enabled || interval == 0 || keep_disabled {
             // Disabled: block until a reload arrives, then re-check.
             state.config_notify.notified().await;
             continue;
@@ -140,13 +145,25 @@ pub async fn cleanup_orphans(mount_path: &Path) -> Result<Vec<String>, anyhow::E
     Ok(cleaned)
 }
 
-/// Auto-cleanup: iterate all workspaces and remove old unpinned snapshots.
-/// The keep count is read from `state.config.auto_cleanup_keep`.
-/// Pinned snapshots are excluded from the count and always preserved.
+/// Auto-cleanup: purge non-pinned snapshots per `CleanupRetention` (pinned always kept).
+/// - `Count(n)`: keep n newest per workspace.
+/// - `Age { secs, .. }`: delete if older than `secs` (strict, no count floor).
+///
+/// Caller ([`auto_cleanup_loop`]) filters disabled retention; this function
+/// asserts that invariant in debug builds.
 async fn auto_cleanup(state: &DaemonState) {
-    let keep = state.config.read().unwrap().auto_cleanup_keep as usize;
-    info!("Running auto-cleanup (keep={})...", keep);
+    let retention = {
+        let cfg = state.config.read().unwrap();
+        cfg.auto_cleanup_keep.clone()
+    };
+    debug_assert!(
+        !retention.is_disabled(),
+        "caller must filter disabled retention"
+    );
+
+    info!("Running auto-cleanup (retention={})...", retention);
     let all_ws = state.all_workspaces();
+    let now = chrono::Utc::now();
 
     for ws_arc in &all_ws {
         let mut ws = ws_arc.write().await;
@@ -162,14 +179,34 @@ async fn auto_cleanup(state: &DaemonState) {
             .collect();
         unpinned.sort_by_key(|(_, ts)| *ts);
 
-        if unpinned.len() <= keep {
+        // Pick victims according to the active mode
+        let to_remove: Vec<String> = match &retention {
+            CleanupRetention::Count(n) => {
+                let keep = *n as usize;
+                if unpinned.len() <= keep {
+                    continue;
+                }
+                unpinned[..unpinned.len() - keep]
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            }
+            CleanupRetention::Age { secs, .. } => {
+                let cutoff = now - chrono::Duration::seconds(*secs as i64);
+                unpinned
+                    .iter()
+                    .filter(|(_, ts)| *ts < cutoff)
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            }
+        };
+
+        if to_remove.is_empty() {
             continue;
         }
 
-        let to_remove = &unpinned[..unpinned.len() - keep];
         let mut removed_count = 0;
-
-        for (snap_id, _) in to_remove {
+        for snap_id in &to_remove {
             let snap_path = snap_dir.join(snap_id);
             match btrfs_ops::delete_subvolume(&snap_path).await {
                 Ok(()) => {

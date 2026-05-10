@@ -356,7 +356,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use ws_ckpt_common::backend::StorageBackend;
-    use ws_ckpt_common::{DaemonConfig, ErrorCode, SnapshotIndex};
+    use ws_ckpt_common::{CleanupRetention, DaemonConfig, ErrorCode, SnapshotIndex};
 
     fn test_backend() -> Arc<dyn StorageBackend> {
         Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
@@ -371,8 +371,8 @@ mod tests {
             socket_path: PathBuf::from("/tmp/test.sock"),
             log_level: "info".to_string(),
             auto_cleanup: false,
-            auto_cleanup_keep: 20,
-            auto_cleanup_interval_secs: 600,
+            auto_cleanup_keep: CleanupRetention::Count(20),
+            auto_cleanup_interval_secs: 86_400,
             health_check_interval_secs: 300,
             backend_type: "auto".to_string(),
             fs_warn_threshold_percent: 90.0,
@@ -511,8 +511,8 @@ mod tests {
             socket_path: PathBuf::from("/tmp/test.sock"),
             log_level: "info".to_string(),
             auto_cleanup: false,
-            auto_cleanup_keep: 20,
-            auto_cleanup_interval_secs: 600,
+            auto_cleanup_keep: CleanupRetention::Count(20),
+            auto_cleanup_interval_secs: 86_400,
             health_check_interval_secs: 300,
             backend_type: "auto".to_string(),
             fs_warn_threshold_percent: 90.0,

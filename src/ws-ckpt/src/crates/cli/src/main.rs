@@ -8,9 +8,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use ws_ckpt_common::{
-    decode_payload, encode_frame, load_config_file, save_config_file, ChangeType, DaemonConfig,
-    ErrorCode, Request, Response, BTRFS_IMG_PATH, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
-    DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_AUTO_CLEANUP_KEEP,
+    decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
+    ChangeType, CleanupRetention, DaemonConfig, ErrorCode, Request, Response, BTRFS_IMG_PATH,
+    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
     DEFAULT_FS_WARN_THRESHOLD_PERCENT, DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT,
     DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
 };
@@ -211,7 +211,8 @@ async fn run(cli: Cli) -> Result<()> {
                 auto_cleanup: file_config.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP),
                 auto_cleanup_keep: file_config
                     .auto_cleanup_keep
-                    .unwrap_or(DEFAULT_AUTO_CLEANUP_KEEP),
+                    .clone()
+                    .unwrap_or_else(default_auto_cleanup_keep),
                 auto_cleanup_interval_secs: file_config
                     .auto_cleanup_interval_secs
                     .unwrap_or(DEFAULT_AUTO_CLEANUP_INTERVAL_SECS),
@@ -710,7 +711,14 @@ fn handle_config_view() -> Result<()> {
     let fc = load_config_file(path).map_err(|e| anyhow::anyhow!("Failed to read config: {}", e))?;
 
     let auto_cleanup = fc.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP);
-    let keep = fc.auto_cleanup_keep.unwrap_or(DEFAULT_AUTO_CLEANUP_KEEP);
+    let keep = fc
+        .auto_cleanup_keep
+        .clone()
+        .unwrap_or_else(default_auto_cleanup_keep);
+    let keep_display = match &keep {
+        CleanupRetention::Count(n) => format!("{} (count mode)", n),
+        CleanupRetention::Age { raw, .. } => format!("\"{}\" (age mode)", raw),
+    };
     let interval = fc
         .auto_cleanup_interval_secs
         .unwrap_or(DEFAULT_AUTO_CLEANUP_INTERVAL_SECS);
@@ -749,7 +757,7 @@ fn handle_config_view() -> Result<()> {
     );
     println!(
         "  Auto-cleanup keep:       {}{}",
-        keep,
+        keep_display,
         if fc.auto_cleanup_keep.is_none() {
             " (default)"
         } else {

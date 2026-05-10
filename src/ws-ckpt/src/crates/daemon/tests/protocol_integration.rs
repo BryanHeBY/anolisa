@@ -9,8 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 use ws_ckpt_common::{
-    decode_payload, encode_frame, ChangeType, ConfigReport, DiffEntry, Request, Response,
-    SnapshotEntry, SnapshotMeta, StatusReport, WorkspaceInfo,
+    decode_payload, encode_frame, ChangeType, CleanupRetention, ConfigReport, DiffEntry, Request,
+    Response, SnapshotEntry, SnapshotMeta, StatusReport, WorkspaceInfo,
 };
 
 /// Helper: create a temporary socket path using tempfile
@@ -90,8 +90,8 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 socket_path: "/run/ws-ckpt/ws-ckpt.sock".to_string(),
                 log_level: "info".to_string(),
                 auto_cleanup: false,
-                auto_cleanup_keep: 20,
-                auto_cleanup_interval_secs: 600,
+                auto_cleanup_keep: CleanupRetention::Count(20),
+                auto_cleanup_interval_secs: 86_400,
                 health_check_interval_secs: 300,
                 fs_warn_threshold_percent: 90.0,
                 img_path: "/data/ws-ckpt/btrfs-data.img".to_string(),
@@ -477,8 +477,8 @@ async fn full_config_request_response_over_socket() {
     let response: Response = decode_payload(&payload).unwrap();
     match response {
         Response::ConfigOk { config } => {
-            assert_eq!(config.auto_cleanup_keep, 20);
-            assert_eq!(config.auto_cleanup_interval_secs, 600);
+            assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(20));
+            assert_eq!(config.auto_cleanup_interval_secs, 86_400);
         }
         _ => panic!("expected ConfigOk, got {:?}", response),
     }
