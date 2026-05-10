@@ -15,9 +15,15 @@ use ws_ckpt_common::{
     DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
 };
 
-// Note: auto-cleanup feature is disabled. The --auto-cleanup-keep and
-// --auto-cleanup-interval CLI flags have been removed. The internal config
-// fields are preserved for future re-enablement.
+// Parse CLI value for `--auto-cleanup-keep`: integer -> Count mode, duration
+// string (e.g. "30d", units s/m/h/d/w) -> Age mode. Mirrors TOML semantics in
+// `CleanupRetention::deserialize`.
+fn parse_cleanup_retention(s: &str) -> Result<CleanupRetention, String> {
+    if let Ok(n) = s.parse::<u32>() {
+        return Ok(CleanupRetention::Count(n));
+    }
+    CleanupRetention::age(s).map_err(|e| format!("invalid value '{}': {}", s, e))
+}
 
 #[derive(Parser)]
 #[command(name = "ws-ckpt", version, about = "btrfs workspace snapshot manager")]
@@ -145,7 +151,7 @@ enum Commands {
 
     /// View or update daemon configuration
     Config {
-        /// Set health check interval in seconds
+        /// Set health check interval in seconds (0 disables the scheduler loop)
         #[arg(long)]
         health_check_interval: Option<u64>,
 
@@ -160,6 +166,22 @@ enum Commands {
         /// Set initial-creation cap as percentage of host partition (0-100); only used on first bootstrap
         #[arg(long)]
         img_max_percent: Option<f64>,
+
+        /// Enable periodic auto-cleanup
+        #[arg(long, conflicts_with = "disable_auto_cleanup")]
+        enable_auto_cleanup: bool,
+
+        /// Disable periodic auto-cleanup
+        #[arg(long, conflicts_with = "enable_auto_cleanup")]
+        disable_auto_cleanup: bool,
+
+        /// Set cleanup retention: integer (count mode, 0 = disabled) or duration like "30d" (age mode, units s/m/h/d/w)
+        #[arg(long, value_parser = parse_cleanup_retention)]
+        auto_cleanup_keep: Option<CleanupRetention>,
+
+        /// Set auto-cleanup interval in seconds (0 disables the scheduler loop)
+        #[arg(long)]
+        auto_cleanup_interval: Option<u64>,
     },
 
     /// Trigger daemon to reload /etc/ws-ckpt/config.toml
@@ -334,11 +356,23 @@ async fn run(cli: Cli) -> Result<()> {
             fs_warn_threshold_percent,
             img_size,
             img_max_percent,
+            enable_auto_cleanup,
+            disable_auto_cleanup,
+            auto_cleanup_keep,
+            auto_cleanup_interval,
         } => {
+            let auto_cleanup = match (enable_auto_cleanup, disable_auto_cleanup) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
             if health_check_interval.is_none()
                 && fs_warn_threshold_percent.is_none()
                 && img_size.is_none()
                 && img_max_percent.is_none()
+                && auto_cleanup.is_none()
+                && auto_cleanup_keep.is_none()
+                && auto_cleanup_interval.is_none()
             {
                 // View mode: read config file and show
                 handle_config_view()?;
@@ -349,6 +383,9 @@ async fn run(cli: Cli) -> Result<()> {
                     fs_warn_threshold_percent,
                     img_size,
                     img_max_percent,
+                    auto_cleanup,
+                    auto_cleanup_keep,
+                    auto_cleanup_interval,
                 )
                 .await?;
             }
@@ -830,6 +867,9 @@ async fn handle_config_update(
     fs_warn_threshold_percent: Option<f64>,
     img_size: Option<u64>,
     img_max_percent: Option<f64>,
+    auto_cleanup: Option<bool>,
+    auto_cleanup_keep: Option<CleanupRetention>,
+    auto_cleanup_interval_secs: Option<u64>,
 ) -> Result<()> {
     let path = std::path::Path::new(CONFIG_FILE_PATH);
 
@@ -843,6 +883,15 @@ async fn handle_config_update(
     }
     if let Some(threshold) = fs_warn_threshold_percent {
         fc.fs_warn_threshold_percent = Some(threshold);
+    }
+    if let Some(v) = auto_cleanup {
+        fc.auto_cleanup = Some(v);
+    }
+    if let Some(v) = auto_cleanup_keep {
+        fc.auto_cleanup_keep = Some(v);
+    }
+    if let Some(v) = auto_cleanup_interval_secs {
+        fc.auto_cleanup_interval_secs = Some(v);
     }
     // Record whether any btrfs-loop image settings are being changed,
     // as these only take effect at daemon bootstrap (not on reload).
@@ -873,7 +922,7 @@ async fn handle_config_update(
         Ok(Response::ReloadConfigOk) => {
             println!("\x1b[32m\u{2713} Daemon reloaded configuration\x1b[0m");
             if has_img_settings {
-                println!("\x1b[33m\u{26a0} Note: btrfs-loop image settings (img-path, img-min-size-gb, img-capacity-percent) require daemon restart to take effect.\x1b[0m");
+                println!("\x1b[33m\u{26a0} Note: btrfs-loop image settings (img-size, img-max-percent) require daemon restart to take effect.\x1b[0m");
             }
         }
         Ok(Response::Error { message, .. }) => {
@@ -1511,6 +1560,7 @@ mod tests {
                 fs_warn_threshold_percent,
                 img_size,
                 img_max_percent,
+                ..
             } => {
                 assert!(health_check_interval.is_none());
                 assert!(fs_warn_threshold_percent.is_none());
@@ -1542,6 +1592,7 @@ mod tests {
                 fs_warn_threshold_percent,
                 img_size,
                 img_max_percent,
+                ..
             } => {
                 assert_eq!(health_check_interval, Some(120));
                 assert_eq!(fs_warn_threshold_percent, Some(85.0));
@@ -1565,18 +1616,118 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_rejects_removed_auto_cleanup_flags() {
-        // --auto-cleanup-keep and --auto-cleanup-interval are no longer exposed
-        let result = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-keep", "30"]);
+    fn parse_config_enable_auto_cleanup() {
+        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--enable-auto-cleanup"]).unwrap();
+        match cli.command {
+            Commands::Config {
+                enable_auto_cleanup,
+                disable_auto_cleanup,
+                ..
+            } => {
+                assert!(enable_auto_cleanup);
+                assert!(!disable_auto_cleanup);
+            }
+            _ => panic!("expected Config"),
+        }
+    }
+
+    #[test]
+    fn parse_config_disable_auto_cleanup() {
+        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--disable-auto-cleanup"]).unwrap();
+        match cli.command {
+            Commands::Config {
+                enable_auto_cleanup,
+                disable_auto_cleanup,
+                ..
+            } => {
+                assert!(!enable_auto_cleanup);
+                assert!(disable_auto_cleanup);
+            }
+            _ => panic!("expected Config"),
+        }
+    }
+
+    #[test]
+    fn parse_config_enable_disable_conflict() {
+        let result = Cli::try_parse_from([
+            "ws-ckpt",
+            "config",
+            "--enable-auto-cleanup",
+            "--disable-auto-cleanup",
+        ]);
         assert!(
             result.is_err(),
-            "--auto-cleanup-keep should no longer be accepted"
+            "--enable-auto-cleanup and --disable-auto-cleanup must be mutually exclusive"
         );
-        let result = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-interval", "600"]);
+    }
+
+    #[test]
+    fn parse_config_auto_cleanup_keep_count() {
+        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-keep", "20"]).unwrap();
+        match cli.command {
+            Commands::Config {
+                auto_cleanup_keep, ..
+            } => {
+                assert_eq!(auto_cleanup_keep, Some(CleanupRetention::Count(20)));
+            }
+            _ => panic!("expected Config"),
+        }
+    }
+
+    #[test]
+    fn parse_config_auto_cleanup_keep_zero_disables() {
+        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-keep", "0"]).unwrap();
+        match cli.command {
+            Commands::Config {
+                auto_cleanup_keep, ..
+            } => {
+                let keep = auto_cleanup_keep.expect("keep should be set");
+                assert!(keep.is_disabled());
+                assert_eq!(keep, CleanupRetention::Count(0));
+            }
+            _ => panic!("expected Config"),
+        }
+    }
+
+    #[test]
+    fn parse_config_auto_cleanup_keep_age() {
+        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-keep", "30d"]).unwrap();
+        match cli.command {
+            Commands::Config {
+                auto_cleanup_keep, ..
+            } => match auto_cleanup_keep {
+                Some(CleanupRetention::Age { raw, secs }) => {
+                    assert_eq!(raw, "30d");
+                    assert_eq!(secs, 30 * 24 * 3600);
+                }
+                other => panic!("expected Age variant, got {:?}", other),
+            },
+            _ => panic!("expected Config"),
+        }
+    }
+
+    #[test]
+    fn parse_config_auto_cleanup_keep_invalid() {
+        let result = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-keep", "abc"]);
         assert!(
             result.is_err(),
-            "--auto-cleanup-interval should no longer be accepted"
+            "non-numeric value without duration unit should be rejected"
         );
+    }
+
+    #[test]
+    fn parse_config_auto_cleanup_interval() {
+        let cli =
+            Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-interval", "3600"]).unwrap();
+        match cli.command {
+            Commands::Config {
+                auto_cleanup_interval,
+                ..
+            } => {
+                assert_eq!(auto_cleanup_interval, Some(3600));
+            }
+            _ => panic!("expected Config"),
+        }
     }
 
     // ── Recover CLI parsing tests ──
