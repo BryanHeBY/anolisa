@@ -50,7 +50,7 @@ dev = [
     "maturin>=1.0,<2.0",
     "pytest>=7.0",
     "pytest-cov",
-    "ruff",
+    "ruff>=0.11",
 ]
 
 [project.scripts]
@@ -101,6 +101,46 @@ exclude_lines = [
 
 [tool.coverage.xml]
 output = "coverage.xml"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = ["**/backend-skill/templates"]
+
+[tool.ruff.lint]
+select = [
+    "F",        # pyflakes
+    "E", "W",   # pycodestyle
+    "I",        # isort
+    "TID252",   # 禁止相对导入
+    "PLC0415",  # 禁止函数体内导入
+    "ANN001",   # 函数参数必须标注类型
+    "ANN201",   # 公有函数必须标注返回类型
+    "ANN202",   # 私有函数必须标注返回类型
+    "S602",     # 禁止 subprocess shell=True
+    "S605",     # 禁止 os.system()
+    "S606",     # 禁止 os.popen()
+    "S108",     # 禁止硬编码 /tmp 路径
+    "PLW1510",  # subprocess.run() 必须指定 check
+    "SIM115",   # open() 必须使用 with
+    "B006",     # 禁止可变默认参数
+    "B008",     # 禁止默认参数中调用函数
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent_sec_cli"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"importlib.import_module".msg = "禁止动态导入（若为 lazy import 请加 # noqa: TID251）"
+"builtins.__import__".msg = "禁止动态导入（若为 lazy import 请加 # noqa: TID251）"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "S"]
 
 [tool.black]
 line-length = 100

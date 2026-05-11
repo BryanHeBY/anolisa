@@ -8,6 +8,18 @@ python-code-pretty: ## Format Python code using black and isort
 	@uv run --project agent-sec-cli isort --profile black --skip-glob "*/backend-skill/templates/*" .
 	@uv run --project agent-sec-cli black --force-exclude "backend-skill/templates/" .
 
+.PHONY: python-lint
+python-lint: ## Run ruff lint check on all Python code (no fix)
+	@echo "🔍 Running ruff lint check..."
+	@uv run --project agent-sec-cli ruff check --config agent-sec-cli/pyproject.toml .
+
+.PHONY: python-lint-ci
+python-lint-ci: ## Run incremental ruff lint check (only changed lines vs main, non-blocking)
+	@echo "🔍 Running incremental ruff lint check (diff-quality)..."
+	@uv run --project agent-sec-cli ruff check --config agent-sec-cli/pyproject.toml --output-format=concise . > ruff_report.txt || true
+	@diff-quality --violations=flake8 ruff_report.txt || true
+	@rm -f ruff_report.txt
+
 # =============================================================================
 # BENCHMARK
 # =============================================================================

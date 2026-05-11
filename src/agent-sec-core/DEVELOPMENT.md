@@ -61,9 +61,26 @@
 
 - 空函数/抽象方法使用 `pass` 占位，不使用 `...`（Ellipsis）
 
-## 9. 代码格式化
+## 9. 代码格式化与 Lint
+
+- **格式化**: 使用 [black](https://black.readthedocs.io/) + [isort](https://pycqa.github.io/isort/)（保持现有风格不变）
+- **静态检查**: 使用 [ruff](https://docs.astral.sh/ruff/) 进行 lint（仅对增量代码卡点）
 
 ```bash
 # 从 agent-sec-core 目录
-make python-code-pretty
+make python-code-pretty   # 格式化（black + isort）
+make python-lint          # 全量 ruff lint 检查（不修改文件）
 ```
+
+## 10. CI 检查项
+
+CI 对 Python 代码执行以下检查：
+
+| 检查项 | 范围 | 失败行为 |
+|--------|------|----------|
+| black + isort 格式化 | 全量代码 | 存在未格式化代码则失败 |
+| ruff lint（增量） | 仅 PR 变更行 | 不卡点，违规以 warning 形式显示在 CI Summary |
+| `pytest --cov` | 全量测试 | 测试失败则失败 |
+| `uv lock --check` | 依赖锁文件 | uv.lock 与 pyproject.toml 不同步则失败 |
+
+> **重要**: Lint 检查仅在 PR 触发时对增量代码卡点，不检查历史代码。
