@@ -710,7 +710,13 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                         .max(hdr_ws.len());
                     let w_snap = snapshots
                         .iter()
-                        .map(|e| e.id.len())
+                        .map(|e| {
+                            if e.meta.missing {
+                                e.id.len() + " [MISSING]".len()
+                            } else {
+                                e.id.len()
+                            }
+                        })
                         .max()
                         .unwrap_or(0)
                         .max(hdr_snap.len());
@@ -722,10 +728,15 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
                     );
                     println!("{}", "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 3));
                     for entry in &snapshots {
+                        let id_display = if entry.meta.missing {
+                            format!("{} [MISSING]", entry.id)
+                        } else {
+                            entry.id.clone()
+                        };
                         println!(
                             "{:<w_ws$} {:<w_snap$} {:<w_date$} {}",
                             entry.workspace,
-                            entry.id,
+                            id_display,
                             entry.meta.created_at.format("%Y-%m-%d %H:%M:%S"),
                             entry.meta.message.as_deref().unwrap_or("-"),
                         );

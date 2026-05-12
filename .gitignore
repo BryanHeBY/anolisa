@@ -40,3 +40,4 @@ rpmbuild/
 .env.local
 
 .qoder/
+.claude/

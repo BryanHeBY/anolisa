@@ -59,6 +59,7 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                     metadata: None,
                     pinned: false,
                     created_at: chrono::Utc::now(),
+                    missing: false,
                 },
             }],
         },

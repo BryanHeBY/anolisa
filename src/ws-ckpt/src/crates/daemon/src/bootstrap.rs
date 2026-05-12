@@ -6,9 +6,15 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::state::DaemonState;
+use ws_ckpt_common::persist::{BackendPaths, LoopImgState};
 use ws_ckpt_common::{DaemonConfig, SNAPSHOTS_DIR};
 
-pub async fn bootstrap(config: &DaemonConfig) -> anyhow::Result<()> {
+/// Bootstrap result, carries backend path info for back-filling state.json
+pub struct BootstrapResult {
+    pub paths: BackendPaths,
+}
+
+pub async fn bootstrap(config: &DaemonConfig) -> anyhow::Result<BootstrapResult> {
     // Derive image directory from configured image path. We deliberately
     // do NOT fall back to a hard-coded path on None/empty parent: a bare
     // filename in `img_path` is a configuration bug and silently writing
@@ -139,7 +145,26 @@ pub async fn bootstrap(config: &DaemonConfig) -> anyhow::Result<()> {
     cleanup_orphans(&config.mount_path).await;
 
     info!("Bootstrap complete");
-    Ok(())
+
+    // Build BackendPaths for the return value
+    let mount_path = config.mount_path.clone();
+    let loop_img = Some(LoopImgState {
+        img_path: PathBuf::from(&config.img_path),
+        img_size_bytes: tokio::fs::metadata(&config.img_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0),
+        last_loop_device: find_loop_device_for(&config.img_path).await.ok(),
+    });
+
+    Ok(BootstrapResult {
+        paths: BackendPaths::BtrfsLoop {
+            mount_path: mount_path.clone(),
+            data_root: mount_path.clone(),
+            snapshots_root: snapshots_dir,
+            loop_img,
+        },
+    })
 }
 
 /// Ensure all registered workspaces have valid symlinks.

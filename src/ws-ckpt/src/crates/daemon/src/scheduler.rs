@@ -167,7 +167,20 @@ async fn auto_cleanup(state: &DaemonState) {
 
     for ws_arc in &all_ws {
         let mut ws = ws_arc.write().await;
-        let snap_dir = state.backend.snapshots_root().join(&ws.ws_id);
+        let ws_id = ws.ws_id.clone();
+
+        // index storage directory (for saving index.json)
+        let index_dir = state.index_dir(&ws_id);
+        if let Err(e) = tokio::fs::create_dir_all(&index_dir).await {
+            warn!(
+                "auto-cleanup: failed to create index directory {:?}: {}",
+                index_dir, e
+            );
+            continue;
+        }
+
+        // btrfs snapshot subvolume root directory (for actually deleting subvolumes)
+        let snapshots_ws_dir = state.backend.snapshots_root().join(&ws_id);
 
         // Collect non-pinned snapshots sorted by created_at ascending
         let mut unpinned: Vec<(String, chrono::DateTime<chrono::Utc>)> = ws
@@ -207,7 +220,7 @@ async fn auto_cleanup(state: &DaemonState) {
 
         let mut removed_count = 0;
         for snap_id in &to_remove {
-            let snap_path = snap_dir.join(snap_id);
+            let snap_path = snapshots_ws_dir.join(snap_id);
             match btrfs_ops::delete_subvolume(&snap_path).await {
                 Ok(()) => {
                     ws.index.snapshots.remove(snap_id);
@@ -220,15 +233,18 @@ async fn auto_cleanup(state: &DaemonState) {
         }
 
         if removed_count > 0 {
-            if let Err(e) = crate::index_store::save(&snap_dir, &ws.index).await {
-                warn!(
-                    "auto-cleanup: failed to save index for {}: {:#}",
-                    ws.ws_id, e
-                );
+            if let Err(e) = crate::index_store::save(&index_dir, &ws.index).await {
+                warn!("auto-cleanup: failed to save index for {}: {:#}", ws_id, e);
+            }
+            // Release write lock before save_manifest() so that
+            // collect_workspace_entries() can acquire a read lock on this workspace.
+            drop(ws);
+            if let Err(e) = state.save_manifest().await {
+                warn!("save_manifest failed after auto-cleanup: {:#}", e);
             }
             info!(
                 "auto-cleanup: removed {} snapshots from {}",
-                removed_count, ws.ws_id
+                removed_count, ws_id
             );
         }
     }

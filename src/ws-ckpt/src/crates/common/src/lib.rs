@@ -6,6 +6,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod backend;
+pub mod migration;
+pub mod persist;
 
 use backend::BackendType;
 
@@ -20,6 +22,10 @@ pub const BTRFS_IMG_DIR: &str = "/data/ws-ckpt";
 pub const CONFIG_FILE_PATH: &str = "/etc/ws-ckpt/config.toml";
 pub const DEFAULT_IMG_SIZE_GB: u64 = 30;
 pub const DEFAULT_IMG_MAX_PERCENT: f64 = 0.4; // 40% as fraction for calculation
+pub const DEFAULT_STATE_DIR: &str = "/var/lib/ws-ckpt"; // systemd StateDirectory
+pub const STATE_FILE: &str = "state.json"; // daemon state file
+pub const INDEXES_DIR: &str = "indexes"; // snapshots indexes directory
+pub const LOCKFILE_NAME: &str = "daemon.lock"; // daemon write lockfile
 
 /// Snapshot advisory threshold; strict-greater filter shared by daemon and CLI.
 pub const ADVISORY_SNAPSHOT_LIMIT: u32 = 1000;
@@ -164,6 +170,9 @@ pub struct SnapshotMeta {
     pub metadata: Option<serde_json::Value>,
     pub pinned: bool,
     pub created_at: DateTime<Utc>,
+    /// Is the subvolume missing in the filesystem (detected in reconcile)
+    #[serde(default)]
+    pub missing: bool,
 }
 
 /// A snapshot entry combining its ID with metadata.
@@ -970,6 +979,7 @@ mod tests {
                 metadata: None,
                 pinned: true,
                 created_at: chrono::Utc::now(),
+                missing: false,
             },
         );
         let result = idx.resolve_by_prefix("abcdef1234567890abcdef1234567890abcdef12");
@@ -988,6 +998,7 @@ mod tests {
                 metadata: None,
                 pinned: false,
                 created_at: chrono::Utc::now(),
+                missing: false,
             },
         );
         let result = idx.resolve_by_prefix("abcdef");
@@ -1011,6 +1022,7 @@ mod tests {
                 metadata: None,
                 pinned: false,
                 created_at: chrono::Utc::now(),
+                missing: false,
             },
         );
         idx.snapshots.insert(
@@ -1020,6 +1032,7 @@ mod tests {
                 metadata: None,
                 pinned: false,
                 created_at: chrono::Utc::now(),
+                missing: false,
             },
         );
         let result = idx.resolve_by_prefix("abcdef");
@@ -1196,6 +1209,7 @@ mod tests {
                     metadata: None,
                     pinned: true,
                     created_at: chrono::Utc::now(),
+                    missing: false,
                 },
             }],
         };
@@ -1219,6 +1233,7 @@ mod tests {
                 metadata: None,
                 pinned: false,
                 created_at: chrono::Utc::now(),
+                missing: false,
             },
         };
         let serialized = serde_json::to_string(&entry).unwrap();

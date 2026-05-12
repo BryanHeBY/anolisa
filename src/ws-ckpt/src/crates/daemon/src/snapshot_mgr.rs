@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use tracing::info;
 use ws_ckpt_common::{ErrorCode, ResolveError, Response, SnapshotEntry, SnapshotMeta};
 
@@ -67,7 +68,9 @@ pub async fn checkpoint(
     //    and the health-check scheduler.
 
     // 6. Construct paths
-    let snap_dir = state.backend.snapshots_root().join(&ws.ws_id);
+    let snap_dir = state.index_dir(&ws.ws_id);
+    // make sure index directory exists
+    tokio::fs::create_dir_all(&snap_dir).await?;
 
     // 7. Create readonly snapshot via backend
     state
@@ -85,6 +88,7 @@ pub async fn checkpoint(
         metadata: parsed_metadata,
         pinned: pin,
         created_at: chrono::Utc::now(),
+        missing: false,
     };
 
     // 9. Update index
@@ -92,6 +96,15 @@ pub async fn checkpoint(
 
     // 10. Persist index
     index_store::save(&snap_dir, &ws.index).await?;
+
+    // 10a. Release write lock before save_manifest (try_read inside
+    //      collect_workspace_entries would fail while write lock is held)
+    drop(ws);
+
+    // 10b. Save manifest
+    if let Err(e) = state.save_manifest().await {
+        tracing::warn!("save_manifest failed after checkpoint: {:#}", e);
+    }
 
     // 11. Return success
     Ok(Response::CheckpointOk { snapshot_id })
@@ -128,6 +141,19 @@ pub async fn rollback(
         }
     };
 
+    // 3a. Reject missing snapshots — user must manually delete with --force
+    if ws
+        .index
+        .snapshots
+        .get(&resolved_id)
+        .map_or(false, |s| s.missing)
+    {
+        return Ok(Response::Error {
+            code: ErrorCode::SnapshotNotFound,
+            message: format!("Snapshot '{}' subvolume is missing (data lost). Use 'ws-ckpt delete --force -w <workspace> -s {}' to remove the record.", resolved_id, resolved_id),
+        });
+    }
+
     // 4. Construct paths
     let _abs_path_str = ws.path.to_string_lossy().to_string();
 
@@ -141,7 +167,7 @@ pub async fn rollback(
     })
 }
 
-/// 预热快照元数据缓存 — 转发到 backends::btrfs_common。
+/// Warm up snapshot metadata cache — forwards to backends::btrfs_common.
 pub async fn warmup_snapshot_metadata(snap_path: &Path) {
     crate::backends::btrfs_common::warmup_snapshot_metadata(snap_path).await;
 }
@@ -255,7 +281,11 @@ pub async fn cleanup_snapshots(
     };
 
     let mut ws = arc.write().await;
-    let snap_dir = state.backend.snapshots_root().join(&ws.ws_id);
+    let snap_dir = state.index_dir(&ws.ws_id);
+    // Ensure index directory exists
+    tokio::fs::create_dir_all(&snap_dir)
+        .await
+        .with_context(|| format!("Failed to create index dir: {:?}", snap_dir))?;
 
     // Collect non-pinned snapshots, sorted by created_at ascending (oldest first)
     let mut unpinned: Vec<(String, chrono::DateTime<chrono::Utc>)> = ws
@@ -289,6 +319,16 @@ pub async fn cleanup_snapshots(
     // Save index if any were removed
     if !removed.is_empty() {
         index_store::save(&snap_dir, &ws.index).await?;
+    }
+
+    // Release write lock before save_manifest (try_read inside
+    // collect_workspace_entries would fail while write lock is held)
+    drop(ws);
+
+    if !removed.is_empty() {
+        if let Err(e) = state.save_manifest().await {
+            tracing::warn!("save_manifest failed after cleanup_snapshots: {:#}", e);
+        }
     }
 
     Ok(Response::CleanupOk { removed })
@@ -329,12 +369,17 @@ mod tests {
         }
     }
 
+    fn test_state_dir() -> PathBuf {
+        PathBuf::from("/tmp/test-state")
+    }
+
     fn make_snapshot_meta(pinned: bool) -> SnapshotMeta {
         SnapshotMeta {
             message: None,
             metadata: None,
             pinned,
             created_at: chrono::Utc::now(),
+            missing: false,
         }
     }
 
@@ -344,6 +389,7 @@ mod tests {
             metadata: None,
             pinned,
             created_at,
+            missing: false,
         }
     }
 
@@ -424,6 +470,7 @@ mod tests {
         let state = Arc::new(crate::state::DaemonState::new(
             test_config(),
             test_backend(),
+            test_state_dir(),
         ));
         // Register a workspace with an existing snapshot
         let mut index = SnapshotIndex::new(PathBuf::from("/home/user/ws"));
@@ -463,6 +510,7 @@ mod tests {
         let state = Arc::new(crate::state::DaemonState::new(
             test_config(),
             test_backend(),
+            test_state_dir(),
         ));
         let resp = checkpoint(&state, "/nonexistent/ws/12345", "snap-1", None, None, false)
             .await
@@ -478,6 +526,7 @@ mod tests {
         let state = Arc::new(crate::state::DaemonState::new(
             test_config(),
             test_backend(),
+            test_state_dir(),
         ));
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().to_string_lossy().to_string();
@@ -495,6 +544,7 @@ mod tests {
         let state = Arc::new(crate::state::DaemonState::new(
             test_config(),
             test_backend(),
+            test_state_dir(),
         ));
         let resp = rollback(&state, "/nonexistent/ws/12345", "msg1-step0")
             .await
@@ -510,6 +560,7 @@ mod tests {
         let state = Arc::new(crate::state::DaemonState::new(
             test_config(),
             test_backend(),
+            test_state_dir(),
         ));
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().to_string_lossy().to_string();
@@ -563,6 +614,7 @@ mod tests {
             metadata: None,
             pinned: true,
             created_at: chrono::Utc::now(),
+            missing: false,
         };
         assert!(pinned.pinned);
 
@@ -571,6 +623,7 @@ mod tests {
             metadata: None,
             pinned: false,
             created_at: chrono::Utc::now(),
+            missing: false,
         };
         assert!(!unpinned.pinned);
     }

@@ -359,7 +359,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_init_nonexistent_path_returns_invalid_path() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Init {
             workspace: "/nonexistent/path/12345".to_string(),
         };
@@ -372,7 +376,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_checkpoint_nonexistent_auto_inits_and_returns_invalid_path() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Checkpoint {
             workspace: "/nonexistent/path/12345".to_string(),
             id: "snap-1".to_string(),
@@ -390,7 +398,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_rollback_nonexistent_returns_workspace_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Rollback {
             workspace: "/nonexistent/path/12345".to_string(),
             to: "msg1-step0".to_string(),
@@ -404,7 +416,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_delete_nonexistent_returns_workspace_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Delete {
             workspace: Some("/nonexistent/path/12345".to_string()),
             snapshot: "nonexistent".to_string(),
@@ -419,7 +435,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_delete_snapshot_not_found_returns_error() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Delete {
             workspace: Some("/nonexistent/ws".to_string()),
             snapshot: "nosuchsnap".to_string(),
@@ -437,7 +457,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_checkpoint_unregistered_real_path_auto_inits() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let tmpdir = tempfile::tempdir().unwrap();
         let req = Request::Checkpoint {
             workspace: tmpdir.path().to_string_lossy().to_string(),
@@ -460,7 +484,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_rollback_unregistered_real_path_returns_workspace_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let tmpdir = tempfile::tempdir().unwrap();
         let req = Request::Rollback {
             workspace: tmpdir.path().to_string_lossy().to_string(),
@@ -475,7 +503,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_delete_unregistered_snapshot_returns_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Delete {
             workspace: Some("/nonexistent/ws".to_string()),
             snapshot: "abc123".to_string(),
@@ -510,7 +542,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_list_nonexistent_returns_workspace_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::List {
             workspace: Some("/nonexistent/path/12345".to_string()),
             format: None,
@@ -524,7 +560,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_list_unregistered_path_returns_workspace_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let tmpdir = tempfile::tempdir().unwrap();
         let req = Request::List {
             workspace: Some(tmpdir.path().to_string_lossy().to_string()),
@@ -539,7 +579,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_diff_nonexistent_returns_workspace_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Diff {
             workspace: "/nonexistent/path/12345".to_string(),
             from: "msg1-step0".to_string(),
@@ -554,7 +598,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_status_returns_status_ok() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Status { workspace: None };
         let resp = dispatch(&state, req).await;
         match resp {
@@ -567,7 +615,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_status_with_nonexistent_workspace_returns_error() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Status {
             workspace: Some("/nonexistent/path/12345".to_string()),
         };
@@ -580,7 +632,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_status_with_unregistered_real_path_returns_error() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let tmpdir = tempfile::tempdir().unwrap();
         let req = Request::Status {
             workspace: Some(tmpdir.path().to_string_lossy().to_string()),
@@ -594,7 +650,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_cleanup_nonexistent_returns_workspace_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Cleanup {
             workspace: "/nonexistent/path/12345".to_string(),
             keep: None,
@@ -608,7 +668,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_config_returns_config_ok() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Config;
         let resp = dispatch(&state, req).await;
         match resp {
@@ -624,7 +688,11 @@ mod tests {
     #[tokio::test]
     async fn dispatch_reload_config_returns_reload_config_ok() {
         // ReloadConfig reads /etc/ws-ckpt/config.toml; if missing, uses defaults
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::ReloadConfig;
         let resp = dispatch(&state, req).await;
         assert!(matches!(resp, Response::ReloadConfigOk));
@@ -632,7 +700,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_recover_nonexistent_returns_workspace_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::Recover {
             workspace: "/nonexistent/path/12345".to_string(),
         };
@@ -646,7 +718,11 @@ mod tests {
     #[tokio::test]
     async fn dispatch_health_advisory_returns_health_advisory_ok() {
         // Empty workspace set -> counter must be 0; fs bytes vary by OS.
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
         let req = Request::HealthAdvisory;
         let resp = dispatch(&state, req).await;
         match resp {

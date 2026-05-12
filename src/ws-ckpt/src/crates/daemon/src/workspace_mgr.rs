@@ -68,7 +68,8 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
                             "recovering unregistered workspace: {} -> {:?} (ws_id={})",
                             workspace, target, ws_id
                         );
-                        let snap_dir = state.backend.snapshots_root().join(&ws_id);
+                        let snap_dir = state.index_dir(&ws_id);
+                        let btrfs_snap_dir = state.backend.snapshots_root().join(&ws_id);
                         let mut index = if let Ok(idx) = index_store::load(&snap_dir).await {
                             idx
                         } else {
@@ -77,7 +78,7 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
                         // If index has no snapshots, try rebuilding from filesystem
                         if index.snapshots.is_empty() {
                             if let Ok(rebuilt) =
-                                index_store::rebuild_from_fs(&snap_dir, ws_path.clone()).await
+                                index_store::rebuild_from_fs(&btrfs_snap_dir, ws_path.clone()).await
                             {
                                 if !rebuilt.snapshots.is_empty() {
                                     info!(
@@ -92,6 +93,9 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
                             }
                         }
                         state.register_workspace(ws_id.clone(), ws_path.clone(), index);
+                        if let Err(e) = state.save_manifest().await {
+                            warn!("save_manifest failed after recovery register: {:#}", e);
+                        }
                         return Ok(Response::InitOk { ws_id });
                     } else {
                         // Broken symlink — target subvolume gone; remove and re-init
@@ -194,9 +198,16 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     }
 
     // 12. Create and save index
-    let snap_dir = state.backend.snapshots_root().join(&ws_id);
+    let snap_dir = state.index_dir(&ws_id);
+    tokio::fs::create_dir_all(&snap_dir)
+        .await
+        .context("Failed to create index dir")?;
     // Check for existing snapshot subvolumes before creating empty index
-    let index = if let Ok(rebuilt) = index_store::rebuild_from_fs(&snap_dir, abs_path.clone()).await
+    // Note: rebuild_from_fs scans the btrfs snapshot directory (backend snapshots_root),
+    //       not the index directory
+    let snapshots_ws_dir = state.backend.snapshots_root().join(&ws_id);
+    let index = if let Ok(rebuilt) =
+        index_store::rebuild_from_fs(&snapshots_ws_dir, abs_path.clone()).await
     {
         if !rebuilt.snapshots.is_empty() {
             info!(
@@ -216,7 +227,12 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     // 13. Register to state
     state.register_workspace(ws_id.clone(), abs_path.clone(), index);
 
-    // 13a. Start file watcher for write-lock detection
+    // 13a. Save manifest
+    if let Err(e) = state.save_manifest().await {
+        warn!("save_manifest failed after init: {:#}", e);
+    }
+
+    // 13b. Start file watcher for write-lock detection
     match crate::fs_watcher::WorkspaceWatcher::start(&abs_path) {
         Ok(watcher) => {
             state.register_watcher(ws_id.clone(), watcher);
@@ -291,21 +307,41 @@ pub async fn delete_snapshot(
         if meta.pinned && !force {
             return Ok(error_resp(
                 ErrorCode::ConfirmationRequired,
-                "快照已标记为 pinned，使用 --force 确认删除".to_string(),
+                "Snapshot is pinned, use --force to confirm deletion".to_string(),
             ));
         }
     }
 
-    // 4. Delete subvolume
-    state
-        .backend
-        .delete_snapshot(&ws.ws_id, &resolved_id)
-        .await?;
+    // 4. Delete subvolume (skip if snapshot is marked missing — subvolume already gone)
+    let is_missing = ws
+        .index
+        .snapshots
+        .get(&resolved_id)
+        .map(|m| m.missing)
+        .unwrap_or(false);
+    if !is_missing {
+        state
+            .backend
+            .delete_snapshot(&ws.ws_id, &resolved_id)
+            .await?;
+    }
 
     // 5. Remove from index + save
     ws.index.snapshots.remove(&resolved_id);
-    let snap_dir = state.backend.snapshots_root().join(&ws.ws_id);
+    let snap_dir = state.index_dir(&ws.ws_id);
+    tokio::fs::create_dir_all(&snap_dir)
+        .await
+        .with_context(|| format!("Failed to create index dir: {:?}", snap_dir))?;
     index_store::save(&snap_dir, &ws.index).await?;
+
+    // 5a. Release write lock before save_manifest (try_read inside
+    //     collect_workspace_entries would fail while write lock is held)
+    drop(ws);
+
+    // 5b. Save manifest
+    if let Err(e) = state.save_manifest().await {
+        warn!("save_manifest failed after delete_snapshot: {:#}", e);
+    }
 
     // 6. Return
     Ok(Response::DeleteOk {
@@ -345,6 +381,11 @@ pub async fn recover_workspace(
     // 4. unregister workspace from state
     state.unregister_workspace(&ws_id);
 
+    // 4a. Save manifest
+    if let Err(e) = state.save_manifest().await {
+        warn!("save_manifest failed after recover: {:#}", e);
+    }
+
     // 5. return
     Ok(Response::RecoverOk {
         workspace: original_path,
@@ -381,6 +422,10 @@ mod tests {
             min_free_bytes: 512 * 1024 * 1024,
             min_free_percent: 1.0,
         }
+    }
+
+    fn test_state_dir() -> PathBuf {
+        PathBuf::from("/tmp/test-state")
     }
 
     // ── ws-id generation tests ──
@@ -456,7 +501,7 @@ mod tests {
     fn confirmation_required_delete_pinned_snapshot_response() {
         let resp = error_resp(
             ErrorCode::ConfirmationRequired,
-            "快照已标记为 pinned，使用 --force 确认删除",
+            "Snapshot is pinned, use --force to confirm deletion",
         );
         match resp {
             Response::Error { code, message } => {
@@ -474,7 +519,11 @@ mod tests {
 
     #[tokio::test]
     async fn init_nonexistent_path_returns_invalid_path() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
         let resp = init(&state, "/nonexistent/path/12345").await.unwrap();
         match resp {
             Response::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidPath),
@@ -484,7 +533,11 @@ mod tests {
 
     #[tokio::test]
     async fn init_already_initialized_returns_ok() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().to_string_lossy().to_string();
         let canon = tokio::fs::canonicalize(&path).await.unwrap();
@@ -520,7 +573,7 @@ mod tests {
             min_free_bytes: 512 * 1024 * 1024,
             min_free_percent: 1.0,
         };
-        let state = Arc::new(DaemonState::new(config, test_backend()));
+        let state = Arc::new(DaemonState::new(config, test_backend(), test_state_dir()));
         let resp = init(&state, &inside_path.to_string_lossy()).await.unwrap();
         match resp {
             Response::Error { code, message } => {
@@ -536,7 +589,11 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let file_path = tmpdir.path().join("not-a-dir.txt");
         tokio::fs::write(&file_path, "hello").await.unwrap();
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
         let resp = init(&state, &file_path.to_string_lossy()).await.unwrap();
         match resp {
             Response::Error { code, message } => {
@@ -549,7 +606,11 @@ mod tests {
 
     #[tokio::test]
     async fn delete_snapshot_unregistered_workspace_returns_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().to_string_lossy().to_string();
         let resp = delete_snapshot(&state, &path, "msg1-step0", false)
@@ -602,7 +663,11 @@ mod tests {
 
     #[tokio::test]
     async fn recover_unregistered_workspace_returns_not_found() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
         let resp = recover_workspace(&state, "/nonexistent/path/12345")
             .await
             .unwrap();
@@ -614,7 +679,11 @@ mod tests {
 
     #[tokio::test]
     async fn recover_registered_workspace_returns_recover_ok_or_backend_error() {
-        let state = Arc::new(DaemonState::new(test_config(), test_backend()));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().to_path_buf();
         let canon = tokio::fs::canonicalize(&path).await.unwrap();

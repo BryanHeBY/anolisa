@@ -26,7 +26,9 @@ pub struct DetectResult {
 ///   3. Fallback → BtrfsLoop (creates a loop device)
 ///
 /// When an explicit backend type is configured, creates that backend directly.
-pub async fn detect_and_create_backend(config: &DaemonConfig) -> anyhow::Result<DetectResult> {
+pub(crate) async fn detect_and_create_backend(
+    config: &DaemonConfig,
+) -> anyhow::Result<DetectResult> {
     match config.parse_backend_type() {
         Some(backend_type) => {
             info!(
@@ -78,7 +80,7 @@ async fn auto_detect(_config: &DaemonConfig) -> anyhow::Result<BackendType> {
 }
 
 /// Create a backend instance for the given type.
-async fn create_backend(
+pub(crate) async fn create_backend(
     backend_type: BackendType,
     config: &DaemonConfig,
 ) -> anyhow::Result<Arc<dyn StorageBackend>> {
