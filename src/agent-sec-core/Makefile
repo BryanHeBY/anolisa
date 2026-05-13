@@ -67,14 +67,12 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 	python3 -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/skill-ledger \
-		--ignore=tests/e2e/skill-signing \
 		--ignore=tests/e2e/linux-sandbox \
 		--ignore=tests/e2e/prompt-scanner \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
 	@# standalone-script e2e suites (not pytest-compatible)
 	python3 tests/e2e/skill-ledger/e2e_test.py
-	@# skill-signing e2e skipped: imports Python source code
 	@# linux-sandbox e2e skipped: requires privileged container
 
 VENV_PYTHON ?= /opt/agent-sec/venv/bin/python
@@ -87,13 +85,11 @@ test-e2e-source-build: ## Run E2E tests against source-build-installed agent-sec
 	$(VENV_PYTHON) -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/skill-ledger \
-		--ignore=tests/e2e/skill-signing \
 		--ignore=tests/e2e/linux-sandbox \
 		--ignore=tests/e2e/prompt-scanner \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
 	@# skill-ledger e2e skipped: installed system skills affect G6/G8 expected results
-	@# skill-signing e2e skipped: imports Python source code
 	@# linux-sandbox e2e skipped: requires privileged container
 
 .PHONY: test-python-coverage

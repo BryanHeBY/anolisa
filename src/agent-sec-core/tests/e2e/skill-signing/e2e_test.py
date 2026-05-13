@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""End-to-end tests for skill signing (sign-skill.sh) and verification (verifier.py).
+"""Pytest E2E tests for skill signing and verification.
 
-Exercises the full pipeline:
-  1. sign-skill.sh --init   → GPG key generation + public key export
-  2. sign-skill.sh <dir>    → single skill signing
-  3. sign-skill.sh --batch  → batch skill signing
-  4. verifier.py             → signature + hash verification
+The default tests exercise the source-tree ``sign-skill.sh`` against temporary
+skills, trusted keys, and verifier config.  When a source-build installation is
+detected, the installed-path test also runs the user workflow:
 
-All GPG operations use an isolated GNUPGHOME so the host keyring is never
-touched.
-
-Prerequisites: gpg, jq, python3
+  /usr/local/bin/sign-skill.sh --init
+  /usr/local/bin/sign-skill.sh --batch /usr/share/anolisa/skills --force
+  agent-sec-cli verify
 """
 
 import json
@@ -19,158 +16,214 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
-# ── Paths ──────────────────────────────────────────────────────────────────
+import pytest
+
+# ---------------------------------------------------------------------------
+# Path and import resolution
+# ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # agent-sec-core/
 SIGN_SKILL_SH = REPO_ROOT / "tools" / "sign-skill.sh"
-VERIFIER_DIR = REPO_ROOT / "agent-sec-cli" / "src" / "agent_sec_cli" / "asset_verify"
-VERIFIER_PY = VERIFIER_DIR / "verifier.py"
+SOURCE_PYTHONPATH = REPO_ROOT / "agent-sec-cli" / "src"
 
 SIGNING_DIR = ".skill-meta"
 
-# Make verifier importable
-sys.path.insert(0, str(VERIFIER_DIR))
+# Prefer the source-tree package, even when pytest is launched from the
+# installed source-build venv or an RPM test environment.
+sys.path.insert(0, str(SOURCE_PYTHONPATH))
 
-from errors import (  # noqa: E402
+from agent_sec_cli.asset_verify.errors import (  # noqa: E402
     ErrHashMismatch,
     ErrSigInvalid,
     ErrSigMissing,
     ErrUnexpectedFile,
 )
-from verifier import load_trusted_keys, verify_skill  # noqa: E402
-
-# ── Colours ────────────────────────────────────────────────────────────────
-
-RED = "\033[0;31m"
-GREEN = "\033[0;32m"
-YELLOW = "\033[1;33m"
-BLUE = "\033[0;34m"
-BOLD = "\033[1m"
-NC = "\033[0m"
-
-
-# ── Result tracker ─────────────────────────────────────────────────────────
+from agent_sec_cli.asset_verify.verifier import (  # noqa: E402
+    load_trusted_keys,
+    verify_skill,
+)
 
 
 @dataclass
-class Results:
-    passed: int = 0
-    failed: int = 0
-    errors: list = field(default_factory=list)
+class Workspace:
+    """Shared source-tree signing workspace."""
+
+    root: Path
+    gnupg_home: Path
+    trusted_keys: Path
+    skills_dir: Path
+    config_file: Path
+
+    def env(self, extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+        env = os.environ.copy()
+        env["GNUPGHOME"] = str(self.gnupg_home)
+        env["LC_ALL"] = "C"
+        env["LANG"] = "C"
+        if extra:
+            env.update(extra)
+        return env
 
 
-results = Results()
+def require_tools(*tools: str) -> None:
+    missing = [tool for tool in tools if shutil.which(tool) is None]
+    if missing:
+        pytest.skip(f"missing required tool(s): {', '.join(missing)}")
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+def require_passwordless_sudo() -> None:
+    sudo_bin = shutil.which("sudo")
+    if not sudo_bin:
+        pytest.skip("installed paths require sudo, but sudo is not available")
+
+    probe = run_command([sudo_bin, "-n", "true"], timeout=10)
+    if probe.returncode != 0:
+        pytest.skip("installed paths require sudo, but sudo -n is not available")
+
+
+def run_command(
+    args: Iterable[str | Path],
+    *,
+    env: Optional[dict[str, str]] = None,
+    input_text: Optional[str] = None,
+    timeout: int = 120,
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [str(arg) for arg in args],
+        capture_output=True,
+        text=True,
+        env=env,
+        input=input_text,
+        timeout=timeout,
+    )
 
 
 def run_sign_skill(
     args: list[str],
-    env_extra: Optional[dict] = None,
+    *,
+    ws: Optional[Workspace] = None,
+    env_extra: Optional[dict[str, str]] = None,
+    script: Path = SIGN_SKILL_SH,
+    timeout: int = 120,
 ) -> subprocess.CompletedProcess:
-    """Run sign-skill.sh with the given arguments in the isolated env."""
-    env = os.environ.copy()
-    if env_extra:
-        env.update(env_extra)
-    cmd = ["bash", str(SIGN_SKILL_SH)] + args
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    """Run sign-skill.sh with an isolated environment when a workspace is given."""
+    env = ws.env(env_extra) if ws else os.environ.copy()
+    return run_command(["bash", script, *args], env=env, timeout=timeout)
+
+
+def run_maybe_sudo(
+    args: Iterable[str | Path],
+    *,
+    env: Optional[dict[str, str]] = None,
+    sudo: bool = False,
+    timeout: int = 120,
+) -> subprocess.CompletedProcess:
+    cmd = [str(arg) for arg in args]
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+
+    if sudo and os.geteuid() != 0:
+        sudo_bin = shutil.which("sudo")
+        if not sudo_bin:
+            pytest.fail("sudo is required for installed skill signing e2e")
+        preserved = [
+            f"{key}={run_env[key]}"
+            for key in ("GNUPGHOME", "PATH", "LC_ALL", "LANG")
+            if key in run_env
+        ]
+        cmd = [sudo_bin, "-n", "env", *preserved, *cmd]
+        run_env = os.environ.copy()
+
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=run_env,
+        timeout=timeout,
+    )
 
 
 def make_skill(parent: Path, name: str, files: dict[str, str]) -> Path:
-    """Create a fake skill directory with the given files.
-
-    ``files`` maps relative path → content.
-    Returns the skill directory path.
-    """
+    """Create a fake skill directory with the given files."""
     skill_dir = parent / name
-    for rel, content in files.items():
-        p = skill_dir / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
+    for rel_path, content in files.items():
+        path = skill_dir / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
     return skill_dir
 
 
-def test(name: str, fn):
-    """Run a single named test, catch exceptions, record results."""
-    print(f"\n{BLUE}--- {name} ---{NC}")
-    try:
-        fn()
-        print(f"{GREEN}✓ PASS{NC}")
-        results.passed += 1
-    except AssertionError as exc:
-        print(f"{RED}✗ FAIL  {exc}{NC}")
-        results.failed += 1
-        results.errors.append((name, exc))
-    except Exception as exc:
-        print(f"{RED}✗ ERROR {exc}{NC}")
-        results.failed += 1
-        results.errors.append((name, exc))
-
-
-# We reuse a single temp workspace across all tests so the GPG key only
-# needs to be generated once.
-
-
-class Workspace:
-    """Shared test workspace: isolated GNUPGHOME, trusted-keys dir, etc."""
-
-    def __init__(self):
-        self.root = Path(tempfile.mkdtemp(prefix="e2e_sign_"))
-        self.gnupg_home = self.root / "gnupg"
-        self.gnupg_home.mkdir(mode=0o700)
-        self.trusted_keys = self.root / "trusted-keys"
-        self.trusted_keys.mkdir()
-        self.skills_dir = self.root / "skills"
-        self.skills_dir.mkdir()
-
-        # Propagate isolated GNUPGHOME to all child processes
-        os.environ["GNUPGHOME"] = str(self.gnupg_home)
-
-    def cleanup(self):
-        if "GNUPGHOME" in os.environ:
-            del os.environ["GNUPGHOME"]
-        shutil.rmtree(self.root, ignore_errors=True)
-
-
-# ── Test cases ─────────────────────────────────────────────────────────────
-
-
-def test_check(ws: Workspace):
-    """--check should report all prerequisites OK."""
-    r = run_sign_skill(["--check"])
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    combined = r.stdout + r.stderr
-    assert "All prerequisites satisfied" in combined, combined
-
-
-def test_init(ws: Workspace):
-    """--init generates a GPG key and exports the public key."""
-    r = run_sign_skill(
-        [
-            "--init",
-            "--trusted-keys-dir",
-            str(ws.trusted_keys),
-        ]
+def assert_success(result: subprocess.CompletedProcess, context: str) -> None:
+    assert result.returncode == 0, (
+        f"{context} failed with exit {result.returncode}\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
     )
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}\n{r.stderr}"
 
-    # Public key file must exist
-    asc_files = list(ws.trusted_keys.glob("*.asc"))
-    assert (
-        len(asc_files) >= 1
-    ), f"No .asc in {ws.trusted_keys}: {list(ws.trusted_keys.iterdir())}"
+
+@pytest.fixture(scope="module")
+def signing_ws(tmp_path_factory: pytest.TempPathFactory) -> Workspace:
+    """Initialize one isolated source-tree signing workspace for the module."""
+    require_tools("gpg", "jq")
+    assert SIGN_SKILL_SH.exists(), f"{SIGN_SKILL_SH} not found"
+
+    tmp_root = Path(os.environ.get("ANOLISA_E2E_TMPDIR", "/tmp"))
+    if not tmp_root.is_dir():
+        tmp_root = tmp_path_factory.mktemp("e2e_sign_root")
+    root = Path(tempfile.mkdtemp(prefix="agent-sec-e2e-sign-", dir=tmp_root))
+    gnupg_home = root / "gnupg"
+    gnupg_home.mkdir(mode=0o700)
+    trusted_keys = root / "trusted-keys"
+    trusted_keys.mkdir()
+    skills_dir = root / "skills"
+    skills_dir.mkdir()
+    config_file = root / "config.conf"
+    config_file.write_text("skills_dir = [\n]\n")
+
+    ws = Workspace(
+        root=root,
+        gnupg_home=gnupg_home,
+        trusted_keys=trusted_keys,
+        skills_dir=skills_dir,
+        config_file=config_file,
+    )
+
+    result = run_sign_skill(
+        ["--init", "--trusted-keys-dir", str(ws.trusted_keys)],
+        ws=ws,
+    )
+    assert_success(result, "--init")
+
+    try:
+        yield ws
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_reports_prerequisites() -> None:
+    """--check should report all prerequisites OK."""
+    require_tools("gpg", "jq")
+    result = run_sign_skill(["--check"])
+    assert_success(result, "--check")
+    assert "All prerequisites satisfied" in result.stdout + result.stderr
+
+
+def test_init_exports_public_key(signing_ws: Workspace) -> None:
+    """The module fixture should generate and export a signing public key."""
+    asc_files = list(signing_ws.trusted_keys.glob("*.asc"))
+    assert asc_files, f"No .asc in {signing_ws.trusted_keys}"
     assert asc_files[0].stat().st_size > 0, "Exported .asc is empty"
 
 
-def test_single_sign_and_verify(ws: Workspace):
+def test_single_sign_and_verify(signing_ws: Workspace) -> None:
     """Sign a single skill, then verify with the verifier module."""
     skill = make_skill(
-        ws.skills_dir,
+        signing_ws.skills_dir,
         "skill-a",
         {
             "main.py": "print('hello')\n",
@@ -178,114 +231,135 @@ def test_single_sign_and_verify(ws: Workspace):
         },
     )
 
-    r = run_sign_skill([str(skill), "--force"])
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}\n{r.stderr}"
+    result = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(result, "single sign")
 
-    # Manifest and signature must exist inside .skill-meta/
     signing = skill / SIGNING_DIR
     assert (signing / "Manifest.json").exists(), ".skill-meta/Manifest.json missing"
     assert (signing / ".skill.sig").exists(), ".skill-meta/.skill.sig missing"
 
-    # Manifest must contain our files
     manifest = json.loads((signing / "Manifest.json").read_text())
-    paths_in_manifest = {f["path"] for f in manifest["files"]}
-    assert (
-        "main.py" in paths_in_manifest
-    ), f"main.py not in manifest: {paths_in_manifest}"
-    assert (
-        "README.md" in paths_in_manifest
-    ), f"README.md not in manifest: {paths_in_manifest}"
-    # .skill-meta/ contents should NOT be in manifest
+    paths_in_manifest = {file_entry["path"] for file_entry in manifest["files"]}
+    assert "main.py" in paths_in_manifest
+    assert "README.md" in paths_in_manifest
     assert "Manifest.json" not in paths_in_manifest
     assert ".skill.sig" not in paths_in_manifest
-    signing_paths = [p for p in paths_in_manifest if p.startswith(".skill-meta")]
-    assert not signing_paths, f".skill-meta paths should be excluded: {signing_paths}"
+    assert not [path for path in paths_in_manifest if path.startswith(".skill-meta")]
 
-    # Verify with verifier
-    keys = load_trusted_keys(ws.trusted_keys)
+    keys = load_trusted_keys(signing_ws.trusted_keys)
     ok, name = verify_skill(str(skill), keys)
-    assert ok, "verify_skill returned False"
+    assert ok
     assert name == "skill-a"
 
 
-def test_batch_sign_and_verify(ws: Workspace):
-    """Batch-sign multiple skills, then verify each."""
-    batch_root = ws.root / "batch_skills"
+def test_batch_sign_registers_explicit_config_and_verifies(
+    signing_ws: Workspace,
+) -> None:
+    """Batch-sign multiple skills and register only the temporary config."""
+    batch_root = signing_ws.root / "batch_skills"
     batch_root.mkdir()
-    for sname, content in [("alpha", "A"), ("beta", "B"), ("gamma", "C")]:
-        make_skill(batch_root, sname, {"data.txt": content})
+    for skill_name, content in [("alpha", "A"), ("beta", "B"), ("gamma", "C")]:
+        make_skill(batch_root, skill_name, {"data.txt": content})
 
-    r = run_sign_skill(["--batch", str(batch_root), "--force"])
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}\n{r.stderr}"
-    assert "3/3" in r.stdout, f"Expected 3/3 in output: {r.stdout}"
+    result = run_sign_skill(
+        [
+            "--batch",
+            str(batch_root),
+            "--force",
+            "--config-file",
+            str(signing_ws.config_file),
+        ],
+        ws=signing_ws,
+    )
+    assert_success(result, "batch sign")
+    assert "3/3" in result.stdout
+    assert str(batch_root.resolve()) in signing_ws.config_file.read_text()
 
-    keys = load_trusted_keys(ws.trusted_keys)
-    for sname in ("alpha", "beta", "gamma"):
-        ok, name = verify_skill(str(batch_root / sname), keys)
-        assert ok, f"verify_skill failed for {sname}"
-        assert name == sname
+    keys = load_trusted_keys(signing_ws.trusted_keys)
+    for skill_name in ("alpha", "beta", "gamma"):
+        ok, name = verify_skill(str(batch_root / skill_name), keys)
+        assert ok, f"verify_skill failed for {skill_name}"
+        assert name == skill_name
 
 
-def test_force_overwrite(ws: Workspace):
+def test_force_overwrite(signing_ws: Workspace) -> None:
     """--force overwrites existing manifest and signature."""
-    skill = make_skill(ws.skills_dir, "skill-force", {"f.txt": "v1"})
+    skill = make_skill(signing_ws.skills_dir, "skill-force", {"f.txt": "v1"})
 
-    r1 = run_sign_skill([str(skill), "--force"])
-    assert r1.returncode == 0
+    first = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(first, "initial sign")
     sig1 = (skill / SIGNING_DIR / ".skill.sig").read_text()
 
-    # Change content and re-sign
     (skill / "f.txt").write_text("v2")
-    r2 = run_sign_skill([str(skill), "--force"])
-    assert r2.returncode == 0
+    second = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(second, "re-sign")
     sig2 = (skill / SIGNING_DIR / ".skill.sig").read_text()
 
     assert sig1 != sig2, "Signature should differ after content change"
 
-    # Verify new signature
-    keys = load_trusted_keys(ws.trusted_keys)
+    keys = load_trusted_keys(signing_ws.trusted_keys)
     ok, _ = verify_skill(str(skill), keys)
     assert ok
 
 
-def test_no_force_rejects(ws: Workspace):
+def test_no_force_rejects_existing(signing_ws: Workspace) -> None:
     """Without --force, existing manifest/sig blocks signing."""
-    skill = make_skill(ws.skills_dir, "skill-noforce", {"x.txt": "x"})
+    skill = make_skill(signing_ws.skills_dir, "skill-noforce", {"x.txt": "x"})
 
-    r1 = run_sign_skill([str(skill)])
-    assert r1.returncode == 0
+    first = run_sign_skill([str(skill)], ws=signing_ws)
+    assert_success(first, "initial sign")
 
-    # Second run without --force should fail
-    r2 = run_sign_skill([str(skill)])
-    assert r2.returncode != 0, "Expected non-zero exit without --force"
-    assert "already exists" in r2.stdout + r2.stderr
+    second = run_sign_skill([str(skill)], ws=signing_ws)
+    assert second.returncode != 0, "Expected non-zero exit without --force"
+    assert "already exists" in second.stdout + second.stderr
 
 
-def test_export_key_default_and_custom(ws: Workspace):
+def test_no_secret_key_error_is_actionable(signing_ws: Workspace) -> None:
+    """Signing without a secret key should fail before creating .skill.sig."""
+    blank_home = signing_ws.root / "no_key_gpg"
+    blank_home.mkdir(mode=0o700)
+    skill = make_skill(signing_ws.skills_dir, "skill-no-key", {"x.txt": "x"})
+
+    result = run_sign_skill(
+        [str(skill), "--force"],
+        ws=signing_ws,
+        env_extra={"GNUPGHOME": str(blank_home)},
+    )
+
+    assert result.returncode != 0, "Expected signing to fail without a secret key"
+    combined = result.stdout + result.stderr
+    assert "No GPG secret key" in combined
+    assert "--init" in combined
+    assert "GPG_PRIVATE_KEY" in combined
+    assert not (skill / SIGNING_DIR / ".skill.sig").exists()
+
+
+def test_export_key_to_custom_dir(signing_ws: Workspace) -> None:
     """--export-key exports to a specified directory."""
-    custom_dir = ws.root / "custom_keys"
-    r = run_sign_skill(["--export-key", str(custom_dir)])
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}\n{r.stderr}"
+    custom_dir = signing_ws.root / "custom_keys"
+    result = run_sign_skill(["--export-key", str(custom_dir)], ws=signing_ws)
+    assert_success(result, "--export-key custom")
     asc_files = list(custom_dir.glob("*.asc"))
-    assert len(asc_files) >= 1, f"No .asc in {custom_dir}"
+    assert asc_files, f"No .asc in {custom_dir}"
 
 
-def test_skill_name_override(ws: Workspace):
+def test_skill_name_override(signing_ws: Workspace) -> None:
     """--skill-name overrides the skill name in the manifest."""
-    skill = make_skill(ws.skills_dir, "skill-rename", {"a.txt": "a"})
-    r = run_sign_skill([str(skill), "--skill-name", "custom-name", "--force"])
-    assert r.returncode == 0
+    skill = make_skill(signing_ws.skills_dir, "skill-rename", {"a.txt": "a"})
+    result = run_sign_skill(
+        [str(skill), "--skill-name", "custom-name", "--force"],
+        ws=signing_ws,
+    )
+    assert_success(result, "skill name override")
 
     manifest = json.loads((skill / SIGNING_DIR / "Manifest.json").read_text())
-    assert (
-        manifest["skill_name"] == "custom-name"
-    ), f"Expected 'custom-name', got '{manifest['skill_name']}'"
+    assert manifest["skill_name"] == "custom-name"
 
 
-def test_hidden_files_excluded(ws: Workspace):
+def test_hidden_files_excluded(signing_ws: Workspace) -> None:
     """Hidden files and directories are excluded from the manifest."""
     skill = make_skill(
-        ws.skills_dir,
+        signing_ws.skills_dir,
         "skill-hidden",
         {
             "visible.txt": "ok",
@@ -293,190 +367,182 @@ def test_hidden_files_excluded(ws: Workspace):
             ".hidden_dir/inner.txt": "secret2",
         },
     )
-    r = run_sign_skill([str(skill), "--force"])
-    assert r.returncode == 0
+    result = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(result, "hidden file sign")
 
     manifest = json.loads((skill / SIGNING_DIR / "Manifest.json").read_text())
-    paths = {f["path"] for f in manifest["files"]}
+    paths = {file_entry["path"] for file_entry in manifest["files"]}
     assert "visible.txt" in paths
-    assert ".hidden_file" not in paths, f".hidden_file should be excluded: {paths}"
-    assert (
-        ".hidden_dir/inner.txt" not in paths
-    ), f".hidden_dir should be excluded: {paths}"
-    # .skill-meta dir itself should not appear
-    meta_paths = [p for p in paths if p.startswith(".skill-meta")]
-    assert not meta_paths, f".skill-meta paths should be excluded: {meta_paths}"
+    assert ".hidden_file" not in paths
+    assert ".hidden_dir/inner.txt" not in paths
+    assert not [path for path in paths if path.startswith(".skill-meta")]
 
 
-def test_tampered_file_detected(ws: Workspace):
+def test_tampered_file_detected(signing_ws: Workspace) -> None:
     """Verifier detects file content tampering after signing."""
-    skill = make_skill(ws.skills_dir, "skill-tamper", {"payload.txt": "original"})
-    r = run_sign_skill([str(skill), "--force"])
-    assert r.returncode == 0
+    skill = make_skill(
+        signing_ws.skills_dir, "skill-tamper", {"payload.txt": "original"}
+    )
+    result = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(result, "tamper setup sign")
 
-    # Tamper with the file
     (skill / "payload.txt").write_text("TAMPERED")
 
-    keys = load_trusted_keys(ws.trusted_keys)
-    try:
+    keys = load_trusted_keys(signing_ws.trusted_keys)
+    with pytest.raises(ErrHashMismatch):
         verify_skill(str(skill), keys)
-        assert False, "Expected ErrHashMismatch"
-    except ErrHashMismatch:
-        pass  # expected
 
 
-def test_unsigned_reference_file_detected(ws: Workspace):
+def test_unsigned_reference_file_detected(signing_ws: Workspace) -> None:
     """Verifier detects new files added under references after signing."""
     skill = make_skill(
-        ws.skills_dir,
+        signing_ws.skills_dir,
         "skill-extra-file",
         {
             "SKILL.md": "# Skill\n",
             "references/original.md": "signed\n",
         },
     )
-    r = run_sign_skill([str(skill), "--force"])
-    assert r.returncode == 0
+    result = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(result, "extra file setup sign")
 
-    # Empty files are still unsigned payloads when they are absent from Manifest.json.
     (skill / "references" / "a.md").write_text("")
 
-    keys = load_trusted_keys(ws.trusted_keys)
-    try:
+    keys = load_trusted_keys(signing_ws.trusted_keys)
+    with pytest.raises(ErrUnexpectedFile) as exc_info:
         verify_skill(str(skill), keys)
-        assert False, "Expected ErrUnexpectedFile"
-    except ErrUnexpectedFile as exc:
-        assert "references/a.md" in str(exc)
+    assert "references/a.md" in str(exc_info.value)
 
 
-def test_missing_sig_detected(ws: Workspace):
+def test_missing_sig_detected(signing_ws: Workspace) -> None:
     """Verifier raises ErrSigMissing when .skill.sig is deleted."""
-    skill = make_skill(ws.skills_dir, "skill-nosig", {"f.txt": "f"})
-    r = run_sign_skill([str(skill), "--force"])
-    assert r.returncode == 0
+    skill = make_skill(signing_ws.skills_dir, "skill-nosig", {"f.txt": "f"})
+    result = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(result, "missing sig setup sign")
 
     (skill / SIGNING_DIR / ".skill.sig").unlink()
 
-    keys = load_trusted_keys(ws.trusted_keys)
-    try:
+    keys = load_trusted_keys(signing_ws.trusted_keys)
+    with pytest.raises(ErrSigMissing):
         verify_skill(str(skill), keys)
-        assert False, "Expected ErrSigMissing"
-    except ErrSigMissing:
-        pass
 
 
-def test_wrong_key_rejected(ws: Workspace):
+def test_wrong_key_rejected(signing_ws: Workspace) -> None:
     """Signature made with key A is rejected when verified with key B only."""
-    # Generate a completely separate key pair in a different GNUPGHOME
-    alt_dir = ws.root / "alt_gpg"
+    alt_dir = signing_ws.root / "alt_gpg"
     alt_dir.mkdir(mode=0o700)
-    alt_keys = ws.root / "alt_keys"
+    alt_keys = signing_ws.root / "alt_keys"
     alt_keys.mkdir()
+    env = signing_ws.env()
 
-    # Generate alt key
-    subprocess.run(
-        ["gpg", "--homedir", str(alt_dir), "--batch", "--gen-key"],
-        input=(
-            "Key-Type: RSA\nKey-Length: 2048\nName-Real: Alt Key\n"
-            "Name-Email: alt@test.local\nExpire-Date: 0\n%no-protection\n%commit\n"
-        ).encode(),
-        capture_output=True,
+    generate = run_command(
+        ["gpg", "--homedir", alt_dir, "--batch", "--gen-key"],
+        env=env,
+        input_text=(
+            "Key-Type: RSA\n"
+            "Key-Length: 2048\n"
+            "Name-Real: Alt Key\n"
+            "Name-Email: alt@test.local\n"
+            "Expire-Date: 0\n"
+            "%no-protection\n"
+            "%commit\n"
+        ),
     )
+    assert_success(generate, "generate alt key")
+
+    export_alt = run_command(
+        ["gpg", "--homedir", alt_dir, "--armor", "--export", "alt@test.local"],
+        env=env,
+    )
+    assert_success(export_alt, "export alt public key")
     alt_pub = alt_keys / "alt.asc"
-    with open(alt_pub, "w") as f:
-        subprocess.run(
-            ["gpg", "--homedir", str(alt_dir), "--armor", "--export", "alt@test.local"],
-            stdout=f,
-        )
+    alt_pub.write_text(export_alt.stdout)
     assert alt_pub.stat().st_size > 0, "Failed to export alt public key"
 
-    # Skill was signed with the INIT key (ws GNUPGHOME), but verify with ALT
-    # key only → should fail
-    skill = make_skill(ws.skills_dir, "skill-wrongkey", {"z.txt": "z"})
-    r = run_sign_skill([str(skill), "--force"])
-    assert r.returncode == 0
+    skill = make_skill(signing_ws.skills_dir, "skill-wrongkey", {"z.txt": "z"})
+    result = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(result, "wrong key setup sign")
 
     alt_trusted = load_trusted_keys(alt_keys)
-    try:
+    with pytest.raises(ErrSigInvalid):
         verify_skill(str(skill), alt_trusted)
-        assert False, "Expected ErrSigInvalid"
-    except ErrSigInvalid:
-        pass
 
 
-def test_gpg_private_key_env(ws: Workspace):
+def test_gpg_private_key_env(signing_ws: Workspace) -> None:
     """GPG_PRIVATE_KEY env var import + signing works end-to-end."""
-    # Create a fresh GNUPGHOME with a new key
-    env_dir = ws.root / "env_gpg"
+    env_dir = signing_ws.root / "env_gpg"
     env_dir.mkdir(mode=0o700)
-    subprocess.run(
-        ["gpg", "--homedir", str(env_dir), "--batch", "--gen-key"],
-        input=(
-            "Key-Type: RSA\nKey-Length: 2048\nName-Real: Env Key\n"
-            "Name-Email: env@test.local\nExpire-Date: 0\n%no-protection\n%commit\n"
-        ).encode(),
-        capture_output=True,
-    )
+    env = signing_ws.env()
 
-    # Export private key
-    priv = subprocess.run(
+    generate = run_command(
+        ["gpg", "--homedir", env_dir, "--batch", "--gen-key"],
+        env=env,
+        input_text=(
+            "Key-Type: RSA\n"
+            "Key-Length: 2048\n"
+            "Name-Real: Env Key\n"
+            "Name-Email: env@test.local\n"
+            "Expire-Date: 0\n"
+            "%no-protection\n"
+            "%commit\n"
+        ),
+    )
+    assert_success(generate, "generate env key")
+
+    private_key = run_command(
         [
             "gpg",
             "--homedir",
-            str(env_dir),
+            env_dir,
             "--armor",
             "--export-secret-keys",
             "env@test.local",
         ],
-        capture_output=True,
-        text=True,
+        env=env,
     )
-    assert priv.returncode == 0 and len(priv.stdout) > 100, "Private key export failed"
+    assert_success(private_key, "export env private key")
+    assert len(private_key.stdout) > 100, "Private key export was unexpectedly short"
 
-    # Export public key for verification
-    env_keys = ws.root / "env_keys"
+    env_keys = signing_ws.root / "env_keys"
     env_keys.mkdir()
-    pub_path = env_keys / "env.asc"
-    with open(pub_path, "w") as f:
-        subprocess.run(
-            ["gpg", "--homedir", str(env_dir), "--armor", "--export", "env@test.local"],
-            stdout=f,
-        )
+    public_key = run_command(
+        ["gpg", "--homedir", env_dir, "--armor", "--export", "env@test.local"],
+        env=env,
+    )
+    assert_success(public_key, "export env public key")
+    (env_keys / "env.asc").write_text(public_key.stdout)
 
-    # Use a blank GNUPGHOME so the only way sign-skill.sh can sign is via import
-    blank_home = ws.root / "blank_gpg"
+    blank_home = signing_ws.root / "blank_gpg"
     blank_home.mkdir(mode=0o700)
 
-    skill = make_skill(ws.skills_dir, "skill-envkey", {"e.txt": "env"})
-    r = run_sign_skill(
+    skill = make_skill(signing_ws.skills_dir, "skill-envkey", {"e.txt": "env"})
+    result = run_sign_skill(
         [str(skill), "--force"],
+        ws=signing_ws,
         env_extra={
             "GNUPGHOME": str(blank_home),
-            "GPG_PRIVATE_KEY": priv.stdout,
+            "GPG_PRIVATE_KEY": private_key.stdout,
         },
     )
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}\n{r.stderr}"
-    assert (
-        "imported and trusted" in r.stdout + r.stderr
-    ), f"Expected import message: {r.stdout}\n{r.stderr}"
+    assert_success(result, "GPG_PRIVATE_KEY sign")
+    assert "imported and trusted" in result.stdout + result.stderr
 
-    # Verify
     env_trusted = load_trusted_keys(env_keys)
     ok, _ = verify_skill(str(skill), env_trusted)
     assert ok
 
 
-def test_manifest_structure(ws: Workspace):
+def test_manifest_structure(signing_ws: Workspace) -> None:
     """Manifest JSON has the expected schema fields."""
     skill = make_skill(
-        ws.skills_dir,
+        signing_ws.skills_dir,
         "skill-schema",
         {
             "script.sh": "#!/bin/bash\necho hi\n",
         },
     )
-    r = run_sign_skill([str(skill), "--force"])
-    assert r.returncode == 0
+    result = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(result, "manifest schema sign")
 
     manifest = json.loads((skill / SIGNING_DIR / "Manifest.json").read_text())
     for key in ("version", "skill_name", "algorithm", "created_at", "files"):
@@ -486,13 +552,13 @@ def test_manifest_structure(ws: Workspace):
     assert manifest["skill_name"] == "skill-schema"
     assert len(manifest["files"]) == 1
     assert manifest["files"][0]["path"] == "script.sh"
-    assert len(manifest["files"][0]["hash"]) == 64  # SHA256 hex
+    assert len(manifest["files"][0]["hash"]) == 64
 
 
-def test_subdirectory_files(ws: Workspace):
+def test_subdirectory_files(signing_ws: Workspace) -> None:
     """Files in nested subdirectories are included in the manifest."""
     skill = make_skill(
-        ws.skills_dir,
+        signing_ws.skills_dir,
         "skill-nested",
         {
             "top.txt": "top",
@@ -500,91 +566,123 @@ def test_subdirectory_files(ws: Workspace):
             "sub/deeper/leaf.txt": "leaf",
         },
     )
-    r = run_sign_skill([str(skill), "--force"])
-    assert r.returncode == 0
+    result = run_sign_skill([str(skill), "--force"], ws=signing_ws)
+    assert_success(result, "nested files sign")
 
     manifest = json.loads((skill / SIGNING_DIR / "Manifest.json").read_text())
-    paths = {f["path"] for f in manifest["files"]}
-    assert paths == {"top.txt", "sub/deep.txt", "sub/deeper/leaf.txt"}, paths
+    paths = {file_entry["path"] for file_entry in manifest["files"]}
+    assert paths == {"top.txt", "sub/deep.txt", "sub/deeper/leaf.txt"}
 
-    keys = load_trusted_keys(ws.trusted_keys)
+    keys = load_trusted_keys(signing_ws.trusted_keys)
     ok, _ = verify_skill(str(skill), keys)
     assert ok
 
 
-# ── Main ───────────────────────────────────────────────────────────────────
+def test_source_build_installed_signing_and_verify() -> None:
+    """Sign installed source-build skills and verify through agent-sec-cli."""
+    require_tools("gpg", "jq")
 
+    installed_script = Path(
+        os.environ.get("ANOLISA_INSTALLED_SIGN_SKILL", "/usr/local/bin/sign-skill.sh")
+    )
+    skills_root = Path(
+        os.environ.get("ANOLISA_INSTALLED_SKILLS_DIR", "/usr/share/anolisa/skills")
+    )
+    venv_python = Path(os.environ.get("VENV_PYTHON", "/opt/agent-sec/venv/bin/python"))
+    agent_sec_cli = shutil.which("agent-sec-cli") or "/usr/local/bin/agent-sec-cli"
 
-def main():
-    # Pre-flight
-    if not shutil.which("gpg"):
-        print(f"{RED}ERROR: gpg not found – cannot run e2e tests{NC}")
-        sys.exit(1)
-    if not shutil.which("jq"):
-        print(f"{RED}ERROR: jq not found – cannot run e2e tests{NC}")
-        sys.exit(1)
-    if not SIGN_SKILL_SH.exists():
-        print(f"{RED}ERROR: {SIGN_SKILL_SH} not found{NC}")
-        sys.exit(1)
+    if not installed_script.exists() and not venv_python.exists():
+        pytest.skip("source-build installed sign-skill.sh and venv are not present")
 
-    ws = Workspace()
+    assert installed_script.exists(), f"missing installed script: {installed_script}"
+    assert skills_root.is_dir(), f"missing installed skills root: {skills_root}"
+    assert venv_python.exists(), f"missing installed verifier python: {venv_python}"
+    assert Path(
+        agent_sec_cli
+    ).exists(), f"missing agent-sec-cli binary: {agent_sec_cli}"
+
+    verifier_paths = run_command(
+        [
+            venv_python,
+            "-c",
+            (
+                "from agent_sec_cli.asset_verify import verifier\n"
+                "print(verifier.DEFAULT_TRUSTED_KEYS_DIR)\n"
+                "print(verifier.DEFAULT_CONFIG)\n"
+            ),
+        ],
+    )
+    assert_success(verifier_paths, "resolve installed verifier paths")
+    trusted_keys_dir, config_file = [
+        Path(line.strip()) for line in verifier_paths.stdout.splitlines()[:2]
+    ]
+    assert trusted_keys_dir.is_dir(), f"missing trusted-keys dir: {trusted_keys_dir}"
+    assert config_file.is_file(), f"missing verifier config: {config_file}"
+
+    expected_skills = {"code-scanner", "prompt-scanner", "skill-ledger"}
+    for skill_name in expected_skills:
+        assert (
+            skills_root / skill_name
+        ).is_dir(), f"missing installed skill: {skill_name}"
+
+    needs_sudo = os.geteuid() != 0 and (
+        not os.access(skills_root, os.W_OK)
+        or not os.access(trusted_keys_dir, os.W_OK)
+        or not os.access(config_file, os.W_OK)
+    )
+    if needs_sudo and os.geteuid() != 0:
+        require_passwordless_sudo()
+
+    gnupg_home = Path("/tmp") / f"agent-sec-pytest-gnupg-{uuid.uuid4().hex}"
+    env = {
+        "GNUPGHOME": str(gnupg_home),
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PATH": os.environ.get("PATH", ""),
+    }
+
     try:
-        print("=" * 60)
-        print(f"{BOLD}Skill Signing E2E Tests{NC}")
-        print(f"  sign-skill.sh : {SIGN_SKILL_SH}")
-        print(f"  verifier.py   : {VERIFIER_PY}")
-        print(f"  workspace     : {ws.root}")
-        print("=" * 60)
+        if needs_sudo and os.geteuid() != 0:
+            setup_home = run_maybe_sudo(
+                ["sh", "-c", f"rm -rf '{gnupg_home}' && mkdir -m 700 '{gnupg_home}'"],
+                sudo=True,
+            )
+            assert_success(setup_home, "create root GNUPGHOME")
+        else:
+            shutil.rmtree(gnupg_home, ignore_errors=True)
+            gnupg_home.mkdir(mode=0o700)
 
-        # Run --init first; most subsequent tests depend on the generated key
-        test("Prerequisites check (--check)", lambda: test_check(ws))
-        test("Init: generate key + export (--init)", lambda: test_init(ws))
-
-        # Signing & verification
-        test("Single sign + verify", lambda: test_single_sign_and_verify(ws))
-        test("Batch sign + verify", lambda: test_batch_sign_and_verify(ws))
-        test("Force overwrite re-sign", lambda: test_force_overwrite(ws))
-        test("No --force rejects existing", lambda: test_no_force_rejects(ws))
-        test("Export key to custom dir", lambda: test_export_key_default_and_custom(ws))
-        test("Skill name override", lambda: test_skill_name_override(ws))
-        test("Hidden files excluded", lambda: test_hidden_files_excluded(ws))
-
-        # Negative / security tests
-        test("Tampered file detected", lambda: test_tampered_file_detected(ws))
-        test(
-            "Unsigned reference file detected",
-            lambda: test_unsigned_reference_file_detected(ws),
+        init = run_maybe_sudo(
+            ["bash", installed_script, "--init"],
+            env=env,
+            sudo=needs_sudo,
+            timeout=180,
         )
-        test("Missing .skill.sig detected", lambda: test_missing_sig_detected(ws))
-        test("Wrong key rejected", lambda: test_wrong_key_rejected(ws))
+        assert_success(init, "installed --init")
+        assert str(trusted_keys_dir) in init.stdout + init.stderr
 
-        # Environment variable key import
-        test("GPG_PRIVATE_KEY env import", lambda: test_gpg_private_key_env(ws))
+        batch = run_maybe_sudo(
+            ["bash", installed_script, "--batch", skills_root, "--force"],
+            env=env,
+            sudo=needs_sudo,
+            timeout=180,
+        )
+        assert_success(batch, "installed --batch")
+        assert "3/3 skills signed successfully" in batch.stdout + batch.stderr
 
-        # Schema / structure
-        test("Manifest JSON structure", lambda: test_manifest_structure(ws))
-        test("Subdirectory files in manifest", lambda: test_subdirectory_files(ws))
-
+        verify = run_command([agent_sec_cli, "verify"], timeout=180)
+        assert_success(verify, "agent-sec-cli verify")
+        assert "VERIFICATION PASSED" in verify.stdout
+        for skill_name in expected_skills:
+            assert f"[OK] {skill_name}" in verify.stdout
+            assert (skills_root / skill_name / SIGNING_DIR / "Manifest.json").is_file()
+            assert (skills_root / skill_name / SIGNING_DIR / ".skill.sig").is_file()
     finally:
-        ws.cleanup()
-
-    # Summary
-    print()
-    print("=" * 60)
-    total = results.passed + results.failed
-    print(f"{BOLD}Results: {results.passed}/{total} passed{NC}")
-    if results.errors:
-        for name, exc in results.errors:
-            print(f"  {RED}FAIL{NC} {name}: {exc}")
-    print("=" * 60)
-
-    if results.failed:
-        print(f"{RED}{results.failed} test(s) failed{NC}")
-        sys.exit(1)
-    else:
-        print(f"{GREEN}All tests passed!{NC}")
-        sys.exit(0)
+        if needs_sudo and os.geteuid() != 0:
+            run_maybe_sudo(["rm", "-rf", gnupg_home], sudo=True)
+        else:
+            shutil.rmtree(gnupg_home, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(pytest.main([__file__]))

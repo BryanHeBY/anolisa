@@ -25,7 +25,7 @@ jobs:
           sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
           dnf install -y tar git rpm-build gcc make clang llvm \
                          openssl-devel libseccomp-devel bubblewrap \
-                         python3-pip
+                         python3-pip gnupg2 jq
 
       - uses: actions/checkout@v4
 
