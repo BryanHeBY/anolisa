@@ -1,0 +1,4 @@
+[capabilities.code-scan]
+enabled = true
+timeout = 10
+enable_block = false

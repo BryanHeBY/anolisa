@@ -5,6 +5,7 @@
 | 组件 | 语言 | 路径 | 章节 |
 |------|------|------|------|
 | agent-sec-cli | Python + Rust | agent-sec-cli/ | [agent-sec-cli](#agent-sec-cli) |
+| hermes-plugin | Python (stdlib) | hermes-plugin/ | [hermes-plugin](#hermes-plugin) |
 | cosh-extension | Python (hooks) | cosh-extension/ | [cosh-extension](#cosh-extension) |
 | openclaw-plugin | TypeScript | openclaw-plugin/ | [openclaw-plugin](#openclaw-plugin) |
 | linux-sandbox | Rust | linux-sandbox/ | [linux-sandbox](#linux-sandbox) |
@@ -261,6 +262,128 @@ include = [
 
 > Lint 检查仅在 PR 触发时对增量代码检查，不检查历史代码。违规信息显示在 PR 的 Job Summary 区域。
 > 增量覆盖率门禁仅在 PR 触发，要求本次 PR 新增/修改的代码行中被测试覆盖的比例 ≥ 80%。
+
+---
+
+## hermes-plugin
+
+### 1. 项目概述
+
+hermes-plugin 是面向 [Hermes Agent](https://hermes-agent.nousresearch.com/) 的安全插件，通过 Hook 机制拦截危险操作，底层调用 agent-sec-cli 进行安全扫描。
+
+**设计原则：**
+
+- **Fail-open** — 任何异常都不阻塞 agent 运行，hook 内部捕获所有异常返回 `None` 放行
+- **零运行时依赖** — 仅使用 Python 3.11 标准库（tomllib、json、subprocess、logging、dataclasses）
+- **可配置行为** — 默认 observe（仅日志），需显式 `enable_block = true` 才阻断
+
+**目录结构：**
+
+```
+hermes-plugin/
+├── scripts/
+│   └── deploy.sh             # 部署脚本
+├── src/                      # 运行时文件（部署到 ~/.hermes/plugins/）
+│   ├── plugin.yaml           # Hermes 插件 manifest
+│   ├── __init__.py           # register(ctx) 入口
+│   ├── config.toml           # 能力开关与参数
+│   ├── registry.py           # 能力注册器 + safe-wrap
+│   ├── cli_runner.py         # agent-sec-cli subprocess 封装
+│   └── capabilities/
+│       ├── __init__.py       # 能力清单
+│       └── code_scan.py      # Code Scanner 实现
+└── README.md                 # 开发指南
+tests/hermes-plugin/          # 单元测试（位于 agent-sec-core/tests/ 下）
+```
+
+### 2. 导入规范
+
+Hermes 以包形式加载插件，模块间**必须使用相对导入**：
+
+```python
+# 正确：相对导入
+from .registry import load_config              # 同级模块
+from .capabilities import ALL_CAPABILITIES     # 同级子包
+from ..cli_runner import call_agent_sec_cli    # 上级模块（在子包中）
+
+# 错误：裸名导入（插件目录不在 sys.path）
+# from registry import load_config
+```
+
+**依赖分层（无循环依赖）：**
+
+- 底层：`cli_runner.py`（纯 stdlib，无内部依赖）
+- 中间层：`registry.py`（纯 stdlib）
+- 实现层：`capabilities/*.py`（依赖 cli_runner、registry）
+- 顶层：`__init__.py`（依赖 capabilities、registry）
+
+### 3. 编码风格
+
+| 规范 | 要求 |
+|------|------|
+| 格式化 | black + isort（同 agent-sec-cli） |
+| lint | 不适用 ruff（stdlib-only 项目，规则不兼容） |
+| 日志 | `logging.getLogger("agent-sec-core")`，f-string 格式 |
+| 类型注解 | 不强制（非 ruff 管辖） |
+| 注释 | 英文 |
+
+### 4. 新增 Capability
+
+1. 在 `src/capabilities/` 下新建 `xxx.py`
+2. 实现类，必须包含 `id`、`name`、`hooks` 属性和 `register(self, ctx, config: dict)` 方法
+3. 在 `capabilities/__init__.py` 中导入并加入 `ALL_CAPABILITIES`
+4. 在 `config.toml` 中添加对应配置段 `[capabilities.<id>]`
+
+```python
+class MyCapability:
+    id = "my-cap"
+    name = "My Capability"
+    hooks = ["pre_tool_call"]
+
+    def register(self, ctx, config: dict) -> None:
+        self._timeout = config.get("timeout", 10.0)
+        wrapped = safe_hook_wrapper(self._handler, self.id)
+        ctx.register_hook("pre_tool_call", wrapped)
+
+    def _handler(self, tool_name, args, **kwargs):
+        ...
+```
+
+### 5. 可用 Hook
+
+| Hook | 触发时机 | 回调签名 | 阻断方式 |
+|------|----------|----------|----------|
+| `pre_tool_call` | 工具执行前 | `(tool_name, args, **kwargs)` | 返回 `{"action": "block", "message": str}` |
+| `post_tool_call` | 工具执行后 | `(tool_name, result, **kwargs)` | 无阻断 |
+| `pre_llm_call` | LLM 调用前 | `(messages, **kwargs)` | 注入 context |
+
+### 6. 配置（config.toml）
+
+```toml
+[capabilities.code-scan]
+enabled = true          # 是否注册该能力
+timeout = 10            # agent-sec-cli 子进程超时（秒）
+enable_block = false    # false=observe(仅日志), true=block(阻断)
+```
+
+- `enabled = false` → 能力完全不注册
+- `enable_block = false` → 检测到风险时仅记 WARNING 日志，不阻断工具调用
+- `enable_block = true` → 检测到 deny/warn 时阻断工具调用
+
+### 7. 测试
+
+```bash
+# 从 agent-sec-core 目录执行
+uv run --project agent-sec-cli pytest tests/hermes-plugin/ -v
+```
+
+### 8. 部署
+
+```bash
+./hermes-plugin/scripts/deploy.sh
+```
+
+`deploy.sh` 会将 `src/` 目录内容复制到 `~/.hermes/plugins/agent-sec-core-hermes-plugin/`。
 
 ---
 

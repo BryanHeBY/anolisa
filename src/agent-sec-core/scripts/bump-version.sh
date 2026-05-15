@@ -172,7 +172,15 @@ bump_file "$PROJECT_ROOT/cosh-extension/cosh-extension.json" \
     "cosh-extension/cosh-extension.json"
 
 # -----------------------------------------------------------------------------
-# 8. Regenerate lock files
+# 8. hermes-plugin/src/plugin.yaml
+# -----------------------------------------------------------------------------
+bump_file "$PROJECT_ROOT/hermes-plugin/src/plugin.yaml" \
+    "^version: $OLD_VERSION" \
+    "version: $NEW_VERSION" \
+    "hermes-plugin/src/plugin.yaml"
+
+# -----------------------------------------------------------------------------
+# 9. Regenerate lock files
 # -----------------------------------------------------------------------------
 log "Regenerating lock files..."
 
