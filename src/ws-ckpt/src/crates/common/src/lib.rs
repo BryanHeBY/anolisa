@@ -162,6 +162,8 @@ pub enum ErrorCode {
     SnapshotAlreadyExists,
     WriteLockConflict,
     DiskSpaceInsufficient,
+    CwdOccupied,
+    CwdScanFailed,
 }
 
 // ── Snapshot types ──
@@ -943,6 +945,8 @@ mod tests {
             ErrorCode::SnapshotAlreadyExists,
             ErrorCode::WriteLockConflict,
             ErrorCode::DiskSpaceInsufficient,
+            ErrorCode::CwdOccupied,
+            ErrorCode::CwdScanFailed,
         ];
         for code in codes {
             let resp = Response::Error {

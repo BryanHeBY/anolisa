@@ -249,6 +249,12 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
         ));
     }
 
+    let abs_path_str = abs_path.to_string_lossy().to_string();
+
+    if let Some(resp) = crate::util::guard_cwd_occupants(&abs_path_str).await {
+        return Ok(resp);
+    }
+
     // Check rsync available
     let rsync_check = Command::new("which")
         .arg("rsync")
@@ -271,8 +277,6 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
         ws_id = format!("{}-{}", base_id, suffix);
         suffix += 1;
     }
-
-    let abs_path_str = abs_path.to_string_lossy().to_string();
 
     // Steps 4-11 via backend, with cleanup handled internally
     if let Err(e) = state.backend.init_workspace(&abs_path_str, &ws_id).await {
@@ -453,6 +457,9 @@ pub async fn recover_workspace(
         let ws = ws_lock.read().await;
         (ws.ws_id.clone(), ws.path.to_string_lossy().to_string())
     };
+
+    // Intentionally no cwd guard: recover is a terminal "tear out" operation
+    // gated by CLI ConfirmationRequired. The CLI prompt is the contract.
 
     // 3. call backend recover
     state

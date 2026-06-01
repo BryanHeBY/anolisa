@@ -63,6 +63,21 @@ def map_error_to_message(stderr: str, context: Optional[Dict[str, Any]] = None) 
         return f"Permission denied.{ctx_str}"
     if "timeout" in lowered:
         return f"Command timed out.{ctx_str}"
+    # Order matters: scan-failed (retryable) before occupants-present (hard).
+    if "cwd scan failed" in lowered:
+        return (
+            "ws-ckpt could not scan /proc to verify workspace occupants "
+            "(typically a transient /proc or canonicalize race). "
+            "This is retryable — wait a moment and try again."
+            f"{ctx_str}"
+        )
+    if "have cwd inside workspace" in lowered:
+        return (
+            "Other processes have their working directory inside the workspace. "
+            "ws-ckpt cannot proceed because the symlink swap would break those processes. "
+            "This is NOT retryable. The user must move affected processes out of the workspace."
+            f"{ctx_str}"
+        )
 
     return f"ws-ckpt error: {stderr.strip()}{ctx_str}"
 

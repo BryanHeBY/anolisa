@@ -37,6 +37,17 @@ export function mapErrorToLLMMessage(stderr: string, context?: { id?: string }):
   if (stderr.includes('not found') && stderr.toLowerCase().includes('workspace')) {
     return 'Workspace not found. Use ws-ckpt-init to initialize first.';
   }
+  // Order matters: scan-failed (retryable) before occupants-present (hard).
+  if (stderr.includes('cwd scan failed')) {
+    return 'ws-ckpt could not scan /proc to verify workspace occupants ' +
+      '(typically a transient /proc/canonicalize race). ' +
+      'This is retryable — wait a moment and try again.';
+  }
+  if (stderr.includes('have cwd inside workspace')) {
+    return 'Other processes have their working directory inside the workspace. ' +
+      'ws-ckpt cannot proceed because the symlink swap would break those processes. ' +
+      'This is NOT retryable. The user must move affected processes out of the workspace.';
+  }
   // Default: return original stderr cleaned of ANSI codes
   return stderr.replace(/\x1b\[[0-9;]*m/g, '').trim();
 }

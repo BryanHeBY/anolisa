@@ -115,13 +115,13 @@ pub async fn rollback(
     workspace: &str,
     to: &str,
 ) -> anyhow::Result<Response> {
-    // 1. Resolve workspace (by ID, absolute path, or relative path)
+    // 1. Resolve workspace
     let arc = match state.resolve_workspace(workspace).await {
         Some(a) => a,
         None => return Ok(workspace_not_found(workspace)),
     };
 
-    // 2. Acquire write lock
+    // 2. Write lock: validate snapshot → cwd guard → execute rollback
     let ws = arc.write().await;
 
     // 3. Resolve target snapshot by prefix
@@ -141,7 +141,7 @@ pub async fn rollback(
         }
     };
 
-    // 3a. Reject missing snapshots — user must manually delete with --force
+    // Reject missing snapshots — user must manually delete with --force
     if ws
         .index
         .snapshots
@@ -154,8 +154,12 @@ pub async fn rollback(
         });
     }
 
-    // 4. Construct paths
-    let _abs_path_str = ws.path.to_string_lossy().to_string();
+    // 4. Refuse if any process holds a cwd inside the workspace — rollback
+    //    swaps the subvolume and would invalidate their working directory.
+    let ws_path_str = ws.index.workspace_path.to_string_lossy().to_string();
+    if let Some(resp) = crate::util::guard_cwd_occupants(&ws_path_str).await {
+        return Ok(resp);
+    }
 
     // 5. Rollback via backend (includes warmup, snapshot, cleanup)
     state.backend.rollback(&ws.ws_id, &resolved_id).await?;

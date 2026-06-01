@@ -709,6 +709,27 @@ async fn handle_response(response: Response, original_request: &Request) -> Resu
             eprintln!("  Use 'ws-ckpt init' to initialize, or 'ws-ckpt list' to view workspaces.");
             process::exit(1);
         }
+        Response::Error {
+            code: ErrorCode::CwdOccupied,
+            message,
+        } => {
+            eprintln!("\x1b[31m✗ {}\x1b[0m", message);
+            eprintln!(
+                "  Tip: inspect each PID above with `ps -fp <PID>`, then cd them out or kill."
+            );
+            eprintln!(
+                "  (cwd may be a bind-mount alias of the workspace, not the workspace path.)"
+            );
+            process::exit(1);
+        }
+        Response::Error {
+            code: ErrorCode::CwdScanFailed,
+            message,
+        } => {
+            eprintln!("\x1b[31m✗ {}\x1b[0m", message);
+            eprintln!("  This is typically transient — retry the command.");
+            process::exit(1);
+        }
         Response::Error { code, message } => {
             eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
             process::exit(1);
@@ -1127,7 +1148,10 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
                 println!("  {} ({} snapshots)", ws.path, ws.snapshot_count);
             }
             println!(
-                "This will delete all snapshots and restore all workspaces to normal directories."
+                "This will delete all snapshots and restore all workspaces to normal directories.\n\
+                 WARNING: ws-ckpt does NOT check for processes with cwd inside any workspace before recover.\n\
+                 Any such process will have its working directory silently invalidated — verify yourself\n\
+                 (e.g. lsof +D <ws>, or ls -l /proc/*/cwd) before confirming."
             );
             eprint!("Proceed? [y/N] ");
             io::stderr().flush()?;
@@ -1186,7 +1210,10 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         if !force {
             println!("Workspace: {} ({} snapshots)", ws_arg, snapshot_count);
             println!(
-                "This will delete all snapshots and restore the workspace to a normal directory."
+                "This will delete all snapshots and restore the workspace to a normal directory.\n\
+                 WARNING: ws-ckpt does NOT check for processes with cwd inside the workspace before recover.\n\
+                 Any such process will have its working directory silently invalidated — verify yourself\n\
+                 (e.g. lsof +D <ws>, or ls -l /proc/*/cwd) before confirming."
             );
             eprint!("Proceed? [y/N] ");
             io::stderr().flush()?;
