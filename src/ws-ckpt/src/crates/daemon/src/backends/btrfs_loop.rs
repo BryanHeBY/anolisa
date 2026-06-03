@@ -264,8 +264,9 @@ impl StorageBackend for BtrfsLoopBackend {
             .await
             .context("failed to run rsync")?;
         if !rsync_status.success() {
-            error!(
-                "rsync failed restoring {} -> {}, exit: {:?}",
+            bail!(
+                "rsync failed restoring {} -> {}, exit: {:?}; \
+                 workspace and snapshots preserved for retry",
                 src,
                 original_path,
                 rsync_status.code()
