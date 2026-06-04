@@ -56,8 +56,8 @@ export function registerTools(api: OpenClawPluginApi): void {
               "New value as a string. Formats: " +
               "autoCheckpoint = \"true\"/\"false\"; " +
               "workspace = absolute path; " +
-              "maxSnapshotsNum = positive integer or \"unset\"; " +
-              "maxSnapshotsDuration = e.g. \"7d\"/\"24h\" or \"unset\".",
+              "maxSnapshotsNum = positive integer (or \"unset\" to restore inherit-global); " +
+              "maxSnapshotsDuration = e.g. \"7d\"/\"24h\" (or \"unset\" to restore inherit-global).",
           },
         },
       },

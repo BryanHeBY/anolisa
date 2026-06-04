@@ -81,6 +81,91 @@ def _run_ws_ckpt_cmd(cmd: list) -> Tuple[bool, str]:
         return False, str(e)
 
 
+# Schema version the plugin understands. ws-ckpt --format json carries this
+# tag; mismatch means a daemon bump and the plugin should NOT re-interpret.
+_POLICY_JSON_SCHEMA = "ws-ckpt-policy/v1"
+
+
+def _parse_workspace_policy_json(stdout: str) -> Dict[str, Any]:
+    """Parse `ws-ckpt config -w <ws> --format json` stdout.
+
+    Returns one of:
+        {"kind": "parse-error", "reason": str}
+        {"kind": "disabled"}              ← daemon pre-computed is_disabled=true
+        {"kind": "count",    "num": int}
+        {"kind": "age",      "duration": str}
+
+    Mirrors the openclaw discriminated union (config.ts WorkspaceCleanupParsed)
+    so display logic can tell a real "disabled" from a parse failure —
+    treating a parse miss as "disabled" was openclaw's original bug.
+    """
+    try:
+        doc = json.loads(stdout)
+    except json.JSONDecodeError as e:
+        return {"kind": "parse-error", "reason": f"not valid JSON: {e}"}
+    if not isinstance(doc, dict):
+        return {"kind": "parse-error", "reason": "JSON root is not an object"}
+    if doc.get("schema") != _POLICY_JSON_SCHEMA:
+        return {
+            "kind": "parse-error",
+            "reason": f"unknown schema: {doc.get('schema')!r} (expected {_POLICY_JSON_SCHEMA!r})",
+        }
+    eff = doc.get("effective")
+    if not isinstance(eff, dict):
+        return {"kind": "parse-error", "reason": "missing `effective`"}
+    # Trust daemon's pre-computed is_disabled (covers auto_cleanup=false AND
+    # Count(0) / Age{secs:0}); re-deriving consumer-side is what bit openclaw.
+    if eff.get("is_disabled") is True:
+        return {"kind": "disabled"}
+    keep = eff.get("auto_cleanup_keep")
+    if not isinstance(keep, dict):
+        return {"kind": "parse-error", "reason": "missing `effective.auto_cleanup_keep`"}
+    mode = keep.get("mode")
+    if mode == "count":
+        n = keep.get("count")
+        # bool is a subclass of int in Python — exclude explicitly so {"count": true} doesn't slip through.
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            return {"kind": "parse-error", "reason": f"`count` must be a non-negative int, got {n!r}"}
+        return {"kind": "count", "num": n}
+    if mode == "age":
+        raw = keep.get("raw")
+        if not isinstance(raw, str):
+            return {"kind": "parse-error", "reason": "`raw` is not a string"}
+        return {"kind": "age", "duration": raw}
+    return {"kind": "parse-error", "reason": f"unknown auto_cleanup_keep.mode: {mode!r}"}
+
+
+def _render_workspace_policy(stdout: str, ws: str) -> list:
+    """Render a parsed JSON policy as human-readable lines for `view`.
+
+    A parse failure is reported explicitly, never silently rendered as
+    "auto-cleanup disabled" (openclaw's original bug).
+    """
+    parsed = _parse_workspace_policy_json(stdout)
+    kind = parsed["kind"]
+    if kind == "parse-error":
+        return [
+            f"  (daemon response did not match expected schema: {parsed['reason']}; "
+            f"raw stdout follows)",
+            stdout,
+        ]
+    if kind == "disabled":
+        return [
+            "  maxSnapshotsNum:      not set - auto-cleanup disabled",
+            "  maxSnapshotsDuration: not set - auto-cleanup disabled",
+        ]
+    if kind == "count":
+        return [
+            f"  maxSnapshotsNum:      {parsed['num']}",
+            "  maxSnapshotsDuration: not set",
+        ]
+    # kind == "age"
+    return [
+        "  maxSnapshotsNum:      not set",
+        f"  maxSnapshotsDuration: {parsed['duration']}",
+    ]
+
+
 def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
@@ -148,8 +233,8 @@ WS_CKPT_CONFIG_SCHEMA: Dict[str, Any] = {
                     "New value as a string. Formats: "
                     "autoCheckpoint = \"true\"/\"false\"; "
                     "workspace = absolute path; "
-                    "maxSnapshotsNum = positive integer or \"unset\"; "
-                    "maxSnapshotsDuration = e.g. \"7d\"/\"24h\" or \"unset\"."
+                    "maxSnapshotsNum = positive integer (or \"unset\" to restore inherit-global); "
+                    "maxSnapshotsDuration = e.g. \"7d\"/\"24h\" (or \"unset\" to restore inherit-global)."
                 ),
             },
         },
@@ -305,27 +390,43 @@ WS_CKPT_STATUS_SCHEMA: Dict[str, Any] = {
 def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
     """Handle ws-ckpt-config tool call.
 
-    view  → print plugin config + transparently dump `ws-ckpt config` stdout.
+    view  → print plugin config + transparently dump
+        `ws-ckpt config -w <workspace>` stdout (3-column effective/local/global view).
     update autoCheckpoint / workspace  → mutate the in-process manager
         config; persistence requires editing ~/.hermes/config.yaml.
     update maxSnapshotsNum / maxSnapshotsDuration → shell out to
-        `ws-ckpt config --enable-auto-cleanup --auto-cleanup-keep <v>`.
+        `ws-ckpt config -w <workspace> --enable-auto-cleanup --auto-cleanup-keep <v>`.
+
+    Scope is **per-workspace** (the workspace this plugin manages): a hermes
+    user changing snapshot retention shouldn't accidentally rewrite the
+    daemon-wide default that other workspaces / users share. ws-ckpt v0.3.3
+    introduced explicit scope flags (`-g` global / `-w` per-ws); this plugin
+    always uses `-w`.
     """
     action = (args.get("action") or "view").strip().lower()
 
     if action == "view":
+        ws, ws_err = _require_workspace()
+        if ws_err:
+            return ws_err
         cfg = load_config()
         lines = [
             "Current ws-ckpt plugin configuration:",
             f"  autoCheckpoint: {cfg.auto_checkpoint}",
             f"  workspace:      {cfg.workspace}",
             "",
-            "Daemon configuration (from `ws-ckpt config`):",
+            f"Workspace policy (from `ws-ckpt config -w {ws} --format json`):",
         ]
-        success, output = _run_ws_ckpt_cmd(["ws-ckpt", "config"])
-        lines.append(output if output else "(daemon returned no output)")
+        # Use `--format json`, not raw daemon text: text isn't a contract,
+        # while the JSON schema is versioned and lets us tell parse-error
+        # from a real "disabled" (the openclaw bug we avoid here).
+        success, output = _run_ws_ckpt_cmd(
+            ["ws-ckpt", "config", "-w", ws, "--format", "json"]
+        )
         if not success:
-            lines.append("(failed to query daemon — output above is stderr)")
+            lines.append(f"(failed to query daemon: {output or 'no output'})")
+            return _ok("\n".join(lines))
+        lines.extend(_render_workspace_policy(output, ws))
         return _ok("\n".join(lines))
 
     if action not in ("update", "set"):
@@ -340,21 +441,29 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
             "maxSnapshotsNum, maxSnapshotsDuration."
         )
 
-    # Daemon-level keys: persist via `ws-ckpt config`
+    # Persist via `ws-ckpt config -w <workspace>` so the change scopes to a
+    # per-ws policy.toml override, not the shared daemon-wide default.
     if key in ("maxSnapshotsNum", "maxSnapshotsDuration"):
+        ws, ws_err = _require_workspace()
+        if ws_err:
+            return ws_err
+
         if value is None:
             return _err(
-                f"{key} requires a value (or \"unset\" to disable auto-cleanup)"
+                f"{key} requires a value (or \"unset\" to restore inherit-global)"
             )
         value = str(value).strip()
 
         if value == "unset":
+            # unset = restore default (delete policy.toml) so admin's later global toggle wins.
             success, output = _run_ws_ckpt_cmd(
-                ["ws-ckpt", "config", "--disable-auto-cleanup"]
+                ["ws-ckpt", "config", "-w", ws, "--reset"]
             )
             if not success:
-                return _err(f"Failed to disable auto-cleanup: {output}")
-            return _ok(f"Cleared: {key} unset — auto-cleanup disabled.")
+                return _err(f"Failed to reset workspace policy for {ws}: {output}")
+            return _ok(
+                f"Cleared: {key} unset — workspace {ws} now inherits global auto-cleanup."
+            )
 
         if key == "maxSnapshotsNum":
             try:
@@ -368,13 +477,13 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
             keep = value  # daemon parses duration strings like "7d", "24h"
 
         success, output = _run_ws_ckpt_cmd(
-            ["ws-ckpt", "config", "--enable-auto-cleanup",
+            ["ws-ckpt", "config", "-w", ws, "--enable-auto-cleanup",
              "--auto-cleanup-keep", keep]
         )
         if not success:
-            return _err(f"Failed to configure daemon: {output}")
+            return _err(f"Failed to configure workspace {ws}: {output}")
         return _ok(
-            f"Updated daemon config: {key} = {keep} "
+            f"Updated workspace policy for {ws}: {key} = {keep} "
             f"(auto-cleanup enabled, keep {keep})"
         )
 
@@ -383,8 +492,17 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
     # session without re-reading yaml on every hook fire.
     if key == "autoCheckpoint":
         if value is None:
-            return _err("autoCheckpoint requires a value (true/false)")
-        coerced = str(value).strip().lower() in ("true", "1", "yes", "on")
+            return _err('autoCheckpoint requires a value: "true" or "false"')
+        normalized = str(value).strip().lower()
+        # LLM tool callers and shell users emit a wide vocabulary; accept the
+        # common bool aliases instead of failing silently for anyone who didn't
+        # read stderr. Canonical form remains "true"/"false" in tool descriptions.
+        if normalized in ("true", "1", "yes", "on", "enabled"):
+            coerced = True
+        elif normalized in ("false", "0", "no", "off", "disabled"):
+            coerced = False
+        else:
+            return _err(f'autoCheckpoint must be "true" or "false" (got "{value}")')
         if coerced:
             workspace, ws_err = _require_workspace()
             if ws_err:

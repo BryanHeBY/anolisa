@@ -10,10 +10,9 @@
  * - 3 hooks: message_received, agent_end, session_start
  */
 
-import { PluginConfigManager, parseDaemonAutoCleanupConfig, daemonAutoCleanup } from "./config.js";
+import { PluginConfigManager } from "./config.js";
 import { EnvironmentChecker } from "./environment-check.js";
 import { BtrfsManager } from "./btrfs-manager.js";
-import { CommandExecutor } from "./commands.js";
 import type { PluginConfig } from "./types.js";
 import {
   definePluginEntry,
@@ -105,14 +104,10 @@ function register(api: OpenClawPluginApi): void {
       }
     }
 
-    // Query daemon auto-cleanup config to align in-memory state.
-    const cmd = new CommandExecutor();
-    const cfgResult = await cmd.config();
-    if (cfgResult.exitCode === 0) {
-      const { cleanupNum, cleanupDuration } = parseDaemonAutoCleanupConfig(cfgResult.stdout);
-      daemonAutoCleanup.cleanupNum = cleanupNum;
-      daemonAutoCleanup.cleanupDuration = cleanupDuration;
-    }
+    // No register-time policy prefetch: the view tool queries daemon
+    // every call anyway, and a stale prefetch from register time would
+    // mislead the user/LLM if the policy changed since then. Aligns with
+    // the hermes plugin (no cache).
   })();
 
   // ------------------------------------------------------------------

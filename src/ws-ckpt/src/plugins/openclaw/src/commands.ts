@@ -9,6 +9,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import type { CommandOutput } from "./types.js";
+import { pluginState } from "./state.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -190,19 +191,48 @@ export class CommandExecutor {
   }
 
   /**
-   * View or update daemon config.
-   * Maps to `ws-ckpt config [flags]`.
+   * View or update **per-workspace** auto-cleanup config.
+   * Maps to `ws-ckpt config -w <workspace> --format json [flags]`.
+   *
+   * Always uses `--format json`: text output isn't a contract and grepping
+   * it conflated regex-miss / real-disabled / Count(0). The JSON shape is
+   * versioned, so parse failures stay distinct from a real "disabled" state.
+   *
+   * Workspace resolution (mirrors `checkpoint` etc.): explicit `workspace`
+   * arg → `pluginState.resolvedConfig.workspace` → else error (no silent
+   * `-g` fallback; plugin ops are per-workspace by design). The result's
+   * `usedWorkspace` names the ws actually changed.
    */
-  public async config(options?: {
-    enableAutoCleanup?: boolean;
-    disableAutoCleanup?: boolean;
-    autoCleanupKeep?: string;
-  }): Promise<CommandOutput> {
-    const args = ["config"];
-    if (options?.enableAutoCleanup) args.push("--enable-auto-cleanup");
-    if (options?.disableAutoCleanup) args.push("--disable-auto-cleanup");
-    if (options?.autoCleanupKeep !== undefined) args.push("--auto-cleanup-keep", options.autoCleanupKeep);
-    return this.run(args);
+  public async config(
+    workspace?: string,
+    options?: {
+      enableAutoCleanup?: boolean;
+      disableAutoCleanup?: boolean;
+      autoCleanupKeep?: string;
+      reset?: boolean;
+    },
+  ): Promise<CommandOutput & { usedWorkspace?: string }> {
+    const ws = workspace ?? pluginState.resolvedConfig?.workspace;
+    if (!ws) {
+      return {
+        exitCode: 2,
+        stdout: "",
+        stderr:
+          "No workspace specified: pass workspace explicitly or set plugins.entries.ws-ckpt.config.workspace.",
+      };
+    }
+    const args = ["config", "-w", ws, "--format", "json"];
+    if (options?.reset) {
+      args.push("--reset");
+    } else {
+      if (options?.enableAutoCleanup) args.push("--enable-auto-cleanup");
+      if (options?.disableAutoCleanup) args.push("--disable-auto-cleanup");
+      if (options?.autoCleanupKeep !== undefined) {
+        args.push("--auto-cleanup-keep", options.autoCleanupKeep);
+      }
+    }
+    const out = await this.run(args);
+    return { ...out, usedWorkspace: ws };
   }
 
   // -----------------------------------------------------------------------
