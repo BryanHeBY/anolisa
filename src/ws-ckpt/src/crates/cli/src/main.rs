@@ -4,17 +4,17 @@ use std::process;
 
 use anyhow::{Context, Result};
 use clap::builder::{StringValueParser, TypedValueParser};
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use ws_ckpt_common::{
     decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file, save_config_file,
-    ChangeType, CleanupRetention, DaemonConfig, ErrorCode, Request, Response,
-    ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
-    DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
+    ChangeType, CleanupRetention, DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp,
+    Request, Response, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH,
+    DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
-    MAX_FRAME_SIZE,
+    GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE, OVERVIEW_JSON_SCHEMA,
 };
 
 /// Backend-usage advisory threshold (percent); CLI-side since daemon returns raw bytes.
@@ -36,6 +36,69 @@ fn parse_cleanup_retention(s: &str) -> Result<CleanupRetention, String> {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Arguments for `ws-ckpt config`. Scope (-g vs -w) is exclusive but optional;
+/// when omitted, the command renders an overview (global + ws roll-up) — view-only.
+///
+/// `--reset` is per-workspace only (deletes that ws's `policy.toml`). The
+/// interval/image flags are global-only; using them with `-w` is rejected
+/// at runtime with a clear error.
+#[derive(Args, Debug)]
+#[command(group(
+    ArgGroup::new("scope").args(["global", "workspace"]).required(false).multiple(false),
+))]
+struct ConfigArgs {
+    /// Operate on /etc/ws-ckpt/config.toml (daemon-wide).
+    #[arg(short = 'g', long = "global")]
+    global: bool,
+
+    /// Operate on this workspace's policy.toml override.
+    #[arg(short = 'w', long = "workspace", value_parser = workspace_value_parser())]
+    workspace: Option<String>,
+
+    /// Per-workspace only: delete `policy.toml`, restoring inherit-global.
+    #[arg(long, conflicts_with_all = ["enable_auto_cleanup", "disable_auto_cleanup", "auto_cleanup_keep", "auto_cleanup_interval", "health_check_interval", "img_size", "img_max_percent"])]
+    reset: bool,
+
+    /// Set health check interval in seconds (0 disables the scheduler loop).
+    /// Global-only.
+    #[arg(long)]
+    health_check_interval: Option<u64>,
+
+    /// Set target image size in GB (image will be grown/shrunk at next daemon restart).
+    /// Global-only.
+    #[arg(long)]
+    img_size: Option<u64>,
+
+    /// Set initial-creation cap as percentage of host partition (0-100);
+    /// only used on first bootstrap. Global-only.
+    #[arg(long)]
+    img_max_percent: Option<f64>,
+
+    /// Enable periodic auto-cleanup.
+    #[arg(long, conflicts_with = "disable_auto_cleanup")]
+    enable_auto_cleanup: bool,
+
+    /// Disable periodic auto-cleanup.
+    #[arg(long, conflicts_with = "enable_auto_cleanup")]
+    disable_auto_cleanup: bool,
+
+    /// Set cleanup retention: integer (count mode, 0 = disabled) or duration
+    /// like "30d" (age mode, units s/m/h/d/w).
+    #[arg(long, value_parser = parse_cleanup_retention)]
+    auto_cleanup_keep: Option<CleanupRetention>,
+
+    /// Set auto-cleanup interval in seconds (0 disables the scheduler loop).
+    /// Global-only — `-w` callers passing this are rejected.
+    #[arg(long)]
+    auto_cleanup_interval: Option<u64>,
+
+    /// Output format: `text` (human-readable, default) or `json`. Programmatic
+    /// consumers should use `json` — text is not a contract; the JSON shape is
+    /// versioned by its `schema` field.
+    #[arg(long, default_value = "text")]
+    format: String,
 }
 
 #[derive(Subcommand)]
@@ -155,36 +218,14 @@ enum Commands {
         keep: u32,
     },
 
-    /// View or update daemon configuration
-    Config {
-        /// Set health check interval in seconds (0 disables the scheduler loop)
-        #[arg(long)]
-        health_check_interval: Option<u64>,
-
-        /// Set target image size in GB (image will be grown/shrunk at next daemon restart)
-        #[arg(long)]
-        img_size: Option<u64>,
-
-        /// Set initial-creation cap as percentage of host partition (0-100); only used on first bootstrap
-        #[arg(long)]
-        img_max_percent: Option<f64>,
-
-        /// Enable periodic auto-cleanup
-        #[arg(long, conflicts_with = "disable_auto_cleanup")]
-        enable_auto_cleanup: bool,
-
-        /// Disable periodic auto-cleanup
-        #[arg(long, conflicts_with = "enable_auto_cleanup")]
-        disable_auto_cleanup: bool,
-
-        /// Set cleanup retention: integer (count mode, 0 = disabled) or duration like "30d" (age mode, units s/m/h/d/w)
-        #[arg(long, value_parser = parse_cleanup_retention)]
-        auto_cleanup_keep: Option<CleanupRetention>,
-
-        /// Set auto-cleanup interval in seconds (0 disables the scheduler loop)
-        #[arg(long)]
-        auto_cleanup_interval: Option<u64>,
-    },
+    /// View or update daemon / per-workspace configuration.
+    ///
+    /// **Scope is required for any modification**: pass exactly one of
+    /// `-g/--global` or `-w/--workspace` when setting flags or `--reset`.
+    /// No scope = read-only overview (global cfg + per-ws override count);
+    /// no scope + flags = hard error, so it's always obvious which layer
+    /// a write lands on.
+    Config(ConfigArgs),
 
     /// Trigger daemon to reload /etc/ws-ckpt/config.toml
     Reload,
@@ -355,41 +396,8 @@ async fn run(cli: Cli) -> Result<()> {
             let response = send_request_to_daemon(&request).await?;
             handle_cleanup_response(response)?;
         }
-        Commands::Config {
-            health_check_interval,
-            img_size,
-            img_max_percent,
-            enable_auto_cleanup,
-            disable_auto_cleanup,
-            auto_cleanup_keep,
-            auto_cleanup_interval,
-        } => {
-            let auto_cleanup = match (enable_auto_cleanup, disable_auto_cleanup) {
-                (true, _) => Some(true),
-                (_, true) => Some(false),
-                _ => None,
-            };
-            if health_check_interval.is_none()
-                && img_size.is_none()
-                && img_max_percent.is_none()
-                && auto_cleanup.is_none()
-                && auto_cleanup_keep.is_none()
-                && auto_cleanup_interval.is_none()
-            {
-                // View mode: read config file and show
-                handle_config_view()?;
-            } else {
-                // Update mode: modify config file + notify daemon
-                handle_config_update(
-                    health_check_interval,
-                    img_size,
-                    img_max_percent,
-                    auto_cleanup,
-                    auto_cleanup_keep,
-                    auto_cleanup_interval,
-                )
-                .await?;
-            }
+        Commands::Config(args) => {
+            handle_config_command(args).await?;
         }
         Commands::Reload => {
             handle_reload().await?;
@@ -521,9 +529,31 @@ async fn send_request_to_daemon(request: &Request) -> Result<Response> {
     Ok(response)
 }
 
-/// Silent IPC used by best-effort callers (e.g. post-command health advisory).
-/// Never prints to stderr and never calls `process::exit`; all errors bubble up
-/// so the caller can decide to ignore them.
+/// Best-effort pre-view reload. `None` = global only; `Some(ws)` = global + that ws.
+async fn try_reload_daemon_for_view(workspace: Option<&str>) {
+    silent_reload(&Request::ReloadGlobalConfig).await;
+    if let Some(ws) = workspace {
+        silent_reload(&Request::ReloadWorkspacePolicy {
+            workspace: resolve_workspace_arg(ws),
+        })
+        .await;
+    }
+}
+
+async fn silent_reload(req: &Request) {
+    match try_send_request_to_daemon_silent(req).await {
+        Ok(Response::ReloadConfigOk { .. }) | Err(_) => {}
+        Ok(Response::Error { message, .. }) => {
+            eprintln!(
+                "\x1b[33m\u{26a0} View may be stale: daemon reload failed: {}\x1b[0m",
+                message
+            );
+        }
+        Ok(_) => {}
+    }
+}
+
+/// Silent IPC: errors bubble up so the caller can ignore them; never `process::exit`.
 async fn try_send_request_to_daemon_silent(request: &Request) -> Result<Response> {
     let socket_path = get_socket_path();
 
@@ -614,11 +644,11 @@ async fn print_health_advisory_if_needed() {
     eprintln!();
     eprintln!("\x1b[33m  Manual cleanup:   ws-ckpt cleanup -w <workspace> --keep <N>\x1b[0m");
     eprintln!("\x1b[33m  Or enable auto-cleanup for all workspaces:\x1b[0m");
-    eprintln!("\x1b[33m      ws-ckpt config --enable-auto-cleanup \\\x1b[0m");
-    eprintln!("\x1b[33m                     --auto-cleanup-keep <NUM|DURATION> \\\x1b[0m");
-    eprintln!("\x1b[33m                     --auto-cleanup-interval <SECONDS>\x1b[0m");
+    eprintln!("\x1b[33m      ws-ckpt config -g --enable-auto-cleanup \\\x1b[0m");
+    eprintln!("\x1b[33m                        --auto-cleanup-keep <NUM|DURATION> \\\x1b[0m");
+    eprintln!("\x1b[33m                        --auto-cleanup-interval <SECONDS>\x1b[0m");
     eprintln!("\x1b[33m  Suggested values:\x1b[0m");
-    eprintln!("\x1b[33m      ws-ckpt config --enable-auto-cleanup --auto-cleanup-keep 1000 --auto-cleanup-interval 86400\x1b[0m");
+    eprintln!("\x1b[33m      ws-ckpt config -g --enable-auto-cleanup --auto-cleanup-keep 1000 --auto-cleanup-interval 86400\x1b[0m");
 }
 
 /// Handle the response, printing formatted output.
@@ -930,8 +960,283 @@ fn handle_cleanup_response(response: Response) -> Result<()> {
     Ok(())
 }
 
-/// View current configuration from config file (no daemon required).
-fn handle_config_view() -> Result<()> {
+/// Top-level dispatcher for `ws-ckpt config`. Decides global vs per-ws based
+/// on the (clap-enforced) ArgGroup, then routes to the appropriate handler.
+async fn handle_config_command(args: ConfigArgs) -> Result<()> {
+    let format = parse_output_format(&args.format)?;
+    let auto_cleanup = match (args.enable_auto_cleanup, args.disable_auto_cleanup) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+    let any_update = auto_cleanup.is_some()
+        || args.auto_cleanup_keep.is_some()
+        || args.auto_cleanup_interval.is_some()
+        || args.health_check_interval.is_some()
+        || args.img_size.is_some()
+        || args.img_max_percent.is_some();
+
+    if args.global {
+        if args.reset {
+            anyhow::bail!("--reset is only valid with -w/--workspace");
+        }
+        if any_update {
+            handle_global_config_update(
+                args.health_check_interval,
+                args.img_size,
+                args.img_max_percent,
+                auto_cleanup,
+                args.auto_cleanup_keep,
+                args.auto_cleanup_interval,
+                format,
+            )
+            .await?;
+        } else {
+            handle_global_config_view(format).await?;
+        }
+        return Ok(());
+    }
+
+    // No scope: overview (view-only). Updates need an explicit scope.
+    if args.workspace.is_none() {
+        if args.reset || any_update {
+            anyhow::bail!("specify -g (global) or -w <ws> (per-workspace) to make changes");
+        }
+        handle_config_overview_view(format).await?;
+        return Ok(());
+    }
+
+    let ws = args
+        .workspace
+        .clone()
+        .expect("workspace is Some in this branch");
+
+    if args.reset {
+        handle_workspace_config_reset(&ws, format).await?;
+        return Ok(());
+    }
+
+    // Per-ws: reject global-only fields up front so the user gets a clear
+    // error instead of a silently dropped flag.
+    if args.auto_cleanup_interval.is_some() {
+        anyhow::bail!("--auto-cleanup-interval is global-only; use `-g` (interval is daemon-wide)");
+    }
+    if args.health_check_interval.is_some() {
+        anyhow::bail!("--health-check-interval is global-only; use `-g`");
+    }
+    if args.img_size.is_some() {
+        anyhow::bail!("--img-size is global-only; use `-g`");
+    }
+    if args.img_max_percent.is_some() {
+        anyhow::bail!("--img-max-percent is global-only; use `-g`");
+    }
+
+    if !any_update {
+        handle_workspace_config_view(&ws, format).await?;
+    } else {
+        handle_workspace_config_update(&ws, auto_cleanup, args.auto_cleanup_keep, format).await?;
+    }
+    Ok(())
+}
+
+/// Per-ws view: queries the daemon for `effective / local / global` and
+/// renders all three columns (or JSON).
+async fn handle_workspace_config_view(workspace: &str, format: OutputFormat) -> Result<()> {
+    // Align daemon snapshot with on-disk config.toml + this ws's policy.toml.
+    try_reload_daemon_for_view(Some(workspace)).await;
+    let req = Request::GetWorkspacePolicy {
+        workspace: resolve_workspace_arg(workspace),
+    };
+    let resp = send_request_to_daemon(&req).await?;
+    print_workspace_policy_response_formatted(resp, format)
+}
+
+/// Per-ws update: send each user-mentioned field as `PolicyFieldOp::Set`,
+/// leave the rest `Unchanged`. The daemon does the read-modify-write
+/// atomically under the per-ws lock (no CLI-side GET), so concurrent
+/// `--enable-auto-cleanup` and `--auto-cleanup-keep N` can't lose updates.
+async fn handle_workspace_config_update(
+    workspace: &str,
+    auto_cleanup: Option<bool>,
+    auto_cleanup_keep: Option<CleanupRetention>,
+    format: OutputFormat,
+) -> Result<()> {
+    let asked_enable = auto_cleanup == Some(true);
+    let supplied_keep = auto_cleanup_keep.is_some();
+    let req = Request::PatchWorkspacePolicy {
+        workspace: resolve_workspace_arg(workspace),
+        auto_cleanup: match auto_cleanup {
+            Some(v) => PolicyFieldOp::Set(v),
+            None => PolicyFieldOp::Unchanged,
+        },
+        auto_cleanup_keep: match auto_cleanup_keep {
+            Some(v) => PolicyFieldOp::Set(v),
+            None => PolicyFieldOp::Unchanged,
+        },
+    };
+    let resp = send_request_to_daemon(&req).await?;
+
+    if let Response::WorkspacePolicyOk {
+        ref effective,
+        ref local,
+        ..
+    } = resp
+    {
+        if let Some(msg) = disabled_warning_for(asked_enable, supplied_keep, effective, local) {
+            eprintln!("\x1b[33m\u{26a0} Warning: {}\x1b[0m", msg);
+        }
+    }
+    print_workspace_policy_response_formatted(resp, format)
+}
+
+/// Warn when the user touched any policy field but the result is still
+/// effective-disabled. Names whichever layer(s) cause it (cleanup off,
+/// keep=0, or both), so the fix hint points at the right knob.
+fn disabled_warning_for(
+    asked_enable: bool,
+    supplied_keep: bool,
+    effective: &ws_ckpt_common::EffectivePolicy,
+    local: &ws_ckpt_common::WorkspacePolicy,
+) -> Option<String> {
+    if !(asked_enable || supplied_keep) || !effective.is_disabled() {
+        return None;
+    }
+    let mut reasons: Vec<String> = Vec::new();
+    if !effective.auto_cleanup {
+        let local_off = local.auto_cleanup == Some(false);
+        reasons.push(if local_off {
+            "local auto_cleanup is false (override with `--enable-auto-cleanup` on this command)".to_string()
+        } else {
+            "global auto_cleanup is false (pass `--enable-auto-cleanup` here for a per-ws override, or `ws-ckpt config -g --enable-auto-cleanup` to flip it globally)".to_string()
+        });
+    }
+    if effective.auto_cleanup_keep.is_disabled() {
+        let local_keep_off = local
+            .auto_cleanup_keep
+            .as_ref()
+            .map(|k| k.is_disabled())
+            .unwrap_or(false);
+        reasons.push(if local_keep_off {
+            format!(
+                "local auto_cleanup_keep is {} (override with `--auto-cleanup-keep <N>`, N >= 1)",
+                format_retention(local.auto_cleanup_keep.as_ref().unwrap())
+            )
+        } else {
+            format!(
+                "global auto_cleanup_keep is {} (pass `--auto-cleanup-keep <N>` here, or `ws-ckpt config -g --auto-cleanup-keep N`)",
+                format_retention(&effective.auto_cleanup_keep)
+            )
+        });
+    }
+    Some(format!(
+        "auto-cleanup is still effectively disabled — {}.",
+        reasons.join("; ")
+    ))
+}
+
+/// Per-ws reset: delete `policy.toml` for this workspace.
+async fn handle_workspace_config_reset(workspace: &str, format: OutputFormat) -> Result<()> {
+    let req = Request::ResetWorkspacePolicy {
+        workspace: resolve_workspace_arg(workspace),
+    };
+    let resp = send_request_to_daemon(&req).await?;
+    print_workspace_policy_response_formatted(resp, format)
+}
+
+fn print_policy_field(name: &str, effective: &str, local: Option<String>, global: &str) {
+    let local_str = match local {
+        Some(s) => s,
+        None => "(inherit)".to_string(),
+    };
+    println!(
+        "  {:<22} effective={:<14} local={:<14} global={}",
+        name, effective, local_str, global
+    );
+}
+
+fn format_retention(r: &CleanupRetention) -> String {
+    match r {
+        CleanupRetention::Count(n) => n.to_string(),
+        CleanupRetention::Age { raw, .. } => format!("\"{}\"", raw),
+    }
+}
+
+// ── Output format flag ──────────────────────────────────────────────────
+//
+// The JSON output struct types themselves live in `ws_ckpt_common`
+// (mirrors how `SnapshotEntry` / `ConfigReport` etc. live there and are
+// dumped by `list --format json` / `status --format json`). Keeping the
+// schemas there means:
+//   - cli stays free of a direct `serde` dep (derive happens in common)
+//   - future Rust tools / tests can share the same versioned schema
+//     definitions without round-tripping JSON
+
+/// Output-format flag value. A typo like `--format jso` is rejected at the
+/// CLI boundary rather than silently falling back to text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
+fn parse_output_format(s: &str) -> Result<OutputFormat> {
+    match s {
+        "text" => Ok(OutputFormat::Text),
+        "json" => Ok(OutputFormat::Json),
+        other => anyhow::bail!(
+            "unknown --format value: {:?} (expected `text` or `json`)",
+            other
+        ),
+    }
+}
+
+/// Print a `Response::WorkspacePolicyOk` (or surface a daemon error)
+/// according to the requested output format.
+fn print_workspace_policy_response_formatted(resp: Response, format: OutputFormat) -> Result<()> {
+    match resp {
+        Response::WorkspacePolicyOk {
+            ws_id,
+            effective,
+            local,
+            global,
+        } => match format {
+            OutputFormat::Text => {
+                println!("\x1b[1mWorkspace policy: {}\x1b[0m", ws_id);
+                print_policy_field(
+                    "auto_cleanup",
+                    &effective.auto_cleanup.to_string(),
+                    local.auto_cleanup.map(|b| b.to_string()),
+                    &global.auto_cleanup.to_string(),
+                );
+                print_policy_field(
+                    "auto_cleanup_keep",
+                    &format_retention(&effective.auto_cleanup_keep),
+                    local.auto_cleanup_keep.as_ref().map(format_retention),
+                    &format_retention(&global.auto_cleanup_keep),
+                );
+                println!(
+                    "  auto_cleanup_interval: (global-only) — see `ws-ckpt config -g` to view"
+                );
+                Ok(())
+            }
+            OutputFormat::Json => {
+                let json = WorkspacePolicyJson::from_views(ws_id, &effective, &local, &global);
+                println!("{}", serde_json::to_string_pretty(&json)?);
+                Ok(())
+            }
+        },
+        Response::Error { code, message } => {
+            anyhow::bail!("[{:?}] {}", code, message);
+        }
+        other => anyhow::bail!("Unexpected response from daemon: {:?}", other),
+    }
+}
+
+/// View current global configuration. Triggers a best-effort daemon reload
+/// first so what we read from disk also matches what daemon is using; if the
+/// daemon is offline we still render from file (no daemon required).
+async fn handle_global_config_view(format: OutputFormat) -> Result<()> {
+    try_reload_daemon_for_view(None).await;
     let path = std::path::Path::new(CONFIG_FILE_PATH);
     let fc = load_config_file(path).map_err(|e| anyhow::anyhow!("Failed to read config: {}", e))?;
 
@@ -940,10 +1245,6 @@ fn handle_config_view() -> Result<()> {
         .auto_cleanup_keep
         .clone()
         .unwrap_or_else(default_auto_cleanup_keep);
-    let keep_display = match &keep {
-        CleanupRetention::Count(n) => format!("{} (count mode)", n),
-        CleanupRetention::Age { raw, .. } => format!("\"{}\" (age mode)", raw),
-    };
     let interval = fc
         .auto_cleanup_interval_secs
         .unwrap_or(DEFAULT_AUTO_CLEANUP_INTERVAL_SECS);
@@ -957,6 +1258,29 @@ fn handle_config_view() -> Result<()> {
     let img_max = btrfs_loop
         .and_then(|b| b.img_max_percent)
         .unwrap_or(DEFAULT_IMG_MAX_PERCENT * 100.0);
+
+    if format == OutputFormat::Json {
+        let json = GlobalConfigJson {
+            schema: GLOBAL_CONFIG_JSON_SCHEMA,
+            config_file: CONFIG_FILE_PATH.to_string(),
+            mount_path: DEFAULT_MOUNT_PATH.to_string(),
+            socket_path: DEFAULT_SOCKET_PATH.to_string(),
+            auto_cleanup,
+            auto_cleanup_keep: (&keep).into(),
+            auto_cleanup_is_disabled: !auto_cleanup || keep.is_disabled(),
+            auto_cleanup_interval_secs: interval,
+            health_check_interval_secs: health,
+            img_size_gb: img_size,
+            img_max_percent: img_max,
+        };
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    let keep_display = match &keep {
+        CleanupRetention::Count(n) => format!("{} (count mode)", n),
+        CleanupRetention::Age { raw, .. } => format!("\"{}\" (age mode)", raw),
+    };
 
     println!("\x1b[1mDaemon Configuration\x1b[0m");
     println!("  Config file:             {}", CONFIG_FILE_PATH);
@@ -1027,14 +1351,84 @@ fn handle_config_view() -> Result<()> {
     Ok(())
 }
 
-/// Update configuration: write to config file + notify daemon to reload.
-async fn handle_config_update(
+/// `ws-ckpt config` (no scope): global cfg + ws roll-up. View-only.
+async fn handle_config_overview_view(format: OutputFormat) -> Result<()> {
+    try_reload_daemon_for_view(None).await;
+    let resp = send_request_to_daemon(&Request::ConfigOverview).await?;
+    let (config, ws_total, ws_with_override) = match resp {
+        Response::ConfigOverviewOk {
+            config,
+            ws_total,
+            ws_with_override,
+        } => (config, ws_total, ws_with_override),
+        Response::Error { code, message } => anyhow::bail!("[{:?}] {}", code, message),
+        other => anyhow::bail!("Unexpected response from daemon: {:?}", other),
+    };
+    let inherit = ws_total.saturating_sub(ws_with_override);
+
+    if format == OutputFormat::Json {
+        let json = serde_json::json!({
+            "schema": OVERVIEW_JSON_SCHEMA,
+            "config_file": CONFIG_FILE_PATH,
+            "global": config,
+            "workspaces": {
+                "total": ws_total,
+                "with_override": ws_with_override,
+                "inherit_global": inherit,
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    println!("\x1b[1mDaemon Configuration\x1b[0m");
+    println!("  Config file:             {}", CONFIG_FILE_PATH);
+    println!("  Mount path:              {}", config.mount_path);
+    println!("  Socket path:             {}", config.socket_path);
+    println!(
+        "  Auto-cleanup:            {}",
+        if config.auto_cleanup {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "  Auto-cleanup keep:       {}",
+        format_retention(&config.auto_cleanup_keep)
+    );
+    println!(
+        "  Auto-cleanup interval:   {}s ({}m)",
+        config.auto_cleanup_interval_secs,
+        config.auto_cleanup_interval_secs / 60
+    );
+    println!(
+        "  Health-check interval:   {}s ({}m)",
+        config.health_check_interval_secs,
+        config.health_check_interval_secs / 60
+    );
+    println!("  Image size:              {} GB", config.img_size);
+    println!("  Image max percent:       {}%", config.img_max_percent);
+    println!();
+    println!("\x1b[1mWorkspaces\x1b[0m");
+    println!("  Total:                   {}", ws_total);
+    println!("  With local override:     {}", ws_with_override);
+    println!("  Inherit global:          {}", inherit);
+    if ws_with_override > 0 {
+        println!("\nUse `ws-ckpt config -w <ws>` to inspect a specific workspace.");
+    }
+    Ok(())
+}
+
+/// Update global configuration: write to config file + notify daemon to reload.
+async fn handle_global_config_update(
     health_check_interval: Option<u64>,
     img_size: Option<u64>,
     img_max_percent: Option<f64>,
     auto_cleanup: Option<bool>,
     auto_cleanup_keep: Option<CleanupRetention>,
     auto_cleanup_interval_secs: Option<u64>,
+    format: OutputFormat,
 ) -> Result<()> {
     let path = std::path::Path::new(CONFIG_FILE_PATH);
 
@@ -1074,28 +1468,80 @@ async fn handle_config_update(
     // Save
     save_config_file(path, &fc).map_err(|e| anyhow::anyhow!("Failed to save config: {}", e))?;
 
-    println!(
+    // JSON mode: keep stdout a single parseable payload (the post-update
+    // config) by routing status/advisory lines to stderr.
+    let status_sink: fn(std::fmt::Arguments<'_>) = if format == OutputFormat::Json {
+        |args| eprintln!("{}", args)
+    } else {
+        |args| println!("{}", args)
+    };
+    status_sink(format_args!(
         "\x1b[32m\u{2713} Configuration saved to {}\x1b[0m",
         CONFIG_FILE_PATH
-    );
+    ));
 
-    // Try to notify running daemon
-    match send_request_to_daemon(&Request::ReloadConfig).await {
-        Ok(Response::ReloadConfigOk) => {
-            println!("\x1b[32m\u{2713} Daemon reloaded configuration\x1b[0m");
+    // Try to notify running daemon. Only the global cfg changed — no need
+    // to walk every per-ws policy.toml. The reply carries the post-reload
+    // ConfigReport so JSON mode can emit the landed state on stdout
+    // without a follow-up `Config` round-trip.
+    let mut reloaded_config: Option<ws_ckpt_common::ConfigReport> = None;
+    match send_request_to_daemon(&Request::ReloadGlobalConfig).await {
+        Ok(Response::ReloadConfigOk { config }) => {
+            status_sink(format_args!(
+                "\x1b[32m\u{2713} Daemon reloaded configuration\x1b[0m"
+            ));
             if has_img_settings {
-                println!("\x1b[33m\u{26a0} Note: btrfs-loop image settings (img-size, img-max-percent) require daemon restart to take effect.\x1b[0m");
+                status_sink(format_args!(
+                    "\x1b[33m\u{26a0} Note: btrfs-loop image settings (img-size, img-max-percent) require daemon restart to take effect.\x1b[0m"
+                ));
             }
+            reloaded_config = Some(config);
         }
         Ok(Response::Error { message, .. }) => {
             eprintln!("\x1b[33m\u{26a0} Daemon reload failed: {}\x1b[0m", message);
         }
         Err(_) => {
-            println!("\x1b[33m\u{26a0} Daemon not running, changes will take effect on next start\x1b[0m");
+            status_sink(format_args!(
+                "\x1b[33m\u{26a0} Daemon not running, changes will take effect on next start\x1b[0m"
+            ));
         }
         _ => {}
     }
+
+    // JSON mode emits the post-update state on stdout so callers don't need
+    // a follow-up read. Prefer the daemon's freshly-reloaded ConfigReport
+    // (single source of truth); fall back to a local view only if the
+    // daemon wasn't reachable.
+    if format == OutputFormat::Json {
+        match reloaded_config {
+            Some(cr) => {
+                let json = config_report_to_global_json(&cr);
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            }
+            None => handle_global_config_view(format).await?,
+        }
+    }
+
     Ok(())
+}
+
+/// Render a daemon-returned [`ConfigReport`] as the same [`GlobalConfigJson`]
+/// schema that `config -g --format json` emits. Used by `-g update` to emit
+/// the post-reload state on stdout without a follow-up `Config` IPC.
+fn config_report_to_global_json(cr: &ws_ckpt_common::ConfigReport) -> GlobalConfigJson {
+    GlobalConfigJson {
+        schema: GLOBAL_CONFIG_JSON_SCHEMA,
+        config_file: CONFIG_FILE_PATH.to_string(),
+        mount_path: cr.mount_path.clone(),
+        socket_path: cr.socket_path.clone(),
+        auto_cleanup: cr.auto_cleanup,
+        auto_cleanup_keep: (&cr.auto_cleanup_keep).into(),
+        auto_cleanup_is_disabled: !cr.auto_cleanup || cr.auto_cleanup_keep.is_disabled(),
+        auto_cleanup_interval_secs: cr.auto_cleanup_interval_secs,
+        health_check_interval_secs: cr.health_check_interval_secs,
+        img_size_gb: cr.img_size,
+        img_max_percent: cr.img_max_percent,
+    }
 }
 
 /// Handle `ws-ckpt reload` (also used by systemd `ExecReload=`): send
@@ -1103,7 +1549,7 @@ async fn handle_config_update(
 /// `send_request_to_daemon` exits 1 with a red message.
 async fn handle_reload() -> Result<()> {
     match send_request_to_daemon(&Request::ReloadConfig).await? {
-        Response::ReloadConfigOk => {
+        Response::ReloadConfigOk { .. } => {
             println!("\x1b[32m\u{2713} Daemon reloaded configuration\x1b[0m");
             Ok(())
         }
@@ -1894,50 +2340,58 @@ mod tests {
         assert!(result.is_err(), "cleanup without --workspace should fail");
     }
 
-    #[test]
-    fn parse_config_no_args() {
-        let cli = Cli::try_parse_from(["ws-ckpt", "config"]).unwrap();
+    fn parse_config_args(argv: &[&str]) -> ConfigArgs {
+        let cli = Cli::try_parse_from(argv).expect("config args should parse");
         match cli.command {
-            Commands::Config {
-                health_check_interval,
-                img_size,
-                img_max_percent,
-                ..
-            } => {
-                assert!(health_check_interval.is_none());
-                assert!(img_size.is_none());
-                assert!(img_max_percent.is_none());
-            }
+            Commands::Config(a) => a,
             _ => panic!("expected Config"),
         }
     }
 
     #[test]
-    fn parse_config_with_all_flags() {
-        let cli = Cli::try_parse_from([
+    fn parse_config_no_scope_is_overview() {
+        // `ws-ckpt config` (no -g/-w, no flags) parses successfully — it's the
+        // view-only overview. Update flags without scope are rejected at
+        // runtime, not by clap.
+        let args = parse_config_args(&["ws-ckpt", "config"]);
+        assert!(!args.global);
+        assert!(args.workspace.is_none());
+    }
+
+    #[test]
+    fn parse_config_global_and_workspace_conflict() {
+        let result = Cli::try_parse_from(["ws-ckpt", "config", "-g", "-w", "/tmp/ws"]);
+        assert!(
+            result.is_err(),
+            "-g and -w should be mutually exclusive (ArgGroup)"
+        );
+    }
+
+    #[test]
+    fn parse_config_global_view() {
+        let args = parse_config_args(&["ws-ckpt", "config", "-g"]);
+        assert!(args.global);
+        assert!(args.workspace.is_none());
+        assert!(args.health_check_interval.is_none());
+    }
+
+    #[test]
+    fn parse_config_global_with_all_flags() {
+        let args = parse_config_args(&[
             "ws-ckpt",
             "config",
+            "-g",
             "--health-check-interval",
             "120",
             "--img-size",
             "30",
             "--img-max-percent",
             "40",
-        ])
-        .unwrap();
-        match cli.command {
-            Commands::Config {
-                health_check_interval,
-                img_size,
-                img_max_percent,
-                ..
-            } => {
-                assert_eq!(health_check_interval, Some(120));
-                assert_eq!(img_size, Some(30));
-                assert_eq!(img_max_percent, Some(40.0));
-            }
-            _ => panic!("expected Config"),
-        }
+        ]);
+        assert!(args.global);
+        assert_eq!(args.health_check_interval, Some(120));
+        assert_eq!(args.img_size, Some(30));
+        assert_eq!(args.img_max_percent, Some(40.0));
     }
 
     #[test]
@@ -1953,35 +2407,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_enable_auto_cleanup() {
-        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--enable-auto-cleanup"]).unwrap();
-        match cli.command {
-            Commands::Config {
-                enable_auto_cleanup,
-                disable_auto_cleanup,
-                ..
-            } => {
-                assert!(enable_auto_cleanup);
-                assert!(!disable_auto_cleanup);
-            }
-            _ => panic!("expected Config"),
-        }
+    fn parse_config_global_enable_auto_cleanup() {
+        let args = parse_config_args(&["ws-ckpt", "config", "-g", "--enable-auto-cleanup"]);
+        assert!(args.enable_auto_cleanup);
+        assert!(!args.disable_auto_cleanup);
     }
 
     #[test]
-    fn parse_config_disable_auto_cleanup() {
-        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--disable-auto-cleanup"]).unwrap();
-        match cli.command {
-            Commands::Config {
-                enable_auto_cleanup,
-                disable_auto_cleanup,
-                ..
-            } => {
-                assert!(!enable_auto_cleanup);
-                assert!(disable_auto_cleanup);
-            }
-            _ => panic!("expected Config"),
-        }
+    fn parse_config_global_disable_auto_cleanup() {
+        let args = parse_config_args(&["ws-ckpt", "config", "-g", "--disable-auto-cleanup"]);
+        assert!(!args.enable_auto_cleanup);
+        assert!(args.disable_auto_cleanup);
     }
 
     #[test]
@@ -1989,6 +2425,7 @@ mod tests {
         let result = Cli::try_parse_from([
             "ws-ckpt",
             "config",
+            "-g",
             "--enable-auto-cleanup",
             "--disable-auto-cleanup",
         ]);
@@ -2000,52 +2437,33 @@ mod tests {
 
     #[test]
     fn parse_config_auto_cleanup_keep_count() {
-        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-keep", "20"]).unwrap();
-        match cli.command {
-            Commands::Config {
-                auto_cleanup_keep, ..
-            } => {
-                assert_eq!(auto_cleanup_keep, Some(CleanupRetention::Count(20)));
-            }
-            _ => panic!("expected Config"),
-        }
+        let args = parse_config_args(&["ws-ckpt", "config", "-g", "--auto-cleanup-keep", "20"]);
+        assert_eq!(args.auto_cleanup_keep, Some(CleanupRetention::Count(20)));
     }
 
     #[test]
     fn parse_config_auto_cleanup_keep_zero_disables() {
-        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-keep", "0"]).unwrap();
-        match cli.command {
-            Commands::Config {
-                auto_cleanup_keep, ..
-            } => {
-                let keep = auto_cleanup_keep.expect("keep should be set");
-                assert!(keep.is_disabled());
-                assert_eq!(keep, CleanupRetention::Count(0));
-            }
-            _ => panic!("expected Config"),
-        }
+        let args = parse_config_args(&["ws-ckpt", "config", "-g", "--auto-cleanup-keep", "0"]);
+        let keep = args.auto_cleanup_keep.expect("keep should be set");
+        assert!(keep.is_disabled());
+        assert_eq!(keep, CleanupRetention::Count(0));
     }
 
     #[test]
     fn parse_config_auto_cleanup_keep_age() {
-        let cli = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-keep", "30d"]).unwrap();
-        match cli.command {
-            Commands::Config {
-                auto_cleanup_keep, ..
-            } => match auto_cleanup_keep {
-                Some(CleanupRetention::Age { raw, secs }) => {
-                    assert_eq!(raw, "30d");
-                    assert_eq!(secs, 30 * 24 * 3600);
-                }
-                other => panic!("expected Age variant, got {:?}", other),
-            },
-            _ => panic!("expected Config"),
+        let args = parse_config_args(&["ws-ckpt", "config", "-g", "--auto-cleanup-keep", "30d"]);
+        match args.auto_cleanup_keep {
+            Some(CleanupRetention::Age { raw, secs }) => {
+                assert_eq!(raw, "30d");
+                assert_eq!(secs, 30 * 24 * 3600);
+            }
+            other => panic!("expected Age variant, got {:?}", other),
         }
     }
 
     #[test]
     fn parse_config_auto_cleanup_keep_invalid() {
-        let result = Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-keep", "abc"]);
+        let result = Cli::try_parse_from(["ws-ckpt", "config", "-g", "--auto-cleanup-keep", "abc"]);
         assert!(
             result.is_err(),
             "non-numeric value without duration unit should be rejected"
@@ -2054,17 +2472,157 @@ mod tests {
 
     #[test]
     fn parse_config_auto_cleanup_interval() {
-        let cli =
-            Cli::try_parse_from(["ws-ckpt", "config", "--auto-cleanup-interval", "3600"]).unwrap();
-        match cli.command {
-            Commands::Config {
-                auto_cleanup_interval,
-                ..
-            } => {
-                assert_eq!(auto_cleanup_interval, Some(3600));
-            }
-            _ => panic!("expected Config"),
-        }
+        let args =
+            parse_config_args(&["ws-ckpt", "config", "-g", "--auto-cleanup-interval", "3600"]);
+        assert_eq!(args.auto_cleanup_interval, Some(3600));
+    }
+
+    #[test]
+    fn parse_config_workspace_view() {
+        let args = parse_config_args(&["ws-ckpt", "config", "-w", "/tmp/proj"]);
+        assert!(!args.global);
+        assert_eq!(args.workspace.as_deref(), Some("/tmp/proj"));
+        assert!(!args.reset);
+    }
+
+    #[test]
+    fn parse_config_workspace_reset() {
+        let args = parse_config_args(&["ws-ckpt", "config", "-w", "/tmp/proj", "--reset"]);
+        assert!(args.reset);
+        assert_eq!(args.workspace.as_deref(), Some("/tmp/proj"));
+    }
+
+    #[test]
+    fn parse_config_workspace_set_keep() {
+        let args = parse_config_args(&[
+            "ws-ckpt",
+            "config",
+            "-w",
+            "/tmp/proj",
+            "--auto-cleanup-keep",
+            "5",
+        ]);
+        assert_eq!(args.auto_cleanup_keep, Some(CleanupRetention::Count(5)));
+    }
+
+    #[test]
+    fn parse_config_reset_conflicts_with_other_updates() {
+        let result = Cli::try_parse_from([
+            "ws-ckpt",
+            "config",
+            "-w",
+            "/tmp/proj",
+            "--reset",
+            "--auto-cleanup-keep",
+            "5",
+        ]);
+        assert!(
+            result.is_err(),
+            "--reset must conflict with other update flags"
+        );
+    }
+
+    #[test]
+    fn parse_config_format_defaults_to_text() {
+        let args = parse_config_args(&["ws-ckpt", "config", "-g"]);
+        assert_eq!(args.format, "text");
+        assert_eq!(
+            parse_output_format(&args.format).unwrap(),
+            OutputFormat::Text
+        );
+    }
+
+    #[test]
+    fn parse_config_format_json_accepted() {
+        let args = parse_config_args(&["ws-ckpt", "config", "-g", "--format", "json"]);
+        assert_eq!(args.format, "json");
+        assert_eq!(
+            parse_output_format(&args.format).unwrap(),
+            OutputFormat::Json
+        );
+    }
+
+    #[test]
+    fn parse_output_format_rejects_typo() {
+        // Anything other than text/json must fail loudly — a silent
+        // fallback to text would break plugin scripts that asked for JSON.
+        assert!(parse_output_format("jso").is_err());
+        assert!(parse_output_format("YAML").is_err());
+        assert!(parse_output_format("").is_err());
+    }
+
+    #[test]
+    fn workspace_policy_json_schema_is_versioned() {
+        // The `schema` field lets consumers reject an unknown version. This
+        // pins v1: a deliberate shape change must also bump this assert, so
+        // an accidental field rename is caught here.
+        use ws_ckpt_common::{EffectivePolicy, GlobalPolicySnapshot, WorkspacePolicy};
+        let effective = EffectivePolicy {
+            auto_cleanup: true,
+            auto_cleanup_keep: CleanupRetention::Count(5),
+        };
+        let local = WorkspacePolicy::default();
+        let global = GlobalPolicySnapshot {
+            auto_cleanup: true,
+            auto_cleanup_keep: CleanupRetention::Count(20),
+        };
+        let json =
+            WorkspacePolicyJson::from_views("ws-test".to_string(), &effective, &local, &global);
+        let s = serde_json::to_string(&json).unwrap();
+        assert!(s.contains(r#""schema":"ws-ckpt-policy/v1""#));
+        // Tagged retention (consumer can match on `mode`, no number-vs-
+        // string discrimination needed).
+        assert!(s.contains(r#""mode":"count""#));
+        assert!(s.contains(r#""count":5"#));
+        // is_disabled pre-computed on the wire.
+        assert!(s.contains(r#""is_disabled":false"#));
+    }
+
+    #[test]
+    fn workspace_policy_json_age_retention_emits_tagged_form() {
+        use ws_ckpt_common::{EffectivePolicy, GlobalPolicySnapshot, WorkspacePolicy};
+        let effective = EffectivePolicy {
+            auto_cleanup: true,
+            auto_cleanup_keep: CleanupRetention::age("30d").unwrap(),
+        };
+        let local = WorkspacePolicy::default();
+        let global = GlobalPolicySnapshot {
+            auto_cleanup: true,
+            auto_cleanup_keep: CleanupRetention::Count(20),
+        };
+        let json =
+            WorkspacePolicyJson::from_views("ws-test".to_string(), &effective, &local, &global);
+        let s = serde_json::to_string(&json).unwrap();
+        assert!(s.contains(r#""mode":"age""#));
+        assert!(s.contains(r#""raw":"30d""#));
+        assert!(s.contains(r#""secs":2592000"#));
+    }
+
+    #[test]
+    fn workspace_policy_json_count_zero_is_disabled() {
+        // Regression: openclaw rendered `Count(0)` as "0" with no disabled
+        // marker, though the scheduler skips it. Pre-computing is_disabled
+        // via from_views(... &effective ...) walks the production path,
+        // so a future regression that breaks `is_disabled()` would fail
+        // here too — not just the wire format.
+        use ws_ckpt_common::{EffectivePolicy, GlobalPolicySnapshot, WorkspacePolicy};
+        let effective = EffectivePolicy {
+            auto_cleanup: true,
+            auto_cleanup_keep: CleanupRetention::Count(0),
+        };
+        let local = WorkspacePolicy::default();
+        let global = GlobalPolicySnapshot {
+            auto_cleanup: true,
+            auto_cleanup_keep: CleanupRetention::Count(0),
+        };
+        let json =
+            WorkspacePolicyJson::from_views("ws-test".to_string(), &effective, &local, &global);
+        let s = serde_json::to_string(&json).unwrap();
+        assert!(s.contains(r#""mode":"count""#));
+        assert!(s.contains(r#""count":0"#));
+        // Critical: is_disabled MUST be true even though auto_cleanup=true,
+        // because keep is Count(0). That's the whole bug this prevents.
+        assert!(s.contains(r#""is_disabled":true"#));
     }
 
     // ── Recover CLI parsing tests ──
@@ -2171,5 +2729,69 @@ mod tests {
             }
             _ => panic!("expected Recover"),
         }
+    }
+
+    // ── disabled_warning_for: warn whenever the user touched a policy field but effective stays disabled ──
+
+    fn eff(cleanup: bool, keep: CleanupRetention) -> ws_ckpt_common::EffectivePolicy {
+        ws_ckpt_common::EffectivePolicy {
+            auto_cleanup: cleanup,
+            auto_cleanup_keep: keep,
+        }
+    }
+
+    #[test]
+    fn warn_enable_only_when_global_keep_is_zero() {
+        // Old gate: --enable-auto-cleanup, no --keep, global keep is 0.
+        let e = eff(true, CleanupRetention::Count(0));
+        let l = ws_ckpt_common::WorkspacePolicy::default();
+        let msg = disabled_warning_for(true, false, &e, &l).expect("warning expected");
+        assert!(
+            msg.contains("global auto_cleanup_keep is 0"),
+            "got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn warn_enable_with_keep_zero_supplied() {
+        // #5: --enable-auto-cleanup --auto-cleanup-keep 0 must still warn.
+        let e = eff(true, CleanupRetention::Count(0));
+        let l = ws_ckpt_common::WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: Some(CleanupRetention::Count(0)),
+        };
+        let msg = disabled_warning_for(true, true, &e, &l).expect("warning expected");
+        assert!(msg.contains("local auto_cleanup_keep is 0"), "got: {}", msg);
+    }
+
+    #[test]
+    fn warn_keep_only_when_global_cleanup_is_off() {
+        // #6: --auto-cleanup-keep 5 alone, global cleanup is false.
+        let e = eff(false, CleanupRetention::Count(5));
+        let l = ws_ckpt_common::WorkspacePolicy {
+            auto_cleanup: None,
+            auto_cleanup_keep: Some(CleanupRetention::Count(5)),
+        };
+        let msg = disabled_warning_for(false, true, &e, &l).expect("warning expected");
+        assert!(msg.contains("global auto_cleanup is false"), "got: {}", msg);
+    }
+
+    #[test]
+    fn no_warn_when_effective_active() {
+        let e = eff(true, CleanupRetention::Count(20));
+        let l = ws_ckpt_common::WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: Some(CleanupRetention::Count(20)),
+        };
+        assert!(disabled_warning_for(true, true, &e, &l).is_none());
+    }
+
+    #[test]
+    fn no_warn_when_user_supplied_nothing() {
+        // Daemon view alone (no PATCH fields) must not produce a warning.
+        let e = eff(false, CleanupRetention::Count(0));
+        let l = ws_ckpt_common::WorkspacePolicy::default();
+        assert!(disabled_warning_for(false, false, &e, &l).is_none());
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use dashmap::DashMap;
-use tokio::sync::{Notify, OnceCell, RwLock};
+use tokio::sync::{Mutex, Notify, OnceCell, RwLock, Semaphore};
 use tracing::{error, info, warn};
 
 use ws_ckpt_common::backend::BackendType;
@@ -13,7 +13,8 @@ use ws_ckpt_common::persist::{
     self, BackendIdentity, BackendPaths, DaemonStateFile, WorkspaceEntry, DAEMON_STATE_VERSION,
 };
 use ws_ckpt_common::{
-    DaemonConfig, ResolveError, SnapshotIndex, WorkspaceInfo, INDEXES_DIR, INDEX_FILE,
+    load_workspace_policy, load_workspace_policy_with_failsafe, DaemonConfig, LoadPolicyOutcome,
+    ResolveError, SnapshotIndex, WorkspaceInfo, WorkspacePolicy, INDEXES_DIR, INDEX_FILE,
 };
 
 use crate::fs_watcher::WorkspaceWatcher;
@@ -49,12 +50,30 @@ pub struct DaemonState {
     pub state_dir: PathBuf,
     /// Backend selection method: "auto-detect" | "config" | "persisted"
     selection_method: String,
+    /// Per-ws-id mutex serializing lifecycle ops (init / adopt / recover) that
+    /// race on the same `index_dir(ws_id)` and `workspaces` slot. Distinct
+    /// from `WorkspaceState::policy_io_mu` (which lives inside an Arc that
+    /// recover would unregister). Held across `await`.
+    wsid_locks: DashMap<String, Arc<Mutex<()>>>,
 }
 
 pub struct WorkspaceState {
     pub ws_id: String,
     pub path: PathBuf,
     pub index: SnapshotIndex,
+    /// Per-workspace policy override; `WorkspacePolicy::default()` when no
+    /// `policy.toml` exists (i.e. inherit everything from global).
+    pub policy: WorkspacePolicy,
+    /// True iff `policy` is a synthetic fail-safe value injected at register
+    /// time because `policy.toml` was unreadable. Blocks PATCH (which would
+    /// silently persist the synthetic value as truth) until reload or reset.
+    pub policy_failsafe: bool,
+    /// Narrow per-ws serializer for PATCH/RESET on `policy.toml`. Decoupled
+    /// from the ws RwLock so checkpoint/list/status are NOT blocked by a slow
+    /// fsync; only competing PATCH/RESET wait. Held across spawn_blocking,
+    /// hence `tokio::sync::Mutex`. The ws write lock itself is taken only to
+    /// commit the in-memory result, never across the disk op.
+    pub policy_io_mu: Arc<Mutex<()>>,
 }
 
 impl DaemonState {
@@ -75,12 +94,47 @@ impl DaemonState {
             watchers: std::sync::Mutex::new(HashMap::new()),
             state_dir,
             selection_method,
+            wsid_locks: DashMap::new(),
         }
+    }
+
+    /// Acquire (or get-or-create) the per-ws-id lifecycle lock. Held by
+    /// init / adopt_existing_subvol / recover_workspace to serialize the
+    /// register/unregister + index-dir-mutation window. Entries are not
+    /// removed: each is ~few hundred bytes, and removal would race with
+    /// another waiter that just cloned the Arc.
+    pub async fn lock_wsid(&self, ws_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let mtx = self
+            .wsid_locks
+            .entry(ws_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        mtx.lock_owned().await
     }
 
     /// get the index storage directory for a workspace
     pub fn index_dir(&self, ws_id: &str) -> PathBuf {
         self.state_dir.join(INDEXES_DIR).join(ws_id)
+    }
+
+    /// Poison-safe snapshot of the current daemon config.
+    ///
+    /// A panic under the write lock poisons it, making `.read().unwrap()`
+    /// re-panic and take down every config reader (policy IPCs, scheduler).
+    /// We consume the poison and return the last-written value, which is
+    /// what read-only consumers want. Prefer this over `.read().unwrap()`.
+    pub fn config_snapshot(&self) -> DaemonConfig {
+        let guard = match self.config.read() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "config RwLock was poisoned by a panicking writer; reading anyway \
+                     to keep policy IPCs and the scheduler alive"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.clone()
     }
 
     /// Rebuild runtime state from persisted file
@@ -130,7 +184,17 @@ impl DaemonState {
                     );
                 }
             }
-            state.register_workspace(ws_id.clone(), entry.workspace_path.clone(), index);
+            // Shared helper: Missing → inherit-global; Err → fail-safe
+            // (auto_cleanup=false + policy_failsafe=true). See [[ws-failsafe]].
+            let (policy, failsafe) =
+                load_workspace_policy_with_failsafe(&index_dir, ws_id, "rebuild");
+            state.register_workspace_with_policy(
+                ws_id.clone(),
+                entry.workspace_path.clone(),
+                index,
+                policy,
+                failsafe,
+            );
         }
 
         // Reconcile: mark phantom snapshots whose subvolumes no longer exist
@@ -240,7 +304,7 @@ impl DaemonState {
     pub async fn ensure_bootstrapped(&self) -> anyhow::Result<()> {
         self.bootstrapped
             .get_or_try_init(|| async {
-                let config = self.config.read().unwrap().clone();
+                let config = self.config_snapshot();
                 self.backend.bootstrap(&config).await
             })
             .await?;
@@ -296,24 +360,168 @@ impl DaemonState {
     }
 
     pub fn register_workspace(&self, ws_id: String, path: PathBuf, index: SnapshotIndex) {
+        self.register_workspace_with_policy(ws_id, path, index, WorkspacePolicy::default(), false);
+    }
+
+    pub fn register_workspace_with_policy(
+        &self,
+        ws_id: String,
+        path: PathBuf,
+        index: SnapshotIndex,
+        policy: WorkspacePolicy,
+        failsafe: bool,
+    ) {
         let state = Arc::new(RwLock::new(WorkspaceState {
             ws_id: ws_id.clone(),
             path: path.clone(),
             index,
+            policy,
+            policy_failsafe: failsafe,
+            policy_io_mu: Arc::new(Mutex::new(())),
         }));
-        self.path_to_wsid.insert(path, ws_id.clone());
-        self.workspaces.insert(ws_id, state);
+        self.workspaces.insert(ws_id.clone(), state);
+        self.path_to_wsid.insert(path, ws_id);
+        self.config_notify.notify_waiters();
     }
 
-    pub fn unregister_workspace(&self, ws_id: &str, path: &Path) {
+    /// Reload every `policy.toml` from disk into the in-memory state.
+    /// Called by `handle_reload_config` so out-of-band edits are picked up
+    /// by `ws-ckpt reload` / `systemctl reload`.
+    ///
+    /// Three invariants, each fixing a real bug:
+    /// 1. **fs-serialize via `policy_io_mu`, not the ws RwLock**: a per-ws
+    ///    narrow mutex (the same one PATCH/RESET take around save+commit) is
+    ///    held across the disk read; the ws RwLock is taken only for the
+    ///    few-microsecond memory commit. This still excludes any concurrent
+    ///    SET stomp, but lets checkpoint/list/status keep running while the
+    ///    blocking pool is busy. See [[ws-lock-no-fs-loops]].
+    /// 2. **Blocking I/O on a worker**: `load_workspace_policy` is sync
+    ///    `std::fs`; run it on a blocking thread so N reads don't starve
+    ///    concurrent CLI requests.
+    /// 3. **Strict error handling**: only `Missing` collapses to default;
+    ///    a transient I/O / parse error must NOT erase live policy — we
+    ///    keep it and `warn!`.
+    ///
+    /// Per-ws tasks run concurrently (capped by semaphore) so a 500-ws fleet
+    /// doesn't serialize into a multi-second reload; invariant #1 still holds
+    /// per task because `policy_io_mu` is per-ws, not shared.
+    pub async fn reload_all_workspace_policies(&self) {
+        // Cap to avoid flooding the blocking pool during reload.
+        const RELOAD_CONCURRENCY: usize = 32;
+        let sem = Arc::new(Semaphore::new(RELOAD_CONCURRENCY));
+
+        let ws_ids: Vec<String> = self.workspaces.iter().map(|e| e.key().clone()).collect();
+        let mut set = tokio::task::JoinSet::new();
+        for ws_id in ws_ids {
+            let arc = match self.get_by_wsid(&ws_id) {
+                Some(a) => a,
+                None => continue, // unregistered between snapshot and now
+            };
+            let dir = self.index_dir(&ws_id);
+            let sem = Arc::clone(&sem);
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await.expect("semaphore not closed");
+                Self::reload_one_workspace_policy_inner(&ws_id, dir, &arc).await;
+            });
+        }
+        // Drain so a panicking task can't abort the reload.
+        while let Some(res) = set.join_next().await {
+            if let Err(e) = res {
+                warn!("reload: per-ws task panicked or was cancelled: {}", e);
+            }
+        }
+    }
+
+    /// Reload a single workspace's `policy.toml`. Returns `false` if the ws is
+    /// no longer registered. Same write-lock-first invariant as the bulk path.
+    pub async fn reload_workspace_policy(&self, ws_id: &str) -> bool {
+        let Some(arc) = self.get_by_wsid(ws_id) else {
+            return false;
+        };
+        let dir = self.index_dir(ws_id);
+        Self::reload_one_workspace_policy_inner(ws_id, dir, &arc).await;
+        true
+    }
+
+    async fn reload_one_workspace_policy_inner(
+        ws_id: &str,
+        dir: PathBuf,
+        arc: &Arc<RwLock<WorkspaceState>>,
+    ) {
+        // (1) Tiny read lock: grab the per-ws fs serializer.
+        let policy_io_mu = {
+            let ws = arc.read().await;
+            ws.policy_io_mu.clone()
+        };
+
+        // (2) Serialize against concurrent PATCH/RESET via the narrow per-ws
+        //     mutex (same one PATCH/RESET hold around save+commit). This gives
+        //     us the original "no SET stomp" guarantee without blocking
+        //     checkpoint/list/status on a slow disk via the ws RwLock.
+        let _io_guard = policy_io_mu.lock().await;
+
+        // (3) Disk read on a blocking worker, with NO ws RwLock held.
+        let outcome = tokio::task::spawn_blocking(move || load_workspace_policy(&dir)).await;
+
+        // (4) Tiny write lock to commit the in-memory result. Disk is the
+        //     source of truth; this just brings memory in sync. PATCH/RESET
+        //     can't have raced here because they're behind `policy_io_mu`.
+        match outcome {
+            // Successful read: real on-disk truth, drop any fail-safe marker.
+            Ok(Ok(LoadPolicyOutcome::Missing)) => {
+                let mut ws = arc.write().await;
+                ws.policy = WorkspacePolicy::default();
+                ws.policy_failsafe = false;
+            }
+            Ok(Ok(LoadPolicyOutcome::Loaded(p))) => {
+                let mut ws = arc.write().await;
+                ws.policy = p;
+                ws.policy_failsafe = false;
+            }
+            Ok(Err(e)) => warn!(
+                "reload: failed to load policy for {}: {}; preserving live in-memory policy",
+                ws_id, e
+            ),
+            Err(join_err) => warn!(
+                "reload: spawn_blocking joined with error for {}: {}; preserving live policy",
+                ws_id, join_err
+            ),
+        }
+    }
+
+    /// True iff at least one workspace's effective policy (local-or-global)
+    /// would do work this tick. Lets `auto_cleanup_loop` decide whether to
+    /// park. Subsumes the legacy global-only short-circuits by checking the
+    /// merged policy of every ws, so a per-ws override that re-enables
+    /// cleanup wins over a globally-off default.
+    pub async fn any_ws_has_effective_cleanup(&self) -> bool {
+        let cfg_snapshot = self.config_snapshot();
+        for arc in self.all_workspaces() {
+            let ws = arc.read().await;
+            if !ws.policy.effective_for(&cfg_snapshot).is_disabled() {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub async fn unregister_workspace(&self, ws_id: &str) {
         // Stop watcher if present
         if let Ok(mut watchers) = self.watchers.lock() {
             if let Some(w) = watchers.remove(ws_id) {
                 w.stop();
             }
         }
-        self.workspaces.remove(ws_id);
-        self.path_to_wsid.remove(path);
+        if let Some((_, ws_state)) = self.workspaces.remove(ws_id) {
+            // Await any in-flight writer (e.g. a concurrent checkpoint) so
+            // path_to_wsid is never leaked. After workspaces.remove no new
+            // holders can appear; existing ones drop quickly.
+            let state = ws_state.read().await;
+            self.path_to_wsid.remove(&state.path);
+        }
+        // Symmetric with register: re-park/re-evaluate the
+        // scheduler when a ws goes away. No-op when no one is parked.
+        self.config_notify.notify_waiters();
     }
 
     /// Register a file watcher for a workspace.
@@ -450,7 +658,12 @@ impl DaemonState {
                 warn!("Failed to start watcher for {}: {}", ws_id, e);
             }
         }
-        state.register_workspace(ws_id, workspace_path, index);
+        // Shared fail-safe helper; same `(policy, failsafe)` semantics as
+        // every other register entry. See [[ws-failsafe]].
+        let policy_dir = state.index_dir(&ws_id);
+        let (policy, failsafe) =
+            load_workspace_policy_with_failsafe(&policy_dir, &ws_id, "rebuild");
+        state.register_workspace_with_policy(ws_id, workspace_path, index, policy, failsafe);
 
         Ok(())
     }
@@ -509,7 +722,9 @@ impl DaemonState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ws_ckpt_common::{CleanupRetention, DaemonConfig, SnapshotIndex, SnapshotMeta};
+    use ws_ckpt_common::{
+        save_workspace_policy, CleanupRetention, DaemonConfig, SnapshotIndex, SnapshotMeta,
+    };
 
     fn test_backend() -> Arc<dyn StorageBackend> {
         Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
@@ -652,8 +867,8 @@ mod tests {
         assert_eq!(ws.path, path2);
     }
 
-    #[test]
-    fn unregister_workspace_removes_both_mappings() {
+    #[tokio::test]
+    async fn unregister_workspace_removes_both_mappings() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
         let path = PathBuf::from("/home/user/removable");
         let index = SnapshotIndex::new(path.clone());
@@ -664,7 +879,7 @@ mod tests {
         assert!(state.get_by_path(&path).is_some());
 
         // Unregister
-        state.unregister_workspace("ws-rm", &path);
+        state.unregister_workspace("ws-rm").await;
 
         // Verify both mappings removed
         assert!(state.get_by_wsid("ws-rm").is_none());
@@ -833,5 +1048,220 @@ mod tests {
 
         let _ = release_tx.send(());
         holder.await.unwrap();
+    }
+
+    // ── Per-workspace policy plumbing tests ──
+
+    #[tokio::test]
+    async fn register_workspace_default_policy_is_inherit_global() {
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        let path = PathBuf::from("/ws/inherit");
+        state.register_workspace("ws-i".to_string(), path.clone(), SnapshotIndex::new(path));
+        let arc = state.get_by_wsid("ws-i").unwrap();
+        let ws = arc.read().await;
+        assert!(ws.policy.is_empty(), "default register sets empty policy");
+    }
+
+    #[tokio::test]
+    async fn any_ws_has_effective_cleanup_covers_global_and_local_paths() {
+        // test_config() has auto_cleanup=false, so a fresh state with no
+        // ws (or only inherit-default ws) should report no effective work.
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        assert!(!state.any_ws_has_effective_cleanup().await);
+
+        // Inherit-only ws under a globally-off config → still false.
+        let path_a = PathBuf::from("/ws/a");
+        state.register_workspace_with_policy(
+            "ws-a".to_string(),
+            path_a.clone(),
+            SnapshotIndex::new(path_a),
+            WorkspacePolicy::default(),
+            false,
+        );
+        assert!(!state.any_ws_has_effective_cleanup().await);
+
+        // Per-ws override re-enables on top of globally-off → true.
+        let path_b = PathBuf::from("/ws/b");
+        state.register_workspace_with_policy(
+            "ws-b".to_string(),
+            path_b.clone(),
+            SnapshotIndex::new(path_b),
+            WorkspacePolicy {
+                auto_cleanup: Some(true),
+                auto_cleanup_keep: None,
+            },
+            false,
+        );
+        assert!(state.any_ws_has_effective_cleanup().await);
+
+        // Per-ws auto_cleanup=Some(false) on top of globally-off → still
+        // false (the ws-b override above is what keeps the aggregate true).
+        let path_c = PathBuf::from("/ws/c");
+        state.register_workspace_with_policy(
+            "ws-c".to_string(),
+            path_c.clone(),
+            SnapshotIndex::new(path_c),
+            WorkspacePolicy {
+                auto_cleanup: Some(false),
+                auto_cleanup_keep: None,
+            },
+            false,
+        );
+        assert!(state.any_ws_has_effective_cleanup().await);
+    }
+
+    #[tokio::test]
+    async fn any_ws_has_effective_cleanup_global_keep_disabled_per_ws_overrides() {
+        // Globally on but global keep is disabled (Count(0)). A ws with no
+        // override inherits → effective is_disabled. Aggregate must be false.
+        let mut cfg = test_config();
+        cfg.auto_cleanup = true;
+        cfg.auto_cleanup_keep = ws_ckpt_common::CleanupRetention::Count(0);
+        let state = DaemonState::new(cfg, test_backend(), test_state_dir());
+
+        let path_a = PathBuf::from("/ws/a");
+        state.register_workspace_with_policy(
+            "ws-a".to_string(),
+            path_a.clone(),
+            SnapshotIndex::new(path_a),
+            WorkspacePolicy::default(),
+            false,
+        );
+        assert!(!state.any_ws_has_effective_cleanup().await);
+
+        // ws-b overrides keep with a real number → effective re-enabled.
+        let path_b = PathBuf::from("/ws/b");
+        state.register_workspace_with_policy(
+            "ws-b".to_string(),
+            path_b.clone(),
+            SnapshotIndex::new(path_b),
+            WorkspacePolicy {
+                auto_cleanup: None,
+                auto_cleanup_keep: Some(ws_ckpt_common::CleanupRetention::Count(5)),
+            },
+            false,
+        );
+        assert!(state.any_ws_has_effective_cleanup().await);
+    }
+
+    #[tokio::test]
+    async fn reload_all_workspace_policies_picks_up_disk_changes() {
+        // Use a real state_dir so index_dir() points at writable paths.
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let state = DaemonState::new(test_config(), test_backend(), state_dir.clone());
+
+        let ws_id = "ws-reload";
+        let path = PathBuf::from("/ws/reload");
+        state.register_workspace_with_policy(
+            ws_id.to_string(),
+            path.clone(),
+            SnapshotIndex::new(path),
+            WorkspacePolicy::default(),
+            false,
+        );
+
+        // Operator hand-edits the policy file out-of-band (no IPC).
+        let ws_index_dir = state.index_dir(ws_id);
+        let new_policy = WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: Some(CleanupRetention::Count(7)),
+        };
+        save_workspace_policy(&ws_index_dir, &new_policy).unwrap();
+
+        // Before reload, in-memory state still says "inherit".
+        {
+            let ws = state.get_by_wsid(ws_id).unwrap();
+            let g = ws.read().await;
+            assert!(g.policy.is_empty());
+        }
+
+        state.reload_all_workspace_policies().await;
+
+        let ws = state.get_by_wsid(ws_id).unwrap();
+        let g = ws.read().await;
+        assert_eq!(g.policy, new_policy);
+    }
+
+    #[tokio::test]
+    async fn reload_clears_failsafe_when_disk_read_succeeds() {
+        // A ws registered as fail-safe must drop the marker once reload reads
+        // the real policy.toml, so subsequent PATCH is no longer refused.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = DaemonState::new(test_config(), test_backend(), tmp.path().to_path_buf());
+
+        let ws_id = "ws-failsafe-reload";
+        let path = PathBuf::from("/ws/failsafe-reload");
+        state.register_workspace_with_policy(
+            ws_id.to_string(),
+            path.clone(),
+            SnapshotIndex::new(path),
+            WorkspacePolicy {
+                auto_cleanup: Some(false),
+                auto_cleanup_keep: None,
+            },
+            true,
+        );
+
+        let real_policy = WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: Some(CleanupRetention::Count(100)),
+        };
+        save_workspace_policy(&state.index_dir(ws_id), &real_policy).unwrap();
+
+        state.reload_all_workspace_policies().await;
+
+        let ws = state.get_by_wsid(ws_id).unwrap();
+        let g = ws.read().await;
+        assert_eq!(g.policy, real_policy);
+        assert!(
+            !g.policy_failsafe,
+            "successful reload must drop the fail-safe marker"
+        );
+    }
+
+    // ── lock_wsid: serializes init/adopt/recover on a shared ws_id ──
+
+    #[tokio::test]
+    async fn lock_wsid_serializes_same_id() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        let g1 = state.lock_wsid("ws-abc").await;
+
+        let acquired = Arc::new(AtomicBool::new(false));
+        let acquired_c = acquired.clone();
+        let state_c = state.clone();
+        let h = tokio::spawn(async move {
+            let _g = state_c.lock_wsid("ws-abc").await;
+            acquired_c.store(true, Ordering::SeqCst);
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !acquired.load(Ordering::SeqCst),
+            "second lock on same ws_id must block while first guard is held"
+        );
+
+        drop(g1);
+        h.await.unwrap();
+        assert!(acquired.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn lock_wsid_independent_for_different_ids() {
+        use std::time::Duration;
+
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        let _g1 = state.lock_wsid("ws-a").await;
+        // Different ws_id must not block.
+        let _g2 = tokio::time::timeout(Duration::from_millis(100), state.lock_wsid("ws-b"))
+            .await
+            .expect("different ws_id must not block on each other");
     }
 }

@@ -9,8 +9,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 use ws_ckpt_common::{
-    decode_payload, encode_frame, ChangeType, CleanupRetention, ConfigReport, DiffEntry, Request,
-    Response, SnapshotEntry, SnapshotMeta, StatusReport, WorkspaceInfo,
+    decode_payload, encode_frame, ChangeType, CleanupRetention, ConfigReport, DiffEntry,
+    EffectivePolicy, GlobalPolicySnapshot, PolicyFieldOp, Request, Response, SnapshotEntry,
+    SnapshotMeta, StatusReport, WorkspaceInfo, WorkspacePolicy,
 };
 
 /// Helper: create a temporary socket path using tempfile
@@ -98,13 +99,105 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 img_max_percent: 40.0,
             },
         },
-        Request::ReloadConfig => Response::ReloadConfigOk,
+        Request::ReloadConfig
+        | Request::ReloadGlobalConfig
+        | Request::ReloadWorkspacePolicy { .. } => Response::ReloadConfigOk {
+            config: ConfigReport {
+                mount_path: "/mnt/btrfs-workspace".to_string(),
+                socket_path: "/run/ws-ckpt/ws-ckpt.sock".to_string(),
+                log_level: "info".to_string(),
+                auto_cleanup: false,
+                auto_cleanup_keep: CleanupRetention::Count(20),
+                auto_cleanup_interval_secs: 86_400,
+                health_check_interval_secs: 300,
+                img_size: 30,
+                img_max_percent: 40.0,
+            },
+        },
+        Request::ConfigOverview => Response::ConfigOverviewOk {
+            config: ConfigReport {
+                mount_path: "/mnt/btrfs-workspace".to_string(),
+                socket_path: "/run/ws-ckpt/ws-ckpt.sock".to_string(),
+                log_level: "info".to_string(),
+                auto_cleanup: false,
+                auto_cleanup_keep: CleanupRetention::Count(20),
+                auto_cleanup_interval_secs: 86_400,
+                health_check_interval_secs: 300,
+                img_size: 30,
+                img_max_percent: 40.0,
+            },
+            ws_total: 3,
+            ws_with_override: 1,
+        },
         Request::Recover { workspace } => Response::RecoverOk { workspace },
         Request::HealthAdvisory => Response::HealthAdvisoryOk {
             over_limit_workspace_count: 0,
             fs_total_bytes: 1_000_000_000,
             fs_used_bytes: 500_000_000,
         },
+        // Each policy-shaped variant returns a *distinct* response so the
+        // matching #[tokio::test] cases below actually catch wire-format
+        // regressions: a different shape per request rules out
+        // "the test only ever decoded one shape, schema drift went unnoticed".
+        Request::GetWorkspacePolicy { workspace } => Response::WorkspacePolicyOk {
+            ws_id: format!("get:{}", workspace),
+            effective: EffectivePolicy {
+                auto_cleanup: true,
+                auto_cleanup_keep: CleanupRetention::Count(5),
+            },
+            local: WorkspacePolicy::default(),
+            global: GlobalPolicySnapshot {
+                auto_cleanup: true,
+                auto_cleanup_keep: CleanupRetention::Count(20),
+            },
+        },
+        Request::ResetWorkspacePolicy { workspace } => {
+            // Mirror the real daemon's Reset semantics: the file is gone,
+            // local is empty, effective == global. The ws_id prefix tells
+            // the test that the right variant arrived (vs Patch).
+            let global = GlobalPolicySnapshot {
+                auto_cleanup: false,
+                auto_cleanup_keep: CleanupRetention::Count(20),
+            };
+            let effective = EffectivePolicy {
+                auto_cleanup: global.auto_cleanup,
+                auto_cleanup_keep: global.auto_cleanup_keep.clone(),
+            };
+            Response::WorkspacePolicyOk {
+                ws_id: format!("reset:{}", workspace),
+                effective,
+                local: WorkspacePolicy::default(),
+                global,
+            }
+        }
+        Request::PatchWorkspacePolicy {
+            workspace,
+            auto_cleanup,
+            auto_cleanup_keep,
+        } => {
+            // Apply the patch on top of an empty baseline so the test can
+            // verify the wire-format actually round-trips PolicyFieldOp.
+            let local = WorkspacePolicy {
+                auto_cleanup: auto_cleanup.apply(None),
+                auto_cleanup_keep: auto_cleanup_keep.apply(None),
+            };
+            let effective = EffectivePolicy {
+                auto_cleanup: local.auto_cleanup.unwrap_or(false),
+                auto_cleanup_keep: local
+                    .auto_cleanup_keep
+                    .clone()
+                    .unwrap_or(CleanupRetention::Count(20)),
+            };
+            Response::WorkspacePolicyOk {
+                ws_id: format!("patch:{}", workspace),
+                effective,
+                local,
+                global: GlobalPolicySnapshot {
+                    auto_cleanup: false,
+                    auto_cleanup_keep: CleanupRetention::Count(20),
+                },
+            }
+        }
     };
 
     // 5. Encode and send response frame
@@ -449,7 +542,13 @@ async fn full_reload_config_request_response_over_socket() {
     client.read_exact(&mut payload).await.unwrap();
 
     let response: Response = decode_payload(&payload).unwrap();
-    assert!(matches!(response, Response::ReloadConfigOk));
+    match response {
+        Response::ReloadConfigOk { config } => {
+            assert_eq!(config.mount_path, "/mnt/btrfs-workspace");
+            assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(20));
+        }
+        other => panic!("expected ReloadConfigOk, got {:?}", other),
+    }
 
     server.await.unwrap();
 }
@@ -488,4 +587,195 @@ async fn full_config_request_response_over_socket() {
     }
 
     server.await.unwrap();
+}
+
+// ── Per-workspace policy: real end-to-end IPC tests ──
+//
+// Each variant goes through encode → socket → decode on both ends, so a
+// future bincode-tag shuffle, serde rename, or `EffectivePolicy` /
+// `GlobalPolicySnapshot` field reorder will fail loudly here instead of
+// silently breaking the wire format.
+
+/// Shared helper: spawn mock server, encode `req`, return decoded `Response`.
+/// Renamed from `run_policy_request` — also used by the reload-IPC e2e tests
+/// below that aren't policy-shaped.
+async fn run_policy_request(req: Request) -> Response {
+    let socket_path = temp_socket_path();
+    let listener = UnixListener::bind(&socket_path).expect("bind");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        mock_server_handle(stream).await;
+    });
+    tokio::task::yield_now().await;
+
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+    let frame = encode_frame(&req).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let mut len_buf = [0u8; 4];
+    client.read_exact(&mut len_buf).await.unwrap();
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut payload = vec![0u8; len];
+    client.read_exact(&mut payload).await.unwrap();
+
+    let resp: Response = decode_payload(&payload).unwrap();
+    server.await.unwrap();
+    resp
+}
+
+#[tokio::test]
+async fn full_get_workspace_policy_over_socket() {
+    let resp = run_policy_request(Request::GetWorkspacePolicy {
+        workspace: "/tmp/ws".to_string(),
+    })
+    .await;
+    match resp {
+        Response::WorkspacePolicyOk {
+            ws_id,
+            effective,
+            local,
+            global,
+        } => {
+            // The mock server prefixes "get:" so we know the request reached
+            // it as the right variant (and not, say, as Set after a tag drift).
+            assert_eq!(ws_id, "get:/tmp/ws");
+            assert_eq!(effective.auto_cleanup_keep, CleanupRetention::Count(5));
+            assert!(effective.auto_cleanup);
+            assert!(local.is_empty());
+            assert_eq!(global.auto_cleanup_keep, CleanupRetention::Count(20));
+        }
+        _ => panic!("expected WorkspacePolicyOk, got {:?}", resp),
+    }
+}
+
+// (full_set_workspace_policy_over_socket removed: there is no longer a
+// "write whole policy" IPC — Patch handles edits, Reset handles removal.)
+
+#[tokio::test]
+async fn full_reset_workspace_policy_over_socket() {
+    // ResetWorkspacePolicy is the only whole-file IPC. Mock+daemon must
+    // both behave the same way: file gone, local empty, effective ==
+    // global. Distinct `reset:` ws_id prefix from the mock so a future
+    // tag-shuffle that delivered the wrong variant fails here.
+    let resp = run_policy_request(Request::ResetWorkspacePolicy {
+        workspace: "ws-reset".to_string(),
+    })
+    .await;
+    match resp {
+        Response::WorkspacePolicyOk {
+            ws_id,
+            local,
+            effective,
+            global,
+        } => {
+            assert_eq!(ws_id, "reset:ws-reset");
+            assert!(local.is_empty(), "reset must produce an empty local");
+            assert_eq!(
+                effective.auto_cleanup, global.auto_cleanup,
+                "with local empty, effective.auto_cleanup must match global"
+            );
+            assert_eq!(
+                effective.auto_cleanup_keep, global.auto_cleanup_keep,
+                "with local empty, effective.auto_cleanup_keep must match global"
+            );
+        }
+        _ => panic!("expected WorkspacePolicyOk, got {:?}", resp),
+    }
+}
+
+#[tokio::test]
+async fn full_patch_workspace_policy_over_socket() {
+    // Cover both PolicyFieldOp variants (Set + Unchanged) on a single
+    // request so each one touches the wire.
+    let resp = run_policy_request(Request::PatchWorkspacePolicy {
+        workspace: "ws-patch".to_string(),
+        auto_cleanup: PolicyFieldOp::Set(true),
+        auto_cleanup_keep: PolicyFieldOp::Set(CleanupRetention::Count(7)),
+    })
+    .await;
+    match resp {
+        Response::WorkspacePolicyOk {
+            ws_id,
+            local,
+            effective,
+            ..
+        } => {
+            assert_eq!(ws_id, "patch:ws-patch");
+            assert_eq!(local.auto_cleanup, Some(true));
+            assert_eq!(local.auto_cleanup_keep, Some(CleanupRetention::Count(7)));
+            assert!(effective.auto_cleanup);
+            assert_eq!(effective.auto_cleanup_keep, CleanupRetention::Count(7));
+        }
+        _ => panic!("expected WorkspacePolicyOk, got {:?}", resp),
+    }
+}
+
+#[tokio::test]
+async fn full_patch_workspace_policy_unchanged_only_over_socket() {
+    // All-Unchanged Patch: nothing should be applied. Used here mainly to
+    // exercise the `Unchanged` discriminant on the wire (the Set test
+    // above only ever encodes `Set` for both fields).
+    let resp = run_policy_request(Request::PatchWorkspacePolicy {
+        workspace: "ws-patch-noop".to_string(),
+        auto_cleanup: PolicyFieldOp::Unchanged,
+        auto_cleanup_keep: PolicyFieldOp::Unchanged,
+    })
+    .await;
+    match resp {
+        Response::WorkspacePolicyOk { local, .. } => {
+            // Unchanged applied to None stays None — both fields remain unset.
+            assert_eq!(local.auto_cleanup, None);
+            assert_eq!(local.auto_cleanup_keep, None);
+        }
+        _ => panic!("expected WorkspacePolicyOk, got {:?}", resp),
+    }
+}
+
+// ── Reload IPCs: exercise every variant on the wire ──
+//
+// All three reload variants share the `ReloadConfigOk { config }` reply
+// shape. Mock server returns the same body for all three (combined match
+// arm), so these tests verify the *request* tags round-trip distinctly
+// — a bincode tag shuffle that swapped `ReloadConfig` and
+// `ReloadGlobalConfig` would still go through the same arm, but a
+// reorder against any other Request variant (Init/Recover/etc.) would
+// blow up at decode.
+
+#[tokio::test]
+async fn full_reload_config_over_socket() {
+    let resp = run_policy_request(Request::ReloadConfig).await;
+    match resp {
+        Response::ReloadConfigOk { config } => {
+            assert_eq!(config.mount_path, "/mnt/btrfs-workspace");
+            assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(20));
+        }
+        other => panic!("expected ReloadConfigOk, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn full_reload_global_config_over_socket() {
+    let resp = run_policy_request(Request::ReloadGlobalConfig).await;
+    match resp {
+        Response::ReloadConfigOk { config } => {
+            assert_eq!(config.mount_path, "/mnt/btrfs-workspace");
+        }
+        other => panic!("expected ReloadConfigOk, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn full_reload_workspace_policy_over_socket() {
+    let resp = run_policy_request(Request::ReloadWorkspacePolicy {
+        workspace: "/tmp/ws".to_string(),
+    })
+    .await;
+    match resp {
+        Response::ReloadConfigOk { config } => {
+            // Mock reuses the same global config payload for the per-ws
+            // reload reply; the point of the test is the request side.
+            assert_eq!(config.mount_path, "/mnt/btrfs-workspace");
+        }
+        other => panic!("expected ReloadConfigOk, got {:?}", other),
+    }
 }

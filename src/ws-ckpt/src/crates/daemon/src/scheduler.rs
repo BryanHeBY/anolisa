@@ -7,8 +7,9 @@ use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::backends::btrfs_common;
+use crate::snapshot_mgr::{delete_snapshots_locked, ensure_index_dir, persist_index_after_cleanup};
 use crate::state::DaemonState;
-use ws_ckpt_common::CleanupRetention;
+use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
 
 /// Start background scheduler tasks: orphan cleanup on boot, periodic auto-cleanup,
 /// and periodic health checks.
@@ -59,16 +60,12 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
         tokio::pin!(notified);
         notified.as_mut().enable();
 
-        let (enabled, interval, keep_disabled) = {
-            let cfg = state.config.read().unwrap();
-            (
-                cfg.auto_cleanup,
-                cfg.auto_cleanup_interval_secs,
-                cfg.auto_cleanup_keep.is_disabled(),
-            )
-        };
-        if !enabled || interval == 0 || keep_disabled {
-            // Disabled: block until a reload arrives, then re-check.
+        let interval = state.config_snapshot().auto_cleanup_interval_secs;
+        // Park unless some ws has an effective (merged local-or-global) policy
+        // that would do work this tick; avoids waking every interval just to
+        // skip all workspaces.
+        let park = interval == 0 || !state.any_ws_has_effective_cleanup().await;
+        if park {
             notified.await;
             continue;
         }
@@ -92,7 +89,7 @@ async fn health_check_loop(state: Arc<DaemonState>) {
         tokio::pin!(notified);
         notified.as_mut().enable();
 
-        let interval = state.config.read().unwrap().health_check_interval_secs;
+        let interval = state.config_snapshot().health_check_interval_secs;
         if interval == 0 {
             notified.await;
             continue;
@@ -164,102 +161,98 @@ pub async fn cleanup_orphans(mount_path: &Path) -> Result<Vec<String>, anyhow::E
 /// - `Count(n)`: keep n newest per workspace.
 /// - `Age { secs, .. }`: delete if older than `secs` (strict, no count floor).
 ///
-/// Caller ([`auto_cleanup_loop`]) filters disabled retention; this function
-/// asserts that invariant in debug builds.
+/// Locking: P1 read-lock probe; P2a read-lock plan (P2b rechecks per-snap);
+/// P2b unlocked deletes with short per-snap write to drop index entry.
 async fn auto_cleanup(state: &DaemonState) {
-    let retention = {
-        let cfg = state.config.read().unwrap();
-        cfg.auto_cleanup_keep.clone()
-    };
-    debug_assert!(
-        !retention.is_disabled(),
-        "caller must filter disabled retention"
-    );
-
-    info!("Running auto-cleanup (retention={})...", retention);
+    info!("Running auto-cleanup pass (per-ws effective retention)...");
     let all_ws = state.all_workspaces();
     let now = chrono::Utc::now();
 
     for ws_arc in &all_ws {
-        let mut ws = ws_arc.write().await;
-        let ws_id = ws.ws_id.clone();
-
-        // index storage directory (for saving index.json)
-        let index_dir = state.index_dir(&ws_id);
-        if let Err(e) = tokio::fs::create_dir_all(&index_dir).await {
-            warn!(
-                "auto-cleanup: failed to create index directory {:?}: {}",
-                index_dir, e
-            );
-            continue;
-        }
-
-        // btrfs snapshot subvolume root directory (for actually deleting subvolumes)
-        let snapshots_ws_dir = state.backend.snapshots_root().join(&ws_id);
-
-        // Collect non-pinned snapshots sorted by created_at ascending
-        let mut unpinned: Vec<(String, chrono::DateTime<chrono::Utc>)> = ws
-            .index
-            .snapshots
-            .iter()
-            .filter(|(_, meta)| !meta.pinned)
-            .map(|(id, meta)| (id.clone(), meta.created_at))
-            .collect();
-        unpinned.sort_by_key(|(_, ts)| *ts);
-
-        // Pick victims according to the active mode
-        let to_remove: Vec<String> = match &retention {
-            CleanupRetention::Count(n) => {
-                let keep = *n as usize;
-                if unpinned.len() <= keep {
-                    continue;
-                }
-                unpinned[..unpinned.len() - keep]
-                    .iter()
-                    .map(|(id, _)| id.clone())
-                    .collect()
-            }
-            CleanupRetention::Age { secs, .. } => {
-                let cutoff = now - chrono::Duration::seconds(*secs as i64);
-                unpinned
-                    .iter()
-                    .filter(|(_, ts)| *ts < cutoff)
-                    .map(|(id, _)| id.clone())
-                    .collect()
+        // Phase 1: cheap read-only probe — exact list is recomputed in Phase 2.
+        let has_potential_work = {
+            let ws = ws_arc.read().await;
+            let cfg = state.config_snapshot();
+            let eff: EffectivePolicy = ws.policy.effective_for(&cfg);
+            if eff.is_disabled() {
+                false
+            } else {
+                // Any unpinned snapshot exists; Phase 2 decides the final set.
+                // `any` short-circuits on large indexes.
+                ws.index.snapshots.values().any(|m| !m.pinned)
             }
         };
-
-        if to_remove.is_empty() {
+        if !has_potential_work {
             continue;
         }
 
-        let mut removed_count = 0;
-        for snap_id in &to_remove {
-            let snap_path = snapshots_ws_dir.join(snap_id);
-            match btrfs_common::delete_subvolume(&snap_path).await {
-                Ok(()) => {
-                    ws.index.snapshots.remove(snap_id);
-                    removed_count += 1;
-                }
-                Err(e) => {
-                    warn!("auto-cleanup: failed to delete {}: {:#}", snap_id, e);
-                }
+        // P2a: plan under read lock (pure compute; P2b rechecks pin per snap).
+        let (ws_id, to_remove, index_dir) = {
+            let ws = ws_arc.read().await;
+            let ws_id = ws.ws_id.clone();
+
+            let cfg = state.config_snapshot();
+            let eff: EffectivePolicy = ws.policy.effective_for(&cfg);
+            if eff.is_disabled() {
+                // Policy flipped to disabled while awaiting the read lock — skip.
+                continue;
             }
+            let retention = eff.auto_cleanup_keep.clone();
+
+            let mut unpinned: Vec<(String, chrono::DateTime<chrono::Utc>)> = ws
+                .index
+                .snapshots
+                .iter()
+                .filter(|(_, meta)| !meta.pinned)
+                .map(|(id, meta)| (id.clone(), meta.created_at))
+                .collect();
+            unpinned.sort_by_key(|(_, ts)| *ts);
+
+            let to_remove: Vec<String> = match &retention {
+                CleanupRetention::Count(n) => {
+                    let keep = *n as usize;
+                    if unpinned.len() <= keep {
+                        Vec::new()
+                    } else {
+                        unpinned[..unpinned.len() - keep]
+                            .iter()
+                            .map(|(id, _)| id.clone())
+                            .collect()
+                    }
+                }
+                CleanupRetention::Age { secs, .. } => {
+                    let cutoff = now - chrono::Duration::seconds(*secs as i64);
+                    unpinned
+                        .iter()
+                        .filter(|(_, ts)| *ts < cutoff)
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                }
+            };
+
+            if to_remove.is_empty() {
+                continue;
+            }
+
+            let index_dir = state.index_dir(&ws_id);
+            (ws_id, to_remove, index_dir)
+        };
+
+        if !ensure_index_dir(&index_dir, "auto-cleanup").await {
+            continue;
         }
 
-        if removed_count > 0 {
-            if let Err(e) = crate::index_store::save(&index_dir, &ws.index).await {
-                warn!("auto-cleanup: failed to save index for {}: {:#}", ws_id, e);
-            }
-            // Release write lock before save_manifest() so that
-            // collect_workspace_entries() can acquire a read lock on this workspace.
-            drop(ws);
-            if let Err(e) = state.save_manifest().await {
-                warn!("save_manifest failed after auto-cleanup: {:#}", e);
-            }
+        // P2b: shared detach-then-delete + persist. Background loop swallows
+        // partial failures (already warn!'d inside the helper) — we never
+        // bail the whole loop on a single snap, the next tick retries.
+        let outcome =
+            delete_snapshots_locked(state, ws_arc, &ws_id, &to_remove, "auto-cleanup").await;
+        if !outcome.removed.is_empty() {
+            persist_index_after_cleanup(state, ws_arc, &index_dir, "auto-cleanup").await;
             info!(
                 "auto-cleanup: removed {} snapshots from {}",
-                removed_count, ws_id
+                outcome.removed.len(),
+                ws_id
             );
         }
     }
@@ -344,5 +337,52 @@ mod tests {
 
         let cleaned = cleanup_orphans(dir.path()).await.unwrap();
         assert!(cleaned.is_empty());
+    }
+
+    // ── Per-workspace effective policy invariants ──
+    // Backend-free: only assert the routing rules `auto_cleanup_loop` relies on.
+    use ws_ckpt_common::{CleanupRetention, DaemonConfig, WorkspacePolicy};
+
+    fn cfg(global_on: bool, keep: CleanupRetention) -> DaemonConfig {
+        DaemonConfig {
+            auto_cleanup: global_on,
+            auto_cleanup_keep: keep,
+            ..DaemonConfig::default()
+        }
+    }
+
+    #[test]
+    fn per_ws_off_overrides_global_on() {
+        let g = cfg(true, CleanupRetention::Count(20));
+        let local = WorkspacePolicy {
+            auto_cleanup: Some(false),
+            auto_cleanup_keep: None,
+        };
+        // Per-ws says off → effective is_disabled, so scheduler will skip.
+        assert!(local.effective_for(&g).is_disabled());
+    }
+
+    #[test]
+    fn per_ws_on_overrides_global_off() {
+        let g = cfg(false, CleanupRetention::Count(20));
+        let local = WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: None,
+        };
+        // Per-ws says on, even though global is off → effective should run.
+        assert!(!local.effective_for(&g).is_disabled());
+    }
+
+    #[test]
+    fn per_ws_keep_count_overrides_global_keep() {
+        let g = cfg(true, CleanupRetention::Count(20));
+        let local = WorkspacePolicy {
+            auto_cleanup: None,
+            auto_cleanup_keep: Some(CleanupRetention::Count(5)),
+        };
+        let eff = local.effective_for(&g);
+        // auto_cleanup is inherited from global (true), keep is overridden.
+        assert!(eff.auto_cleanup);
+        assert_eq!(eff.auto_cleanup_keep, CleanupRetention::Count(5));
     }
 }

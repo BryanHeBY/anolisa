@@ -5,7 +5,9 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
-use ws_ckpt_common::{ErrorCode, ResolveError, Response, SnapshotIndex};
+use ws_ckpt_common::{
+    load_workspace_policy_with_failsafe, ErrorCode, ResolveError, Response, SnapshotIndex,
+};
 
 use crate::index_store;
 use crate::state::DaemonState;
@@ -47,6 +49,10 @@ async fn adopt_existing_subvol(
     ws_id: &str,
     registered_path: std::path::PathBuf,
 ) -> Response {
+    // Same-ws_id lifecycle lock as init/recover. ws_id here came from the
+    // existing on-disk subvol name, not SHA256(path), but it shares the
+    // index_dir(ws_id) namespace either way.
+    let _wsid_guard = state.lock_wsid(ws_id).await;
     let snap_dir = state.index_dir(ws_id);
     let btrfs_snap_dir = state.backend.snapshots_root().join(ws_id);
     let mut index = if let Ok(idx) = index_store::load(&snap_dir).await {
@@ -69,7 +75,18 @@ async fn adopt_existing_subvol(
             }
         }
     }
-    state.register_workspace(ws_id.to_string(), registered_path, index);
+    // Re-adoption must honor any pre-existing per-ws policy.toml; shared
+    // fail-safe helper means missing→inherit, on read error→auto_cleanup=false
+    // + policy_failsafe=true (won't delete protected snapshots before next
+    // reload, PATCH refused until reload/reset). See [[ws-failsafe]].
+    let (policy, failsafe) = load_workspace_policy_with_failsafe(&snap_dir, ws_id, "re-adoption");
+    state.register_workspace_with_policy(
+        ws_id.to_string(),
+        registered_path,
+        index,
+        policy,
+        failsafe,
+    );
     if let Err(e) = state.save_manifest().await {
         warn!("save_manifest failed after subvol re-adoption: {:#}", e);
     }
@@ -278,6 +295,13 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
         suffix += 1;
     }
 
+    // Serialize against a concurrent `recover` of the same path: ws_id is
+    // SHA256(path), so a recover already in flight would race with our
+    // index_store::save / register / save_manifest below.
+    let _wsid_guard = state.lock_wsid(&ws_id).await;
+
+    let abs_path_str = abs_path.to_string_lossy().to_string();
+
     // Steps 4-11 via backend, with cleanup handled internally
     if let Err(e) = state.backend.init_workspace(&abs_path_str, &ws_id).await {
         error!("init failed: {:#}", e);
@@ -311,13 +335,24 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     };
     index_store::save(&snap_dir, &index).await?;
 
+    // 12a. Pick up any pre-existing per-ws policy.toml before registering.
+    // If `state.json` was lost but `policy.toml` survived, ws_id stays stable
+    // (SHA256(path)), so default = "inherit global" here would silently
+    // revert and let scheduler delete protected snapshots. Shared helper
+    // handles missing→inherit / Err→fail-safe. See [[ws-failsafe]].
+    let (policy, failsafe) = load_workspace_policy_with_failsafe(&snap_dir, &ws_id, "init");
+
     // 13. Register to state
-    state.register_workspace(ws_id.clone(), abs_path.clone(), index);
+    state.register_workspace_with_policy(ws_id.clone(), abs_path.clone(), index, policy, failsafe);
 
     // 13a. Save manifest
     if let Err(e) = state.save_manifest().await {
         warn!("save_manifest failed after init: {:#}", e);
     }
+
+    // Lifecycle window done (state + index_dir written). Watcher / warmup
+    // below only read paths, so let a queued recover proceed.
+    drop(_wsid_guard);
 
     // 13b. Start file watcher for write-lock detection
     match crate::fs_watcher::WorkspaceWatcher::start(&abs_path) {
@@ -437,6 +472,26 @@ pub async fn delete_snapshot(
 
 // ── recover ──
 
+/// Remove the entire per-ws index dir (`index.json` + `policy.toml` + any
+/// future siblings) recursively. NotFound is fine, other errors warn-only.
+///
+/// Called by `recover_workspace` after `unregister`: ws_id is SHA256(path),
+/// so a future init at the same path would collide on the same dir and
+/// inherit stale `index.json` *and* `policy.toml` — both would mislead
+/// scheduler/PATCH about a workspace the user just tore down.
+async fn wipe_index_dir(state: &Arc<DaemonState>, ws_id: &str) {
+    let dir = state.index_dir(ws_id);
+    match tokio::fs::remove_dir_all(&dir).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(
+            "wipe index dir {:?} for ws {}: {:#} \
+             (next init at this path may inherit stale metadata)",
+            dir, ws_id, e
+        ),
+    }
+}
+
 pub async fn recover_workspace(
     state: &Arc<DaemonState>,
     workspace: &str,
@@ -461,6 +516,11 @@ pub async fn recover_workspace(
     // Intentionally no cwd guard: recover is a terminal "tear out" operation
     // gated by CLI ConfirmationRequired. The CLI prompt is the contract.
 
+    // Block a concurrent init on the same path (ws_id is SHA256(path), so it
+    // would target the same workspaces slot and index_dir we're about to
+    // unregister + wipe). Held until save_manifest finishes.
+    let _wsid_guard = state.lock_wsid(&ws_id).await;
+
     // 3. call backend recover
     state
         .backend
@@ -468,9 +528,14 @@ pub async fn recover_workspace(
         .await?;
 
     // 4. unregister workspace from state
-    state.unregister_workspace(&ws_id, std::path::Path::new(&original_path));
+    state.unregister_workspace(&ws_id).await;
 
-    // 4a. Save manifest
+    // 4a. Wipe the entire per-ws index dir (policy.toml + index.json) so a
+    // future init at the same path doesn't inherit stale metadata
+    // (ws_id is SHA256(path), so it would collide).
+    wipe_index_dir(state, &ws_id).await;
+
+    // 4b. Save manifest
     if let Err(e) = state.save_manifest().await {
         warn!("save_manifest failed after recover: {:#}", e);
     }
@@ -887,34 +952,233 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_registered_workspace_returns_recover_ok_or_backend_error() {
+    async fn wipe_index_dir_removes_policy_and_is_idempotent() {
+        // Recover must clear per-ws metadata so a future init at the same path
+        // doesn't inherit a corrupted policy.toml (which would trigger fail-safe
+        // and lock out PATCH).
+        let state_tmp = tempfile::tempdir().unwrap();
         let state = Arc::new(DaemonState::new(
             test_config(),
             test_backend(),
-            test_state_dir(),
+            state_tmp.path().to_path_buf(),
         ));
-        let tmpdir = tempfile::tempdir().unwrap();
-        let path = tmpdir.path().to_path_buf();
-        let canon = tokio::fs::canonicalize(&path).await.unwrap();
+        let ws_id = "ws-wipe-me";
+        let dir = state.index_dir(ws_id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("policy.toml"), b"auto_cleanup = true\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("index.json"), b"{}")
+            .await
+            .unwrap();
+        assert!(dir.exists());
+
+        wipe_index_dir(&state, ws_id).await;
+        assert!(!dir.exists(), "wipe must remove the index dir");
+
+        // Second call on already-absent dir must not error or panic.
+        wipe_index_dir(&state, ws_id).await;
+        assert!(!dir.exists());
+    }
+
+    #[tokio::test]
+    async fn recover_orchestration_calls_backend_then_unregisters_and_wipes_index() {
+        // Happy-path orchestration: backend called, ws unregistered, index dir wiped.
+        let state_tmp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(RecorderStubBackend::new());
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            state_tmp.path().to_path_buf(),
+        ));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let canon = tokio::fs::canonicalize(ws_tmp.path()).await.unwrap();
+        let ws_id = "ws-recov-orch";
         state.register_workspace(
-            "ws-test".to_string(),
+            ws_id.to_string(),
             canon.clone(),
             SnapshotIndex::new(canon.clone()),
         );
-        // Backend will fail in test env (no btrfs), so we expect an error propagation
-        // but the workspace should have been resolved (not WorkspaceNotFound)
-        let resp = recover_workspace(&state, &canon.to_string_lossy()).await;
+        // Simulate prior PATCH: write a real policy.toml inside index_dir.
+        let dir = state.index_dir(ws_id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("policy.toml"), b"auto_cleanup = true\n")
+            .await
+            .unwrap();
+
+        let resp = recover_workspace(&state, &canon.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(matches!(resp, Response::RecoverOk { .. }));
+        assert_eq!(
+            backend.recover_call_count(),
+            1,
+            "backend.recover_workspace must run once"
+        );
+        assert!(
+            state.get_by_wsid(ws_id).is_none(),
+            "ws must be unregistered"
+        );
+        assert!(!dir.exists(), "recover must wipe stale per-ws index dir");
+    }
+
+    #[tokio::test]
+    async fn recover_blocks_on_lock_wsid_held_by_concurrent_lifecycle_op() {
+        // White-box proof that `recover_workspace` takes `state.lock_wsid(ws_id)`
+        // on the same key that init/adopt take — without it, a concurrent
+        // init on the same path could race recover's unregister+wipe.
+        // We hold the lock externally, spawn recover, and assert it has
+        // NOT reached the backend until we drop our guard.
+        use std::time::Duration;
+
+        let state_tmp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(RecorderStubBackend::new());
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            state_tmp.path().to_path_buf(),
+        ));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let canon = tokio::fs::canonicalize(ws_tmp.path()).await.unwrap();
+
+        // ws_id is what `init` would have computed: SHA256(canonicalize(path))[:6].
+        let mut hasher = Sha256::new();
+        hasher.update(canon.to_string_lossy().as_bytes());
+        let ws_id = format!("ws-{}", &format!("{:x}", hasher.finalize())[..6]);
+        state.register_workspace(
+            ws_id.clone(),
+            canon.clone(),
+            SnapshotIndex::new(canon.clone()),
+        );
+
+        // Outside the recover, hold the per-ws_id lifecycle lock — simulates
+        // a concurrent init / adopt that's mid-flight on the same ws_id.
+        let held_guard = state.lock_wsid(&ws_id).await;
+
+        let state_for_task = state.clone();
+        let canon_str = canon.to_string_lossy().to_string();
+        let handle = tokio::spawn(async move {
+            recover_workspace(&state_for_task, &canon_str)
+                .await
+                .unwrap()
+        });
+
+        // Give the task time to reach `lock_wsid` and park on it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            backend.recover_call_count(),
+            0,
+            "recover must NOT have reached backend while lock_wsid is held",
+        );
+
+        // Release the lock — recover must now proceed.
+        drop(held_guard);
+        let resp = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("recover did not progress after lock_wsid was released")
+            .unwrap();
+        assert!(matches!(resp, Response::RecoverOk { .. }));
+        assert_eq!(backend.recover_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn recover_unresolvable_path_returns_not_found_no_backend_call() {
+        // Unresolvable path short-circuits before reaching the backend.
+        let backend = Arc::new(RecorderStubBackend::new());
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let resp = recover_workspace(&state, "/nonexistent/path/xyz")
+            .await
+            .unwrap();
         match resp {
-            Ok(Response::RecoverOk { .. }) => {} // success path
-            Err(_) => {}                         // backend error is expected in test env
-            Ok(Response::Error { code, .. }) => {
-                assert_ne!(
-                    code,
-                    ErrorCode::WorkspaceNotFound,
-                    "should not be WsNotFound"
-                );
+            Response::Error { code, .. } => assert_eq!(code, ErrorCode::WorkspaceNotFound),
+            other => panic!("expected WorkspaceNotFound, got {:?}", other),
+        }
+        assert_eq!(backend.recover_call_count(), 0);
+    }
+
+    // ── Stub backend: records recover_workspace calls; other methods panic ──
+    struct RecorderStubBackend {
+        data_root_path: PathBuf,
+        snapshots_root_path: PathBuf,
+        recover_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RecorderStubBackend {
+        fn new() -> Self {
+            Self {
+                data_root_path: PathBuf::from("/tmp/stub-data"),
+                snapshots_root_path: PathBuf::from("/tmp/stub-snapshots"),
+                recover_calls: std::sync::atomic::AtomicUsize::new(0),
             }
-            _ => panic!("unexpected response variant"),
+        }
+        fn recover_call_count(&self) -> usize {
+            self.recover_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for RecorderStubBackend {
+        fn backend_type(&self) -> ws_ckpt_common::backend::BackendType {
+            ws_ckpt_common::backend::BackendType::BtrfsBase
+        }
+        fn data_root(&self) -> &std::path::Path {
+            &self.data_root_path
+        }
+        fn snapshots_root(&self) -> &std::path::Path {
+            &self.snapshots_root_path
+        }
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            self.recover_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn init_workspace(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
+            unimplemented!("stub: init_workspace not used")
+        }
+        async fn create_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
+            unimplemented!()
+        }
+        async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn diff(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
+            unimplemented!()
+        }
+        async fn cleanup_snapshots(&self, _: &str, _: &[String]) -> anyhow::Result<Vec<String>> {
+            unimplemented!()
+        }
+        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn gc_generations(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::backend::GcResult> {
+            unimplemented!()
+        }
+        async fn check_environment(
+            &self,
+        ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
+            unimplemented!()
+        }
+        async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            unimplemented!()
         }
     }
 }

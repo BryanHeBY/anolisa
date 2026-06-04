@@ -28,6 +28,7 @@ pub const DEFAULT_STATE_DIR: &str = "/var/lib/ws-ckpt"; // systemd StateDirector
 pub const STATE_FILE: &str = "state.json"; // daemon state file
 pub const INDEXES_DIR: &str = "indexes"; // snapshots indexes directory
 pub const LOCKFILE_NAME: &str = "daemon.lock"; // daemon write lockfile
+pub const POLICY_FILE: &str = "policy.toml";
 
 /// Snapshot advisory threshold; strict-greater filter shared by daemon and CLI.
 pub const ADVISORY_SNAPSHOT_LIMIT: u32 = 1000;
@@ -91,12 +92,61 @@ pub enum Request {
     Config,
     /// Reload configuration from file
     ReloadConfig,
+    /// Reload only global config from file; skip the per-ws policy walk so a
+    /// `config -g` view doesn't pay for a 500-ws policy.toml rescan.
+    ReloadGlobalConfig,
+    /// Reload a single workspace's `policy.toml`. Used by `config -w <ws>`
+    /// view alignment so we don't rescan all 500 ws's just to view one.
+    ReloadWorkspacePolicy {
+        workspace: String,
+    },
+    /// `ws-ckpt config` (no scope): global cfg snapshot + ws override counts.
+    ConfigOverview,
     /// Recover workspace to a normal directory (undo init)
     Recover {
         workspace: String,
     },
     /// Aggregated health metrics for post-command CLI advisories.
     HealthAdvisory,
+    /// Read the per-workspace policy (absent ⇒ inherit-global).
+    GetWorkspacePolicy {
+        workspace: String,
+    },
+    /// Delete the per-workspace `policy.toml`, restoring inherit-global.
+    /// The *only* whole-file operation; partial edits go through
+    /// [`Request::PatchWorkspacePolicy`].
+    ResetWorkspacePolicy {
+        workspace: String,
+    },
+    /// Atomic field-level patch; daemon does read-modify-write under the
+    /// per-ws write lock to avoid lost updates.
+    PatchWorkspacePolicy {
+        workspace: String,
+        auto_cleanup: PolicyFieldOp<bool>,
+        auto_cleanup_keep: PolicyFieldOp<CleanupRetention>,
+    },
+}
+
+/// Field-level patch op: `Unchanged` (default) / `Set(v)`.
+///
+/// No `Clear` variant — removing a per-ws override is whole-file, exposed
+/// via [`Request::ResetWorkspacePolicy`]. Adding `Clear` later is a
+/// non-breaking enum extension if a per-field clear UI ever lands.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub enum PolicyFieldOp<T> {
+    #[default]
+    Unchanged,
+    Set(T),
+}
+
+impl<T> PolicyFieldOp<T> {
+    /// Apply this op to a field's existing value. Returns the new value.
+    pub fn apply(self, current: Option<T>) -> Option<T> {
+        match self {
+            Self::Unchanged => current,
+            Self::Set(v) => Some(v),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -133,7 +183,12 @@ pub enum Response {
     ConfigOk {
         config: ConfigReport,
     },
-    ReloadConfigOk,
+    /// Reply to any of the three reload IPCs. Includes the post-reload
+    /// global config snapshot so callers that just wrote settings can
+    /// confirm the landed state without a follow-up `Config` round-trip.
+    ReloadConfigOk {
+        config: ConfigReport,
+    },
     CheckpointSkipped {
         reason: String,
     },
@@ -146,6 +201,20 @@ pub enum Response {
         /// Backend usage bytes; `fs_total_bytes == 0` sentinel means unavailable.
         fs_total_bytes: u64,
         fs_used_bytes: u64,
+    },
+    /// Reply to policy get/set/patch: effective (applied) + local (on-disk
+    /// override) + global (daemon defaults snapshot).
+    WorkspacePolicyOk {
+        ws_id: String,
+        effective: EffectivePolicy,
+        local: WorkspacePolicy,
+        global: GlobalPolicySnapshot,
+    },
+    /// Reply to `ConfigOverview`: full global cfg + ws roll-up.
+    ConfigOverviewOk {
+        config: ConfigReport,
+        ws_total: usize,
+        ws_with_override: usize,
     },
 }
 
@@ -669,6 +738,307 @@ pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, WsCkptError> {
 /// and then reading exactly N bytes before calling this function)
 pub fn decode_payload<T: DeserializeOwned>(data: &[u8]) -> Result<T, WsCkptError> {
     Ok(bincode::deserialize(data)?)
+}
+
+// ── Per-workspace policy ──
+
+/// On-disk per-workspace policy override (`indexes/<ws_id>/policy.toml`).
+/// `Some(_)` overrides the global field; `None`/missing file ⇒ inherit global.
+/// Daemon-wide fields (intervals, health, image sizing) are excluded and
+/// rejected at the CLI/IPC boundary.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkspacePolicy {
+    pub auto_cleanup: Option<bool>,
+    pub auto_cleanup_keep: Option<CleanupRetention>,
+}
+
+impl WorkspacePolicy {
+    /// True when no field is set — the workspace inherits everything from global.
+    pub fn is_empty(&self) -> bool {
+        self.auto_cleanup.is_none() && self.auto_cleanup_keep.is_none()
+    }
+
+    /// Overlay this local policy on global config, per-field `local.or(global)`.
+    pub fn effective_for(&self, global: &DaemonConfig) -> EffectivePolicy {
+        EffectivePolicy {
+            auto_cleanup: self.auto_cleanup.unwrap_or(global.auto_cleanup),
+            auto_cleanup_keep: self
+                .auto_cleanup_keep
+                .clone()
+                .unwrap_or_else(|| global.auto_cleanup_keep.clone()),
+        }
+    }
+}
+
+/// Merged (local+global) auto-cleanup behavior applied to one workspace.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EffectivePolicy {
+    pub auto_cleanup: bool,
+    pub auto_cleanup_keep: CleanupRetention,
+}
+
+impl EffectivePolicy {
+    /// Whether scheduler should skip this workspace this tick.
+    pub fn is_disabled(&self) -> bool {
+        !self.auto_cleanup || self.auto_cleanup_keep.is_disabled()
+    }
+}
+
+/// Snapshot of global policy fields at query time, for the CLI 3-column view.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GlobalPolicySnapshot {
+    pub auto_cleanup: bool,
+    pub auto_cleanup_keep: CleanupRetention,
+}
+
+impl GlobalPolicySnapshot {
+    pub fn from_config(cfg: &DaemonConfig) -> Self {
+        Self {
+            auto_cleanup: cfg.auto_cleanup,
+            auto_cleanup_keep: cfg.auto_cleanup_keep.clone(),
+        }
+    }
+}
+
+// ── CLI `--format json` output shapes ──────────────────────────────────
+//
+// Stable, versioned JSON schemas for consumers (openclaw, hermes, CI).
+// Kept in `common` (next to their source types, like `SnapshotEntry`) so
+// the cli crate needs no own serde dep and Rust callers can reuse them.
+//
+// `is_disabled` is pre-computed on the wire so consumers don't re-derive
+// daemon semantics — the only way `Count(0)` / `Count(N)` stay
+// distinguishable to a plugin (the original openclaw bug).
+//
+// `RetentionJson` is a tagged enum (`{mode: "count"|"age", ...}`) rather
+// than `CleanupRetention`'s bare-number/string serde, decoupling the
+// plugin contract and sparing consumers a `typeof` check.
+
+/// JSON shape for `ws-ckpt config -w ... --format json` and the
+/// Patch/Reset responses under `--format json`. Versioned via `schema`.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct WorkspacePolicyJson {
+    pub schema: &'static str,
+    pub ws_id: String,
+    pub effective: EffectivePolicyJson,
+    pub local: LocalPolicyJson,
+    pub global: GlobalPolicyValuesJson,
+}
+
+/// Versioned schema tag for [`WorkspacePolicyJson`]. Bump on any breaking
+/// change so consumers can refuse unknown majors instead of silently
+/// misreading.
+pub const WORKSPACE_POLICY_JSON_SCHEMA: &str = "ws-ckpt-policy/v1";
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct EffectivePolicyJson {
+    pub auto_cleanup: bool,
+    pub auto_cleanup_keep: RetentionJson,
+    /// Pre-computed `!auto_cleanup || keep.is_disabled()`. Plugins MUST
+    /// read this instead of re-deriving it consumer-side.
+    pub is_disabled: bool,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct LocalPolicyJson {
+    pub auto_cleanup: Option<bool>,
+    pub auto_cleanup_keep: Option<RetentionJson>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct GlobalPolicyValuesJson {
+    pub auto_cleanup: bool,
+    pub auto_cleanup_keep: RetentionJson,
+}
+
+/// Tagged retention so consumers can match on a literal `mode` field
+/// instead of discriminating number-vs-string. Mirrors
+/// `CleanupRetention`'s two semantic modes 1:1.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+pub enum RetentionJson {
+    Count { count: u32 },
+    Age { raw: String, secs: u64 },
+}
+
+impl From<&CleanupRetention> for RetentionJson {
+    fn from(r: &CleanupRetention) -> Self {
+        match r {
+            CleanupRetention::Count(n) => Self::Count { count: *n },
+            CleanupRetention::Age { raw, secs } => Self::Age {
+                raw: raw.clone(),
+                secs: *secs,
+            },
+        }
+    }
+}
+
+impl WorkspacePolicyJson {
+    /// Convenience: build the JSON view from the three values returned in
+    /// `Response::WorkspacePolicyOk`, pre-computing `is_disabled` for the
+    /// effective layer so consumers don't have to.
+    pub fn from_views(
+        ws_id: String,
+        effective: &EffectivePolicy,
+        local: &WorkspacePolicy,
+        global: &GlobalPolicySnapshot,
+    ) -> Self {
+        Self {
+            schema: WORKSPACE_POLICY_JSON_SCHEMA,
+            ws_id,
+            effective: EffectivePolicyJson {
+                auto_cleanup: effective.auto_cleanup,
+                auto_cleanup_keep: (&effective.auto_cleanup_keep).into(),
+                is_disabled: effective.is_disabled(),
+            },
+            local: LocalPolicyJson {
+                auto_cleanup: local.auto_cleanup,
+                auto_cleanup_keep: local.auto_cleanup_keep.as_ref().map(Into::into),
+            },
+            global: GlobalPolicyValuesJson {
+                auto_cleanup: global.auto_cleanup,
+                auto_cleanup_keep: (&global.auto_cleanup_keep).into(),
+            },
+        }
+    }
+}
+
+/// JSON shape for `ws-ckpt config -g --format json`.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct GlobalConfigJson {
+    pub schema: &'static str,
+    pub config_file: String,
+    pub mount_path: String,
+    pub socket_path: String,
+    pub auto_cleanup: bool,
+    pub auto_cleanup_keep: RetentionJson,
+    /// Pre-computed: `!auto_cleanup || auto_cleanup_keep.is_disabled()`.
+    /// Same rationale as the per-ws effective view.
+    pub auto_cleanup_is_disabled: bool,
+    pub auto_cleanup_interval_secs: u64,
+    pub health_check_interval_secs: u64,
+    pub img_size_gb: u64,
+    pub img_max_percent: f64,
+}
+
+/// Versioned schema tag for [`GlobalConfigJson`].
+pub const GLOBAL_CONFIG_JSON_SCHEMA: &str = "ws-ckpt-config/v1";
+
+/// Versioned schema tag for the `ws-ckpt config` (no-scope) overview JSON
+/// emitted by the CLI: global config snapshot + workspace override counts.
+/// Same naming convention as the policy/config tags (all `-` separated, /vN).
+pub const OVERVIEW_JSON_SCHEMA: &str = "ws-ckpt-overview/v1";
+
+/// Result of [`load_workspace_policy`]: distinguishes "no file" from "I/O
+/// error" so a reload racing a half-done writer won't nuke the in-memory policy.
+#[derive(Debug)]
+pub enum LoadPolicyOutcome {
+    /// No `policy.toml` — treat as inherit-global.
+    Missing,
+    /// Loaded successfully (may be `WorkspacePolicy::default()` if empty).
+    Loaded(WorkspacePolicy),
+}
+
+/// Load `<index_dir>/policy.toml`: `Missing` if absent, `Loaded(p)` on
+/// success, `Err` otherwise (parse/IO). See [`load_workspace_policy_or_default`]
+/// to collapse `Missing`.
+pub fn load_workspace_policy(index_dir: &Path) -> Result<LoadPolicyOutcome, WsCkptError> {
+    let path = index_dir.join(POLICY_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let p: WorkspacePolicy = toml::from_str(&content)
+                .map_err(|e| WsCkptError::Config(format!("parse {}: {}", path.display(), e)))?;
+            Ok(LoadPolicyOutcome::Loaded(p))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LoadPolicyOutcome::Missing),
+        Err(e) => Err(WsCkptError::Io(e)),
+    }
+}
+
+/// Like [`load_workspace_policy`] but collapses `Missing` → default. Use only
+/// when there's no in-memory state to preserve on transient errors (e.g. startup).
+pub fn load_workspace_policy_or_default(index_dir: &Path) -> Result<WorkspacePolicy, WsCkptError> {
+    match load_workspace_policy(index_dir)? {
+        LoadPolicyOutcome::Missing => Ok(WorkspacePolicy::default()),
+        LoadPolicyOutcome::Loaded(p) => Ok(p),
+    }
+}
+
+/// Register-time policy loader with `auto_cleanup = false` fail-safe.
+///
+/// Used by every workspace register path (init / adopt_existing_subvol /
+/// rebuild_from_persisted / rebuild_workspace_into_state). Three outcomes:
+/// - `Missing` → `(default(), false)`; user never set a policy, inherit-global is correct
+/// - `Loaded(p)` → `(p, false)`; on-disk truth
+/// - `Err(e)` → `({auto_cleanup: Some(false), ..}, true)`; refuse to inherit-global
+///   because the next scheduler tick under a globally-enabled cfg would delete
+///   protected snapshots. The `true` marker propagates to `policy_failsafe`,
+///   which PATCH refuses until reload/reset.
+///
+/// `entry_label` ("init" / "adopt" / "rebuild") is the only differing piece
+/// across the 4 sites; it goes into the warn! message to keep the per-site
+/// diagnostic.
+pub fn load_workspace_policy_with_failsafe(
+    index_dir: &Path,
+    ws_id: &str,
+    entry_label: &str,
+) -> (WorkspacePolicy, bool) {
+    match load_workspace_policy(index_dir) {
+        Ok(LoadPolicyOutcome::Missing) => (WorkspacePolicy::default(), false),
+        Ok(LoadPolicyOutcome::Loaded(p)) => (p, false),
+        Err(e) => {
+            tracing::warn!(
+                "{} of {}: policy.toml at {:?} unreadable: {} — registering with in-memory \
+                 `auto_cleanup = false` until next reload succeeds. Inherit-global would risk \
+                 deleting protected snapshots, so we explicitly disable cleanup for this ws \
+                 as a fail-safe.",
+                entry_label,
+                ws_id,
+                index_dir,
+                e
+            );
+            (
+                WorkspacePolicy {
+                    auto_cleanup: Some(false),
+                    auto_cleanup_keep: None,
+                },
+                true,
+            )
+        }
+    }
+}
+
+/// Atomically persist a per-workspace policy via [`persist::atomic_write`]
+/// (0600, root-only daemon-internal data).
+pub fn save_workspace_policy(
+    index_dir: &Path,
+    policy: &WorkspacePolicy,
+) -> Result<(), WsCkptError> {
+    let content = toml::to_string_pretty(policy)
+        .map_err(|e| WsCkptError::Config(format!("serialize policy: {}", e)))?;
+    persist::atomic_write(index_dir, POLICY_FILE, content.as_bytes(), Some(0o600))
+        .map_err(|e| WsCkptError::Config(format!("save_workspace_policy: {:#}", e)))
+}
+
+/// Remove `<index_dir>/policy.toml` (missing-file is OK; `--reset` is
+/// idempotent), then fsync the parent dir. A post-unlink fsync failure is
+/// logged, not propagated — the file is already gone.
+pub fn delete_workspace_policy(index_dir: &Path) -> Result<(), WsCkptError> {
+    let target = index_dir.join(POLICY_FILE);
+    match std::fs::remove_file(&target) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(WsCkptError::Io(e)),
+    }
+    if let Err(e) = persist::fsync_dir(index_dir) {
+        tracing::warn!(
+            "delete_workspace_policy: unlink of {:?} succeeded but parent dir fsync failed: {:#} \
+             (file is gone; durability across a crash is best-effort on this fs)",
+            target,
+            e
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1457,9 +1827,27 @@ mod tests {
 
     #[test]
     fn response_reload_config_ok_round_trip() {
-        let resp = Response::ReloadConfigOk;
-        let decoded = round_trip_response(&resp);
-        assert!(matches!(decoded, Response::ReloadConfigOk));
+        let resp = Response::ReloadConfigOk {
+            config: ConfigReport {
+                mount_path: "/mnt/btrfs-workspace".to_string(),
+                socket_path: "/run/ws-ckpt/ws-ckpt.sock".to_string(),
+                log_level: "info".to_string(),
+                auto_cleanup: true,
+                auto_cleanup_keep: CleanupRetention::Count(5),
+                auto_cleanup_interval_secs: 3_600,
+                health_check_interval_secs: 60,
+                img_size: 30,
+                img_max_percent: 40.0,
+            },
+        };
+        match round_trip_response(&resp) {
+            Response::ReloadConfigOk { config } => {
+                assert!(config.auto_cleanup);
+                assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(5));
+                assert_eq!(config.auto_cleanup_interval_secs, 3_600);
+            }
+            _ => panic!("expected ReloadConfigOk variant"),
+        }
     }
 
     // ── FileConfig tests ──
@@ -1702,6 +2090,283 @@ mod tests {
                 assert_eq!(fs_used_bytes, 94 * 1024 * 1024 * 1024);
             }
             _ => panic!("expected HealthAdvisoryOk variant"),
+        }
+    }
+
+    // ── WorkspacePolicy tests ──
+
+    fn global_count(n: u32) -> DaemonConfig {
+        DaemonConfig {
+            auto_cleanup: true,
+            auto_cleanup_keep: CleanupRetention::Count(n),
+            ..DaemonConfig::default()
+        }
+    }
+
+    #[test]
+    fn workspace_policy_empty_toml_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        save_workspace_policy(dir.path(), &WorkspacePolicy::default()).unwrap();
+        match load_workspace_policy(dir.path()).unwrap() {
+            LoadPolicyOutcome::Loaded(p) => {
+                assert!(p.is_empty());
+                assert_eq!(p, WorkspacePolicy::default());
+            }
+            LoadPolicyOutcome::Missing => panic!("file was just written, must be Loaded"),
+        }
+    }
+
+    #[test]
+    fn workspace_policy_partial_toml_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: None,
+        };
+        save_workspace_policy(dir.path(), &p).unwrap();
+        let loaded = load_workspace_policy_or_default(dir.path()).unwrap();
+        assert_eq!(loaded, p);
+        assert!(!loaded.is_empty());
+    }
+
+    #[test]
+    fn workspace_policy_age_mode_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: Some(CleanupRetention::age("30d").unwrap()),
+        };
+        save_workspace_policy(dir.path(), &p).unwrap();
+        let loaded = load_workspace_policy_or_default(dir.path()).unwrap();
+        assert_eq!(loaded, p);
+    }
+
+    #[test]
+    fn workspace_policy_count_mode_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = WorkspacePolicy {
+            auto_cleanup: Some(false),
+            auto_cleanup_keep: Some(CleanupRetention::Count(5)),
+        };
+        save_workspace_policy(dir.path(), &p).unwrap();
+        let loaded = load_workspace_policy_or_default(dir.path()).unwrap();
+        assert_eq!(loaded, p);
+    }
+
+    #[test]
+    fn load_workspace_policy_missing_file_returns_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        match load_workspace_policy(dir.path()).unwrap() {
+            LoadPolicyOutcome::Missing => {} // expected — fresh dir, no file
+            LoadPolicyOutcome::Loaded(_) => panic!("empty dir must report Missing"),
+        }
+        // Convenience wrapper collapses Missing → default for fresh-startup
+        // call sites that have no in-memory state to preserve.
+        assert!(load_workspace_policy_or_default(dir.path())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn delete_workspace_policy_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        // No file yet — delete must succeed silently.
+        delete_workspace_policy(dir.path()).unwrap();
+        // Write, then delete.
+        save_workspace_policy(
+            dir.path(),
+            &WorkspacePolicy {
+                auto_cleanup: Some(true),
+                auto_cleanup_keep: None,
+            },
+        )
+        .unwrap();
+        delete_workspace_policy(dir.path()).unwrap();
+        // After delete the load must report Missing (not "Loaded(empty)") —
+        // that distinction is what lets reload preserve in-memory state on
+        // a transient EBUSY.
+        assert!(matches!(
+            load_workspace_policy(dir.path()).unwrap(),
+            LoadPolicyOutcome::Missing
+        ));
+    }
+
+    #[test]
+    fn effective_for_local_some_overrides_global() {
+        let global = global_count(20);
+        let local = WorkspacePolicy {
+            auto_cleanup: Some(false),
+            auto_cleanup_keep: Some(CleanupRetention::Count(5)),
+        };
+        let eff = local.effective_for(&global);
+        assert!(!eff.auto_cleanup);
+        assert_eq!(eff.auto_cleanup_keep, CleanupRetention::Count(5));
+    }
+
+    #[test]
+    fn effective_for_local_none_inherits_global() {
+        let global = global_count(20);
+        let local = WorkspacePolicy::default();
+        let eff = local.effective_for(&global);
+        assert_eq!(eff.auto_cleanup, global.auto_cleanup);
+        assert_eq!(eff.auto_cleanup_keep, global.auto_cleanup_keep);
+    }
+
+    #[test]
+    fn effective_for_local_partial_only_overrides_set_fields() {
+        let global = global_count(20);
+        let local = WorkspacePolicy {
+            auto_cleanup: None,
+            auto_cleanup_keep: Some(CleanupRetention::Count(7)),
+        };
+        let eff = local.effective_for(&global);
+        // auto_cleanup is None ⇒ inherit
+        assert_eq!(eff.auto_cleanup, global.auto_cleanup);
+        // auto_cleanup_keep is Some ⇒ override
+        assert_eq!(eff.auto_cleanup_keep, CleanupRetention::Count(7));
+    }
+
+    #[test]
+    fn effective_policy_is_disabled_propagates() {
+        let global = global_count(20);
+        // Local sets auto_cleanup=false ⇒ disabled regardless of keep.
+        let local = WorkspacePolicy {
+            auto_cleanup: Some(false),
+            auto_cleanup_keep: Some(CleanupRetention::Count(10)),
+        };
+        assert!(local.effective_for(&global).is_disabled());
+        // Local sets keep=Count(0) ⇒ disabled even if auto_cleanup=true.
+        let local = WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: Some(CleanupRetention::Count(0)),
+        };
+        assert!(local.effective_for(&global).is_disabled());
+        // Local enables on top of disabled global.
+        let mut g_off = global.clone();
+        g_off.auto_cleanup = false;
+        let local = WorkspacePolicy {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: None,
+        };
+        assert!(!local.effective_for(&g_off).is_disabled());
+    }
+
+    #[test]
+    fn workspace_policy_reset_request_round_trip() {
+        let req = Request::ResetWorkspacePolicy {
+            workspace: "/ws".to_string(),
+        };
+        match round_trip_request(&req) {
+            Request::ResetWorkspacePolicy { workspace } => assert_eq!(workspace, "/ws"),
+            _ => panic!("expected ResetWorkspacePolicy"),
+        }
+    }
+
+    #[test]
+    fn workspace_policy_get_request_round_trip() {
+        let req = Request::GetWorkspacePolicy {
+            workspace: "/ws".to_string(),
+        };
+        match round_trip_request(&req) {
+            Request::GetWorkspacePolicy { workspace } => assert_eq!(workspace, "/ws"),
+            _ => panic!("expected GetWorkspacePolicy"),
+        }
+    }
+
+    #[test]
+    fn policy_field_op_apply_semantics() {
+        assert_eq!(
+            PolicyFieldOp::<bool>::Unchanged.apply(Some(true)),
+            Some(true)
+        );
+        assert_eq!(PolicyFieldOp::<bool>::Unchanged.apply(None), None);
+        assert_eq!(
+            PolicyFieldOp::<bool>::Set(false).apply(Some(true)),
+            Some(false)
+        );
+        assert_eq!(PolicyFieldOp::<bool>::Set(true).apply(None), Some(true));
+    }
+
+    #[test]
+    fn workspace_policy_patch_request_round_trip() {
+        let req = Request::PatchWorkspacePolicy {
+            workspace: "/ws".to_string(),
+            auto_cleanup: PolicyFieldOp::Set(true),
+            auto_cleanup_keep: PolicyFieldOp::Set(CleanupRetention::age("7d").unwrap()),
+        };
+        let decoded = round_trip_request(&req);
+        match decoded {
+            Request::PatchWorkspacePolicy {
+                workspace,
+                auto_cleanup,
+                auto_cleanup_keep,
+            } => {
+                assert_eq!(workspace, "/ws");
+                assert_eq!(auto_cleanup, PolicyFieldOp::Set(true));
+                assert!(matches!(
+                    auto_cleanup_keep,
+                    PolicyFieldOp::Set(CleanupRetention::Age { .. })
+                ));
+            }
+            _ => panic!("expected PatchWorkspacePolicy"),
+        }
+    }
+
+    #[test]
+    fn workspace_policy_patch_request_mixed_round_trip() {
+        // One field Set, one Unchanged — covers both variants on the wire.
+        let req = Request::PatchWorkspacePolicy {
+            workspace: "/ws".to_string(),
+            auto_cleanup: PolicyFieldOp::Unchanged,
+            auto_cleanup_keep: PolicyFieldOp::Set(CleanupRetention::Count(3)),
+        };
+        match round_trip_request(&req) {
+            Request::PatchWorkspacePolicy {
+                auto_cleanup,
+                auto_cleanup_keep,
+                ..
+            } => {
+                assert_eq!(auto_cleanup, PolicyFieldOp::<bool>::Unchanged);
+                assert_eq!(
+                    auto_cleanup_keep,
+                    PolicyFieldOp::Set(CleanupRetention::Count(3))
+                );
+            }
+            _ => panic!("expected PatchWorkspacePolicy"),
+        }
+    }
+
+    #[test]
+    fn workspace_policy_response_round_trip() {
+        let resp = Response::WorkspacePolicyOk {
+            ws_id: "ws-abc".to_string(),
+            effective: EffectivePolicy {
+                auto_cleanup: true,
+                auto_cleanup_keep: CleanupRetention::Count(5),
+            },
+            local: WorkspacePolicy {
+                auto_cleanup: None,
+                auto_cleanup_keep: Some(CleanupRetention::Count(5)),
+            },
+            global: GlobalPolicySnapshot {
+                auto_cleanup: true,
+                auto_cleanup_keep: CleanupRetention::Count(20),
+            },
+        };
+        match round_trip_response(&resp) {
+            Response::WorkspacePolicyOk {
+                ws_id,
+                effective,
+                local,
+                global,
+            } => {
+                assert_eq!(ws_id, "ws-abc");
+                assert!(effective.auto_cleanup);
+                assert_eq!(effective.auto_cleanup_keep, CleanupRetention::Count(5));
+                assert_eq!(local.auto_cleanup_keep, Some(CleanupRetention::Count(5)));
+                assert_eq!(global.auto_cleanup_keep, CleanupRetention::Count(20));
+            }
+            _ => panic!("expected WorkspacePolicyOk"),
         }
     }
 
