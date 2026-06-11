@@ -3,6 +3,7 @@ name: ws-ckpt
 description: >
   工作区快照管理。用户说"保存一下"、"存个快照"时创建 checkpoint，仅限 Linux;
   说"回滚"、"撤销"、"恢复到之前"时 rollback;说"删掉快照"时 delete;
+  说"对比快照"、"快照改了什么"时 diff;
   说"看看快照"、"有哪些快照"时 list;说"查看快照状态"、"查看快照剩余空间"时 status。
 ---
 # ws-ckpt 工作区快照管理
@@ -30,6 +31,7 @@ cwd 占用的拦截由 daemon 层统一处理,skill 不再做前置守卫。
 |--------|----------|------|
 | "保存一下"、"存个快照"、"checkpoint"、"备份当前状态" | `checkpoint` | 创建快照 |
 | "回滚"、"撤销"、"恢复到之前"、"rollback"、"改坏了" | `rollback` | 回滚到指定快照 |
+| "对比快照"、"快照差异"、"diff"、"改了什么" | `diff` | 查看两个快照间的文件变更 |
 | "删掉快照"、"清理快照"、"delete snapshot" | `delete` | 删除指定快照 |
 | "看看快照"、"有哪些快照"、"list"、"列一下" | `list` | 列出快照 |
 | "状态"、"空间"、"status"、"工作区怎么样" | `status` | 查看工作区状态 |
@@ -56,12 +58,29 @@ ws-ckpt checkpoint -w <path-to-workspace> -i before-refactor -m "重构前备份
 ws-ckpt rollback -w <workspace> -s <snapshot>
 ```
 
-- `-w`:工作区路径(快照 ID 全局唯一时可省略)
+- `-w`:工作区路径(必填)
 - `-s`:目标快照 ID(必填)
 
 ```bash
-ws-ckpt rollback -s before-refactor
-ws-ckpt rollback -w <path-to-workspacee -s before-refactor
+ws-ckpt rollback -w <path-to-workspace> -s before-refactor
+```
+
+### diff — 查看快照间差异
+
+```bash
+ws-ckpt diff -w <workspace> -f <from-snapshot> [-t <to-snapshot>]
+```
+
+- `-w`:工作区路径(必填)
+- `-f`:源快照 ID(必填)
+- `-t`:目标快照 ID(可选，省略时与当前工作区状态比较)
+
+```bash
+# 两个快照之间的差异
+ws-ckpt diff -w <path-to-workspace> -f before-refactor -t after-refactor
+
+# 快照与当前工作区的差异
+ws-ckpt diff -w <path-to-workspace> -f before-refactor
 ```
 
 ### delete — 删除快照
@@ -88,7 +107,7 @@ ws-ckpt list [-w <workspace>] [--format table|json]
 
 ```bash
 ws-ckpt list
-ws-ckpt list -w <path-to-workspace
+ws-ckpt list -w <path-to-workspace>
 ws-ckpt list --format json
 ```
 
@@ -102,7 +121,7 @@ ws-ckpt status [-w <workspace>]
 
 ```bash
 ws-ckpt status
-ws-ckpt status -w <path-to-workspace
+ws-ckpt status -w <path-to-workspace>
 ```
 
 ### config — 查看或修改自动清理策略
