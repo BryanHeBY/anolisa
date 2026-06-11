@@ -18,11 +18,15 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
 )
+from agent_sec_cli.skill_ledger.core.manifest_integrity import (
+    MISSING_SIGNATURE_ERROR,
+    manifest_hash_error,
+    verify_manifest_signature,
+)
 from agent_sec_cli.skill_ledger.core.version_chain import (
     latest_json_path,
     load_latest_manifest,
 )
-from agent_sec_cli.skill_ledger.errors import SignatureInvalidError
 from agent_sec_cli.skill_ledger.models.manifest import (
     SignedManifest,
 )
@@ -113,31 +117,25 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
 
     # Step 5: fileHashes match → verify signature
     # 5a: Recompute manifestHash
-    expected_hash = manifest.compute_manifest_hash()
-    if manifest.manifestHash != expected_hash:
+    hash_error = manifest_hash_error(manifest)
+    if hash_error is not None:
         return {
             **meta,
             "status": "tampered",
-            "reason": "manifestHash does not match manifest content",
+            "reason": hash_error,
         }
 
     # 5b: Verify digital signature
-    if manifest.signature is None:
+    signature_valid, signature_error = verify_manifest_signature(manifest, backend)
+    if not signature_valid and signature_error == MISSING_SIGNATURE_ERROR:
         # Legacy manifest without signature — treat as "none" (backward compat)
         return {
             **meta,
             "status": "none",
             "reason": "manifest has no signature (legacy)",
         }
-
-    try:
-        backend.verify(
-            manifest.manifestHash.encode("utf-8"),
-            manifest.signature.value,
-            manifest.signature.keyFingerprint,
-        )
-    except SignatureInvalidError as exc:
-        return {**meta, "status": "tampered", "reason": str(exc)}
+    if not signature_valid:
+        return {**meta, "status": "tampered", "reason": signature_error}
 
     # Step 6: Signature valid → dispatch on scanStatus
     scan_status = manifest.scanStatus

@@ -31,6 +31,8 @@ import pytest
 from agent_sec_cli.cli import app as cli_app
 from agent_sec_cli.skill_ledger.core import resolver as resolver_core
 from agent_sec_cli.skill_ledger.core.resolver import resolve_activation
+from agent_sec_cli.skill_ledger.errors import KeyNotFoundError
+from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from agent_sec_cli.skill_ledger.signing.ed25519 import NativeEd25519Backend
 from typer.testing import CliRunner
 
@@ -145,16 +147,43 @@ def decode_xattr_activation(value: bytes) -> dict:
 
 def resolve_skill_activation(skill_dir: Path, env_extra: dict) -> dict:
     """Resolve activation using the same isolated env as CLI integration tests."""
+    return resolve_skill_activation_with_backend(
+        skill_dir,
+        env_extra,
+        NativeEd25519Backend(),
+    )
+
+
+def resolve_skill_activation_with_backend(
+    skill_dir: Path,
+    env_extra: dict,
+    backend: SigningBackend,
+) -> dict:
+    """Resolve activation with a caller-provided signing backend."""
     previous = {key: os.environ.get(key) for key in env_extra}
     os.environ.update(env_extra)
     try:
-        return resolve_activation(str(skill_dir), NativeEd25519Backend())
+        return resolve_activation(str(skill_dir), backend)
     finally:
         for key, value in previous.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+class _VerifyFalseBackend(NativeEd25519Backend):
+    """Backend test double whose verify method returns ``False``."""
+
+    def verify(self, data: bytes, signature_b64: str, fingerprint: str) -> bool:
+        return False
+
+
+class _KeyMissingBackend(NativeEd25519Backend):
+    """Backend test double whose verify method raises missing-key errors."""
+
+    def verify(self, data: bytes, signature_b64: str, fingerprint: str) -> bool:
+        raise KeyNotFoundError("/tmp/missing-test-key.pub")
 
 
 # ── Workspace ──────────────────────────────────────────────────────────────
@@ -1516,6 +1545,48 @@ def test_resolve_pass_targets_latest_snapshot(ws, monkeypatch):
         "target": ".skill-meta/versions/v000001.snapshot",
     }
     assert (skill / out["target"]).is_dir()
+
+
+def test_resolve_skips_pass_version_when_verify_returns_false(ws):
+    """activation fails closed when a backend returns False for signature verify."""
+    skill = make_skill(ws.skills_dir, "resolve-verify-false", {"tool.sh": "echo ok\n"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "resolve-verify-false.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+
+    out = resolve_skill_activation_with_backend(skill, env, _VerifyFalseBackend())
+
+    assert out["status"] == "tampered"
+    assert out["activeVersionId"] is None
+    assert out["target"] is None
+    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+
+
+def test_resolve_skips_pass_version_when_public_key_is_missing(ws):
+    """activation fails closed when signature verification cannot load a key."""
+    skill = make_skill(ws.skills_dir, "resolve-missing-key", {"tool.sh": "echo ok\n"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "resolve-missing-key.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+
+    out = resolve_skill_activation_with_backend(skill, env, _KeyMissingBackend())
+
+    assert out["status"] == "tampered"
+    assert out["activeVersionId"] is None
+    assert out["target"] is None
+    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
 
 
 def test_resolve_drifted_source_keeps_previous_pass_snapshot(ws):

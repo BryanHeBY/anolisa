@@ -16,6 +16,11 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
 )
+from agent_sec_cli.skill_ledger.core.manifest_integrity import (
+    manifest_hash_error,
+    verify_manifest_integrity,
+    verify_manifest_signature,
+)
 from agent_sec_cli.skill_ledger.core.version_chain import (
     create_snapshot,
     get_previous_signature,
@@ -27,7 +32,6 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
 )
 from agent_sec_cli.skill_ledger.errors import (
     FindingsFileError,
-    SignatureInvalidError,
 )
 from agent_sec_cli.skill_ledger.models.finding import NormalizedFinding
 from agent_sec_cli.skill_ledger.models.manifest import (
@@ -258,18 +262,12 @@ def _classify_manifest(
         return "missing"
     if not diff_file_hashes(manifest.fileHashes, current_hashes)["match"]:
         return "drifted"
-    expected_hash = manifest.compute_manifest_hash()
-    if manifest.manifestHash != expected_hash:
+    if manifest_hash_error(manifest) is not None:
         return "tampered"
     if manifest.signature is None:
         return "unsigned"
-    try:
-        backend.verify(
-            manifest.manifestHash.encode("utf-8"),
-            manifest.signature.value,
-            manifest.signature.keyFingerprint,
-        )
-    except SignatureInvalidError:
+    valid, _ = verify_manifest_signature(manifest, backend)
+    if not valid:
         return "tampered"
     return "trusted"
 
@@ -279,19 +277,8 @@ def _is_verifiable_manifest(
     backend: SigningBackend,
 ) -> bool:
     """Return True when a historical version hash and signature verify."""
-    if manifest.manifestHash != manifest.compute_manifest_hash():
-        return False
-    if manifest.signature is None:
-        return False
-    try:
-        backend.verify(
-            manifest.manifestHash.encode("utf-8"),
-            manifest.signature.value,
-            manifest.signature.keyFingerprint,
-        )
-    except SignatureInvalidError:
-        return False
-    return True
+    valid, _ = verify_manifest_integrity(manifest, backend)
+    return valid
 
 
 def _last_trusted_version_manifest(

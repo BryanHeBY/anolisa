@@ -14,13 +14,17 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_snapshot_file_hashes,
     diff_file_hashes,
 )
+from agent_sec_cli.skill_ledger.core.manifest_integrity import (
+    MISSING_SIGNATURE_ERROR,
+    manifest_hash_error,
+    verify_manifest_signature,
+)
 from agent_sec_cli.skill_ledger.core.version_chain import (
     list_version_ids,
     load_latest_manifest,
     load_version_manifest,
     snapshot_dir_path,
 )
-from agent_sec_cli.skill_ledger.errors import SignatureInvalidError
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 
@@ -61,27 +65,24 @@ def audit(
             continue
 
         # 3a: Verify manifestHash
-        expected_hash = manifest.compute_manifest_hash()
-        if manifest.manifestHash != expected_hash:
+        hash_error = manifest_hash_error(manifest)
+        if hash_error is not None:
             errors.append(
                 {
                     "versionId": vid,
-                    "error": "manifestHash does not match manifest content",
+                    "error": hash_error,
                 }
             )
 
         # 3b: Verify signature
-        if manifest.signature is not None:
-            try:
-                backend.verify(
-                    manifest.manifestHash.encode("utf-8"),
-                    manifest.signature.value,
-                    manifest.signature.keyFingerprint,
+        signature_valid, signature_error = verify_manifest_signature(manifest, backend)
+        if not signature_valid:
+            if signature_error == MISSING_SIGNATURE_ERROR:
+                errors.append({"versionId": vid, "error": "Missing signature"})
+            else:
+                errors.append(
+                    {"versionId": vid, "error": f"Signature invalid: {signature_error}"}
                 )
-            except SignatureInvalidError as exc:
-                errors.append({"versionId": vid, "error": f"Signature invalid: {exc}"})
-        else:
-            errors.append({"versionId": vid, "error": "Missing signature"})
 
         # 3c: Verify previousManifestSignature chain
         if prev_signature is not None:

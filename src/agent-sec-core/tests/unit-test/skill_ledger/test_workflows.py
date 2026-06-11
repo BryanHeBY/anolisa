@@ -27,7 +27,10 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
 )
-from agent_sec_cli.skill_ledger.errors import SignatureInvalidError
+from agent_sec_cli.skill_ledger.errors import (
+    KeyNotFoundError,
+    SignatureInvalidError,
+)
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
@@ -76,6 +79,36 @@ class InMemoryEd25519Backend(SigningBackend):
 
     def get_public_key_fingerprint(self) -> str:
         return self._fingerprint
+
+
+class VerifyFalseBackend(SigningBackend):
+    """Signing backend wrapper whose verify method returns ``False``."""
+
+    def __init__(self, delegate: SigningBackend):
+        self._delegate = delegate
+
+    @property
+    def name(self) -> str:
+        return self._delegate.name
+
+    def generate_keys(self, passphrase=None):
+        return self._delegate.generate_keys(passphrase)
+
+    def sign(self, data: bytes) -> tuple[str, str]:
+        return self._delegate.sign(data)
+
+    def verify(self, data: bytes, signature_b64: str, fingerprint: str) -> bool:
+        return False
+
+    def get_public_key_fingerprint(self) -> str:
+        return self._delegate.get_public_key_fingerprint()
+
+
+class KeyMissingVerifyBackend(VerifyFalseBackend):
+    """Signing backend wrapper that raises missing-key errors on verify."""
+
+    def verify(self, data: bytes, signature_b64: str, fingerprint: str) -> bool:
+        raise KeyNotFoundError("/tmp/missing-test-key.pub")
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +273,30 @@ class TestCheckStateMachine(SkillDirTestCase):
             json.dump(data, f)
         result = check(self.skill_dir, self.backend)
         self.assertEqual(result["status"], "tampered")
+
+    def test_tampered_when_verify_returns_false(self):
+        """A backend returning False from verify is treated as tampered."""
+        findings_path = self._write_findings(
+            [{"rule": "r1", "level": "pass", "message": "ok"}]
+        )
+        certify(self.skill_dir, self.backend, findings_path=findings_path)
+
+        result = check(self.skill_dir, VerifyFalseBackend(self.backend))
+
+        self.assertEqual(result["status"], "tampered")
+        self.assertEqual(result["reason"], "signature verification returned false")
+
+    def test_tampered_when_verification_key_is_missing(self):
+        """Missing public keys fail closed instead of crashing check."""
+        findings_path = self._write_findings(
+            [{"rule": "r1", "level": "pass", "message": "ok"}]
+        )
+        certify(self.skill_dir, self.backend, findings_path=findings_path)
+
+        result = check(self.skill_dir, KeyMissingVerifyBackend(self.backend))
+
+        self.assertEqual(result["status"], "tampered")
+        self.assertIn("Signing key not found", result["reason"])
 
     def test_deny_status_passthrough(self):
         """certify with deny findings → check returns deny."""
@@ -563,6 +620,21 @@ class TestAuditChainIntegrity(SkillDirTestCase):
         result = audit(self.skill_dir, self.backend)
         self.assertTrue(result["valid"])
         self.assertEqual(result["versions_checked"], 0)
+
+    def test_signature_verify_false_is_invalid(self):
+        """A backend returning False from verify is reported as invalid."""
+        findings_path = self._write_findings(
+            [{"rule": "r1", "level": "pass", "message": "ok"}]
+        )
+        certify(self.skill_dir, self.backend, findings_path=findings_path)
+
+        result = audit(self.skill_dir, VerifyFalseBackend(self.backend))
+
+        self.assertFalse(result["valid"])
+        error_msgs = [e["error"] for e in result["errors"]]
+        self.assertTrue(
+            any("signature verification returned false" in msg for msg in error_msgs)
+        )
 
 
 # ---------------------------------------------------------------------------

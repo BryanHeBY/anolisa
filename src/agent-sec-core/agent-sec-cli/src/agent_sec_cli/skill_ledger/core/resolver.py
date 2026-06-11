@@ -20,6 +20,9 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_snapshot_file_hashes,
     diff_file_hashes,
 )
+from agent_sec_cli.skill_ledger.core.manifest_integrity import (
+    verify_manifest_integrity,
+)
 from agent_sec_cli.skill_ledger.core.version_chain import (
     SKILL_META_DIR,
     VERSIONS_DIR,
@@ -28,7 +31,6 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
     load_version_manifest,
     snapshot_dir_path,
 )
-from agent_sec_cli.skill_ledger.errors import SignatureInvalidError
 from agent_sec_cli.skill_ledger.models.manifest import SignedManifest
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from agent_sec_cli.skill_ledger.utils import validate_skill_dir
@@ -168,19 +170,8 @@ def _is_signed_pass_manifest(
 ) -> bool:
     if manifest.scanStatus != "pass":
         return False
-    if manifest.manifestHash != manifest.compute_manifest_hash():
-        return False
-    if manifest.signature is None:
-        return False
-    try:
-        backend.verify(
-            manifest.manifestHash.encode("utf-8"),
-            manifest.signature.value,
-            manifest.signature.keyFingerprint,
-        )
-    except SignatureInvalidError:
-        return False
-    return True
+    valid, _ = verify_manifest_integrity(manifest, backend)
+    return valid
 
 
 def _snapshot_matches_manifest(
