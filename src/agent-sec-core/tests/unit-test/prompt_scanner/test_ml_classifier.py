@@ -283,41 +283,6 @@ class TestModelManagerCache(unittest.TestCase):
         result = mgr.load_model("cached-model")
         self.assertIs(result, fake_pair)
 
-    def test_load_model_does_not_redirect_process_stdio(self) -> None:
-        from agent_sec_cli.prompt_scanner.models.model_manager import (
-            ModelManager,
-        )
-
-        observed_stdio = {}
-        fake_transformers = _make_fake_transformers()
-
-        class CheckingTokenizer(fake_transformers.AutoTokenizer):  # type: ignore[name-defined]
-            @classmethod
-            def from_pretrained(cls, *args, **kwargs):  # noqa: ANN001
-                observed_stdio["stdout"] = sys.stdout
-                observed_stdio["stderr"] = sys.stderr
-                return cls()
-
-        fake_transformers.AutoTokenizer = CheckingTokenizer  # type: ignore[attr-defined]
-        fake_torch = _make_fake_torch()
-        original_stdout = sys.stdout
-        original_stderr = sys.stderr
-
-        with tempfile.TemporaryDirectory() as cache_dir:
-            model_dir = Path(cache_dir) / "test-model"
-            model_dir.mkdir()
-            (model_dir / "config.json").write_text("{}", encoding="utf-8")
-            mgr = ModelManager(cache_dir=cache_dir, device="cpu")
-
-            with patch.dict(
-                sys.modules,
-                {"torch": fake_torch, "transformers": fake_transformers},
-            ):
-                mgr.load_model("test-model")
-
-        self.assertIs(observed_stdio["stdout"], original_stdout)
-        self.assertIs(observed_stdio["stderr"], original_stderr)
-
 
 # ---------------------------------------------------------------------------
 # Tests: PromptGuardClassifier

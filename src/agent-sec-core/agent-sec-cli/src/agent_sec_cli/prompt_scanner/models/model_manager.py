@@ -9,6 +9,7 @@ ModelScope model IDs for Llama Prompt Guard 2:
     86M accurate   : ``LLM-Research/Llama-Prompt-Guard-2-86M``
 """
 
+import contextlib
 import logging
 import os
 import threading
@@ -192,9 +193,8 @@ class ModelManager:
         """Load a model+tokenizer from the local cache (no download).
 
         Raises ``ModelLoadError`` with a warmup hint if the model is not
-        present on disk.  Transformers logger output is reduced unless
-        ``AGENT_SEC_DEBUG=1`` is set.  stdout/stderr are not redirected
-        here because they are process-global in the daemon.
+        present on disk.  All transformers output is suppressed unless
+        ``AGENT_SEC_DEBUG=1`` is set.
         """
         import torch
         from transformers import (
@@ -213,8 +213,15 @@ class ModelManager:
         try:
             if os.environ.get("AGENT_SEC_DEBUG") != "1":
                 tf_logger.setLevel(logging.ERROR)
-            tokenizer = AutoTokenizer.from_pretrained(local_model_path)
-            model = AutoModelForSequenceClassification.from_pretrained(local_model_path)
+            # Suppress stdout/stderr to silence tqdm progress bars and any
+            # hardcoded print() calls from transformers internals.
+            with open(os.devnull, "w") as _devnull, contextlib.redirect_stdout(
+                _devnull
+            ), contextlib.redirect_stderr(_devnull):
+                tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    local_model_path
+                )
         except ModelLoadError:
             raise
         except Exception as exc:

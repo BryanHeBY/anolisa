@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_sec_cli.daemon.env import SOCKET_ENV
 from agent_sec_cli.daemon.errors import DaemonRuntimePathError
 from agent_sec_cli.daemon.jobs import JobManager
 
-SOCKET_ENV = "AGENT_SEC_DAEMON_SOCKET"
 RUNTIME_SUBDIR = "agent-sec-core"
 SOCKET_FILENAME = "daemon.sock"
 LOCK_FILENAME = "daemon.lock"

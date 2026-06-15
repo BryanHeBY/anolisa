@@ -1,4 +1,4 @@
-"""Daemon fixtures for prompt-scanner e2e tests."""
+"""Execution-path fixtures for prompt-scanner e2e tests."""
 
 import json
 import os
@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any, TextIO
 
 import pytest
+from agent_sec_cli.daemon.env import DAEMON_DISABLED_ENV, SOCKET_ENV
 
-SOCKET_ENV = "AGENT_SEC_DAEMON_SOCKET"
 DATA_DIR_ENV = "AGENT_SEC_DATA_DIR"
 PROMPT_PRELOAD_ENV = "AGENT_SEC_DAEMON_PROMPT_PRELOAD"
 READY_TIMEOUT_ENV = "AGENT_SEC_PROMPT_E2E_READY_TIMEOUT_SECONDS"
@@ -40,8 +40,14 @@ class DaemonProcess:
     stderr_file: TextIO
 
 
-@pytest.fixture(scope="module")
-def daemon_command() -> list[str]:
+@dataclass(frozen=True)
+class PromptScanExecutionContext:
+    execution_path: str
+    socket_path: Path
+    data_dir: Path
+
+
+def _resolve_daemon_command() -> list[str]:
     """Return the installed daemon binary or a source-tree module fallback."""
     daemon_bin = shutil.which("agent-sec-daemon")
     if daemon_bin:
@@ -63,38 +69,62 @@ def daemon_command() -> list[str]:
     )
 
 
-@pytest.fixture(scope="module", autouse=True)
-def prompt_scan_daemon(
-    daemon_command: list[str],
+@pytest.fixture(
+    scope="module",
+    params=("daemon", "middleware"),
+    ids=("daemon", "middleware"),
+    autouse=True,
+)
+def prompt_scan_execution_path(
+    request: pytest.FixtureRequest,
     tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[None]:
-    """Start a daemon with prompt model preload enabled for all CLI e2e cases."""
-    tmp_path = tmp_path_factory.mktemp("prompt_scan_daemon")
+) -> Iterator[PromptScanExecutionContext]:
+    """Run the CLI e2e suite against daemon and explicit local middleware paths."""
+    execution_path = str(request.param)
+    tmp_path = tmp_path_factory.mktemp(f"prompt_scan_{execution_path}")
     socket_path = tmp_path / "runtime" / "daemon.sock"
     data_dir = tmp_path / "data"
 
     saved_env = {
         SOCKET_ENV: os.environ.get(SOCKET_ENV),
+        DAEMON_DISABLED_ENV: os.environ.get(DAEMON_DISABLED_ENV),
         DATA_DIR_ENV: os.environ.get(DATA_DIR_ENV),
         PROMPT_PRELOAD_ENV: os.environ.get(PROMPT_PRELOAD_ENV),
     }
 
-    daemon = _start_daemon(daemon_command, socket_path, data_dir)
+    daemon: DaemonProcess | None = None
     output: DaemonOutput | None = None
     try:
-        _wait_for_prompt_scan_ready(socket_path, daemon)
-        os.environ[SOCKET_ENV] = str(socket_path)
+        if execution_path == "daemon":
+            daemon = _start_daemon(_resolve_daemon_command(), socket_path, data_dir)
+            _wait_for_prompt_scan_ready(socket_path, daemon)
+            os.environ[SOCKET_ENV] = str(socket_path)
+            os.environ.pop(DAEMON_DISABLED_ENV, None)
+        else:
+            _print_progress(
+                "using local middleware path " f"with {DAEMON_DISABLED_ENV}=1"
+            )
+            os.environ.pop(SOCKET_ENV, None)
+            os.environ[DAEMON_DISABLED_ENV] = "1"
+
         os.environ[DATA_DIR_ENV] = str(data_dir)
-        yield
+        os.environ.pop(PROMPT_PRELOAD_ENV, None)
+        yield PromptScanExecutionContext(
+            execution_path=execution_path,
+            socket_path=socket_path,
+            data_dir=data_dir,
+        )
     finally:
-        output = _stop_daemon(daemon)
+        if daemon is not None:
+            output = _stop_daemon(daemon)
         for key, value in saved_env.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
 
-    assert output.returncode == 0
+    if output is not None:
+        assert output.returncode == 0
 
 
 def _start_daemon(
@@ -104,6 +134,7 @@ def _start_daemon(
 ) -> DaemonProcess:
     env = os.environ.copy()
     env.pop(SOCKET_ENV, None)
+    env.pop(DAEMON_DISABLED_ENV, None)
     env[DATA_DIR_ENV] = str(data_dir)
     env[PROMPT_PRELOAD_ENV] = "1"
     env["PYTHONUNBUFFERED"] = "1"
