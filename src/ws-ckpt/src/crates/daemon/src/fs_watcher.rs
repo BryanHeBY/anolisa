@@ -99,3 +99,49 @@ impl WorkspaceWatcher {
         self.is_writing.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn start_valid_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
+        assert_eq!(watcher.workspace_path(), dir.path());
+    }
+
+    #[tokio::test]
+    async fn quiescent_when_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
+        assert!(watcher.check_quiescent().await);
+    }
+
+    #[tokio::test]
+    async fn not_quiescent_when_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
+        let flag = watcher.is_writing_flag();
+        // Simulate ongoing writes: a background task keeps setting the flag
+        let flag_c = flag.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                flag_c.store(true, Ordering::Release);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        flag.store(true, Ordering::Release);
+        assert!(!watcher.check_quiescent().await);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn stop_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
+        watcher.stop();
+        assert_eq!(watcher.workspace_path(), dir.path());
+    }
+}

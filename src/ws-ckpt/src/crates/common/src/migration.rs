@@ -167,3 +167,219 @@ pub fn migrate_legacy_indexes(backend: &dyn StorageBackend, state_dir: &Path) ->
 
     migrated_any
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use crate::backend::{BackendType, EnvironmentStatus, GcResult, StorageBackend};
+    use crate::{DiffEntry, SnapshotIndex, SnapshotMeta, WorkspaceInfo};
+
+    struct MockBackend {
+        data_root: PathBuf,
+        snapshots_root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for MockBackend {
+        fn backend_type(&self) -> BackendType {
+            BackendType::BtrfsBase
+        }
+        fn data_root(&self) -> &std::path::Path {
+            &self.data_root
+        }
+        fn snapshots_root(&self) -> &std::path::Path {
+            &self.snapshots_root
+        }
+        async fn init_workspace(&self, _: &str, _: &str) -> anyhow::Result<WorkspaceInfo> {
+            unimplemented!()
+        }
+        async fn create_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
+            unimplemented!()
+        }
+        async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn diff(&self, _: &str, _: &str, _: Option<&str>) -> anyhow::Result<Vec<DiffEntry>> {
+            unimplemented!()
+        }
+        async fn cleanup_snapshots(&self, _: &str, _: &[String]) -> anyhow::Result<Vec<String>> {
+            unimplemented!()
+        }
+        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn gc_generations(&self, _: &str) -> anyhow::Result<GcResult> {
+            unimplemented!()
+        }
+        async fn check_environment(&self) -> anyhow::Result<EnvironmentStatus> {
+            unimplemented!()
+        }
+        async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            unimplemented!()
+        }
+    }
+
+    fn make_index(workspace_path: &str) -> SnapshotIndex {
+        SnapshotIndex {
+            workspace_path: PathBuf::from(workspace_path),
+            snapshots: HashMap::new(),
+            head: None,
+        }
+    }
+
+    fn write_old_index(snapshots_root: &Path, ws_id: &str, index: &SnapshotIndex) {
+        let ws_dir = snapshots_root.join(ws_id);
+        fs::create_dir_all(&ws_dir).unwrap();
+        let content = serde_json::to_string_pretty(index).unwrap();
+        fs::write(ws_dir.join(crate::INDEX_FILE), content).unwrap();
+    }
+
+    #[test]
+    fn migrate_empty_dir_returns_false() {
+        let snap_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let backend = MockBackend {
+            data_root: snap_dir.path().to_path_buf(),
+            snapshots_root: snap_dir.path().to_path_buf(),
+        };
+        assert!(!migrate_legacy_indexes(&backend, state_dir.path()));
+        assert!(!state_dir.path().join(crate::STATE_FILE).exists());
+    }
+
+    #[test]
+    fn migrate_single_workspace() {
+        let snap_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let index = make_index("/home/user/project");
+        write_old_index(snap_dir.path(), "ws-abc", &index);
+
+        let backend = MockBackend {
+            data_root: snap_dir.path().to_path_buf(),
+            snapshots_root: snap_dir.path().to_path_buf(),
+        };
+        assert!(migrate_legacy_indexes(&backend, state_dir.path()));
+
+        // New index exists
+        let new_path = state_dir
+            .path()
+            .join(crate::INDEXES_DIR)
+            .join("ws-abc")
+            .join(crate::INDEX_FILE);
+        assert!(new_path.exists());
+        let loaded: SnapshotIndex =
+            serde_json::from_str(&fs::read_to_string(&new_path).unwrap()).unwrap();
+        assert_eq!(loaded.workspace_path, PathBuf::from("/home/user/project"));
+
+        // Old index removed
+        assert!(!snap_dir
+            .path()
+            .join("ws-abc")
+            .join(crate::INDEX_FILE)
+            .exists());
+
+        // state.json written
+        let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
+        assert_eq!(sf.workspaces.len(), 1);
+        assert_eq!(sf.workspaces[0].ws_id, "ws-abc");
+    }
+
+    #[test]
+    fn migrate_multiple_workspaces() {
+        let snap_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        write_old_index(snap_dir.path(), "ws-a", &make_index("/a"));
+        write_old_index(snap_dir.path(), "ws-b", &make_index("/b"));
+
+        let backend = MockBackend {
+            data_root: snap_dir.path().to_path_buf(),
+            snapshots_root: snap_dir.path().to_path_buf(),
+        };
+        assert!(migrate_legacy_indexes(&backend, state_dir.path()));
+
+        let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
+        assert_eq!(sf.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn migrate_skips_non_dir() {
+        let snap_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        fs::write(snap_dir.path().join("regular-file"), "not a dir").unwrap();
+
+        let backend = MockBackend {
+            data_root: snap_dir.path().to_path_buf(),
+            snapshots_root: snap_dir.path().to_path_buf(),
+        };
+        assert!(!migrate_legacy_indexes(&backend, state_dir.path()));
+    }
+
+    #[test]
+    fn migrate_skips_dir_without_index() {
+        let snap_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        fs::create_dir(snap_dir.path().join("ws-empty")).unwrap();
+
+        let backend = MockBackend {
+            data_root: snap_dir.path().to_path_buf(),
+            snapshots_root: snap_dir.path().to_path_buf(),
+        };
+        assert!(!migrate_legacy_indexes(&backend, state_dir.path()));
+    }
+
+    #[test]
+    fn migrate_handles_invalid_json() {
+        let snap_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+
+        // Bad JSON workspace
+        let bad_dir = snap_dir.path().join("ws-bad");
+        fs::create_dir_all(&bad_dir).unwrap();
+        fs::write(bad_dir.join(crate::INDEX_FILE), "not json {{{").unwrap();
+
+        // Good workspace
+        write_old_index(snap_dir.path(), "ws-good", &make_index("/good"));
+
+        let backend = MockBackend {
+            data_root: snap_dir.path().to_path_buf(),
+            snapshots_root: snap_dir.path().to_path_buf(),
+        };
+        assert!(migrate_legacy_indexes(&backend, state_dir.path()));
+
+        let sf = persist::load_state(state_dir.path()).unwrap().unwrap();
+        assert_eq!(sf.workspaces.len(), 1);
+        assert_eq!(sf.workspaces[0].ws_id, "ws-good");
+    }
+
+    #[test]
+    fn save_index_sync_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = make_index("/test");
+        index.snapshots.insert(
+            "snap1".to_string(),
+            SnapshotMeta {
+                created_at: chrono::Utc::now(),
+                message: Some("test".to_string()),
+                metadata: None,
+                pinned: false,
+                missing: false,
+                parent_id: None,
+                child_ids: Vec::new(),
+            },
+        );
+        save_index_sync(dir.path(), &index).unwrap();
+
+        let content = fs::read_to_string(dir.path().join(crate::INDEX_FILE)).unwrap();
+        let loaded: SnapshotIndex = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded.workspace_path, index.workspace_path);
+        assert!(loaded.snapshots.contains_key("snap1"));
+    }
+}

@@ -22,5 +22,10 @@ artifacts/
 node_modules/
 dist/
 
+# test coverage
+.coverage
+htmlcov/
+coverage/
+
 # agent output
 docs/agents/*

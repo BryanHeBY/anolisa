@@ -6,6 +6,7 @@ use anyhow::Context;
 use tracing::warn;
 
 /// Lockfile holder: holds file handle + flock lock
+#[derive(Debug)]
 pub(crate) struct LockfileHolder {
     _file: std::fs::File,
 }
@@ -61,4 +62,51 @@ pub(crate) fn acquire(lockfile_path: &Path) -> anyhow::Result<LockfileHolder> {
     file.sync_all()?;
 
     Ok(LockfileHolder { _file: file })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acquire_fresh_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ws-ckpt.lock");
+        let holder = acquire(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, format!("{}", std::process::id()));
+        drop(holder);
+    }
+
+    #[test]
+    fn acquire_after_crash_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ws-ckpt.lock");
+        std::fs::write(&path, "99999").unwrap();
+        let holder = acquire(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, format!("{}", std::process::id()));
+        drop(holder);
+    }
+
+    #[test]
+    fn double_acquire_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ws-ckpt.lock");
+        let _holder = acquire(&path).unwrap();
+        let err = acquire(&path).unwrap_err();
+        assert!(
+            format!("{}", err).contains("Another"),
+            "expected 'Another instance' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn acquire_creates_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subdir").join("ws-ckpt.lock");
+        let _holder = acquire(&path).unwrap();
+        assert!(path.exists());
+    }
 }
