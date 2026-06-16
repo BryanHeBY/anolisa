@@ -24,7 +24,6 @@ from agent_sec_cli.prompt_scanner.cli import (
     _should_use_daemon,
     scanner_app,
 )
-from agent_sec_cli.prompt_scanner.config import ScanMode
 from agent_sec_cli.prompt_scanner.result import (
     LayerResult,
     ScanResult,
@@ -309,7 +308,7 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
         mock_middleware.assert_called_once_with(
             "prompt_scan",
             text="hello",
-            mode=ScanMode.STANDARD,
+            mode="standard",
             source="",
         )
 
@@ -337,7 +336,7 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
         mock_middleware.assert_called_once_with(
             "prompt_scan",
             text="hello",
-            mode=ScanMode.STANDARD,
+            mode="standard",
             source="",
         )
 
@@ -370,7 +369,7 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
         mock_middleware.assert_called_once_with(
             "prompt_scan",
             text="hello",
-            mode=ScanMode.STANDARD,
+            mode="standard",
             source="",
         )
 
@@ -418,7 +417,7 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
         mock_middleware.assert_called_once_with(
             "prompt_scan",
             text="hello",
-            mode=ScanMode.STANDARD,
+            mode="standard",
             source="",
         )
 

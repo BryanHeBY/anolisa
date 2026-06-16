@@ -89,7 +89,6 @@ def prompt_scan_execution_path(
         SOCKET_ENV: os.environ.get(SOCKET_ENV),
         DAEMON_DISABLED_ENV: os.environ.get(DAEMON_DISABLED_ENV),
         DATA_DIR_ENV: os.environ.get(DATA_DIR_ENV),
-        PROMPT_PRELOAD_ENV: os.environ.get(PROMPT_PRELOAD_ENV),
     }
 
     daemon: DaemonProcess | None = None
@@ -108,7 +107,6 @@ def prompt_scan_execution_path(
             os.environ[DAEMON_DISABLED_ENV] = "1"
 
         os.environ[DATA_DIR_ENV] = str(data_dir)
-        os.environ.pop(PROMPT_PRELOAD_ENV, None)
         yield PromptScanExecutionContext(
             execution_path=execution_path,
             socket_path=socket_path,

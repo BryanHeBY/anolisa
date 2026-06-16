@@ -200,7 +200,7 @@ def scan_prompt(
             mw_result = invoke(
                 "prompt_scan",
                 text=t,
-                mode=scan_mode,
+                mode=scan_mode.value,
                 source=source,
             )
         except Exception as exc:
