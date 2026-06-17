@@ -418,20 +418,10 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
             f"  autoCheckpoint: {cfg.auto_checkpoint}",
             f"  workspace:      {cfg.workspace}",
         ]
-        # Show cron schedules grouped by workspace
         if cfg.cron_schedules:
-            active = cfg.cron_schedules.get(ws, [])
-            if active:
-                lines.append("")
-                lines.append(f"  cronSchedules (active — {ws}):")
-                for expr in active:
-                    lines.append(f"    - {expr}")
-            for cron_ws, exprs in cfg.cron_schedules.items():
-                if cron_ws != ws and exprs:
-                    lines.append("")
-                    lines.append(f"  cronSchedules (inactive — {cron_ws}):")
-                    for expr in exprs:
-                        lines.append(f"    - {expr}")
+            lines.append("  cronSchedules:")
+            for expr in cfg.cron_schedules:
+                lines.append(f"    - {expr}")
         else:
             lines.append("  cronSchedules:  (disabled)")
         lines.append("")
@@ -564,14 +554,12 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
         ws = mgr.config.workspace
         if not ws:
             return _err(_NO_WORKSPACE_MSG)
-        current = list(mgr.config.cron_schedules.get(ws, []))
+        current = list(mgr.config.cron_schedules)
         new_schedules, err_msg = parse_schedules_update(str(value), current)
         if err_msg:
             return _err(err_msg)
-        mgr.config.cron_schedules[ws] = new_schedules
-        if not new_schedules:
-            mgr.config.cron_schedules.pop(ws, None)
-        err = _persist_plugin_yaml(cronSchedules=mgr.config.cron_schedules)
+        mgr.config.cron_schedules = new_schedules
+        err = _persist_plugin_yaml(cronSchedules=new_schedules)
         if err:
             return _err(f"Failed to persist config: {err}")
         cron_note = ""
@@ -581,7 +569,7 @@ def handle_ws_ckpt_config(args: Dict[str, Any], **_kwargs) -> str:
                 "Config saved but cron snapshots will not run until next session start or manual retry."
             )
         return _ok(
-            f"cronSchedules updated for {ws}: {new_schedules or '(disabled)'}"
+            f"cronSchedules updated: {new_schedules or '(disabled)'}"
             + cron_note
         )
 

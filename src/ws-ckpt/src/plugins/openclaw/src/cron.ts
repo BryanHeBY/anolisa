@@ -151,14 +151,9 @@ export class CrontabManager {
   static async migrate(
     oldWorkspace: string,
     newWorkspace: string,
-    schedulesMap: Record<string, string[]>,
+    schedules: string[],
   ): Promise<string[]> {
     const warnings: string[] = [];
-    const schedules = schedulesMap[oldWorkspace] ?? [];
-    if (schedules.length > 0 && oldWorkspace !== newWorkspace) {
-      delete schedulesMap[oldWorkspace];
-      schedulesMap[newWorkspace] = schedules;
-    }
     if (oldWorkspace && oldWorkspace !== newWorkspace) {
       if (!(await CrontabManager.removeWithRetry(oldWorkspace))) {
         warnings.push(

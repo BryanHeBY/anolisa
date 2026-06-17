@@ -167,14 +167,9 @@ class CrontabManager:
         return CrontabManager.sync_with_retry(workspace, [], retries)
 
     @staticmethod
-    def migrate(old_workspace: str, new_workspace: str, schedules_map: dict) -> List[str]:
-        """Migrate cron schedules to new workspace. Returns warnings.
-        Re-keys schedules_map in-place and syncs crontab.
-        """
+    def migrate(old_workspace: str, new_workspace: str, schedules: List[str]) -> List[str]:
+        """Remove old crontab entries and install under new workspace. Returns warnings."""
         warnings: List[str] = []
-        schedules = schedules_map.pop(old_workspace, [])
-        if schedules:
-            schedules_map[new_workspace] = schedules
         if old_workspace and old_workspace != new_workspace:
             if not CrontabManager.remove_with_retry(old_workspace):
                 warnings.append(

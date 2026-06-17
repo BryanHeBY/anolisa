@@ -88,7 +88,7 @@ export function registerHooks(api: OpenClawPluginApi, config: PluginConfig): voi
     // Sync cron schedules — independent of autoCheckpoint
     const cronWs = pluginState.resolvedConfig?.workspace;
     if (cronWs) {
-      const schedules = (config.cronSchedules ?? {})[cronWs] ?? [];
+      const schedules = config.cronSchedules ?? [];
       if (schedules.length > 0) {
         try {
           if (await CrontabManager.syncWithRetry(cronWs, schedules)) {

@@ -296,23 +296,10 @@ export async function handleConfig(
         break;
     }
     lines.push(`  workspace: ${cfg.workspace}`);
-    // Show cron schedules grouped by workspace
-    const cronAll = cfg.cronSchedules ?? {};
-    const hasAny = Object.values(cronAll).some((v) => v.length > 0);
-    if (hasAny) {
-      const active = cronAll[cfg.workspace] ?? [];
-      if (active.length > 0) {
-        lines.push("");
-        lines.push(`  cronSchedules (active — ${cfg.workspace}):`);
-        for (const expr of active) lines.push(`    - ${expr}`);
-      }
-      for (const [cronWs, exprs] of Object.entries(cronAll)) {
-        if (cronWs !== cfg.workspace && exprs.length > 0) {
-          lines.push("");
-          lines.push(`  cronSchedules (inactive — ${cronWs}):`);
-          for (const expr of exprs) lines.push(`    - ${expr}`);
-        }
-      }
+    const schedules = cfg.cronSchedules ?? [];
+    if (schedules.length > 0) {
+      lines.push("  cronSchedules:");
+      for (const expr of schedules) lines.push(`    - ${expr}`);
     } else {
       lines.push("  cronSchedules:  (disabled)");
     }
@@ -432,10 +419,9 @@ export async function handleConfig(
       }
       const oldWs = pluginState.resolvedConfig.workspace;
       pluginState.resolvedConfig.workspace = value;
-      const cronMap = pluginState.resolvedConfig.cronSchedules ?? {};
-      const warnings = await CrontabManager.migrate(oldWs, value, cronMap);
-      pluginState.resolvedConfig.cronSchedules = cronMap;
-      const persistErr = persistConfig({ workspace: value, cronSchedules: cronMap });
+      const schedules = pluginState.resolvedConfig.cronSchedules ?? [];
+      const warnings = await CrontabManager.migrate(oldWs, value, schedules);
+      const persistErr = persistConfig({ workspace: value });
       let msg = `Config updated: workspace = ${value}`;
       if (persistErr) msg += `\n\nWARNING: Failed to persist config: ${persistErr}. Change is in-memory only.`;
       if (warnings.length > 0) msg += "\n\n" + warnings.join("\n");
@@ -453,21 +439,13 @@ export async function handleConfig(
       if (!ws) {
         return { text: "No workspace configured", isError: true };
       }
-      if (!pluginState.resolvedConfig.cronSchedules) {
-        pluginState.resolvedConfig.cronSchedules = {};
-      }
-      const cronMap = pluginState.resolvedConfig.cronSchedules;
-      const current = [...(cronMap[ws] ?? [])];
+      const current = [...(pluginState.resolvedConfig.cronSchedules ?? [])];
       const parsed = parseSchedulesUpdate(value, current);
       if ("error" in parsed) {
         return { text: parsed.error, isError: true };
       }
-      if (parsed.schedules.length > 0) {
-        cronMap[ws] = parsed.schedules;
-      } else {
-        delete cronMap[ws];
-      }
-      const persistErr = persistConfig({ cronSchedules: pluginState.resolvedConfig.cronSchedules ?? {} });
+      pluginState.resolvedConfig.cronSchedules = parsed.schedules;
+      const persistErr = persistConfig({ cronSchedules: parsed.schedules });
       let warnings = "";
       if (persistErr) {
         warnings += `\n\nWARNING: Failed to persist config: ${persistErr}. Change is in-memory only.`;
@@ -477,7 +455,7 @@ export async function handleConfig(
           "Config saved but cron snapshots will not run until next session start or manual retry.";
       }
       return {
-        text: `cronSchedules updated for ${ws}: ${parsed.schedules.length > 0 ? JSON.stringify(parsed.schedules) : "(disabled)"}` + warnings,
+        text: `cronSchedules updated: ${parsed.schedules.length > 0 ? JSON.stringify(parsed.schedules) : "(disabled)"}` + warnings,
         isError: false,
       };
     }

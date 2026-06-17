@@ -43,7 +43,7 @@ def _on_session_start(session_id: str = "", model: str = "", **_: Any) -> None:
     # Sync cron schedules — independent of autoCheckpoint
     ws = manager.config.workspace
     if ws:
-        schedules = manager.config.cron_schedules.get(ws, [])
+        schedules = manager.config.cron_schedules
         if schedules:
             try:
                 if CrontabManager.sync_with_retry(ws, schedules):

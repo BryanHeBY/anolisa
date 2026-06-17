@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import List
 
 # Message truncation length, hardcoded at 80 characters.
 MSG_TRUNCATE_LEN = 80
@@ -12,7 +12,7 @@ MSG_TRUNCATE_LEN = 80
 class HermesPluginConfig:
     workspace: str  # Workspace directory path
     auto_checkpoint: bool  # Whether to auto-checkpoint on each turn
-    cron_schedules: Dict[str, List[str]] = field(default_factory=dict)  # {workspace: [cron_expr]}
+    cron_schedules: List[str] = field(default_factory=list)
 
 
 def _read_yaml_config() -> dict:
@@ -57,22 +57,16 @@ def load_config() -> HermesPluginConfig:
     else:
         auto_checkpoint = bool(yaml_cfg.get("autoCheckpoint", False))
 
-    # cronSchedules: yaml only (no env override — structure too complex for a flat var)
+    # cronSchedules: yaml only (no env override)
     from .cron import validate_cron_expr
     raw_cron = yaml_cfg.get("cronSchedules")
-    cron_schedules: Dict[str, List[str]] = {}
-    if isinstance(raw_cron, dict):
-        for ws_key, exprs in raw_cron.items():
-            if isinstance(exprs, list):
-                valid = [str(e) for e in exprs if e and validate_cron_expr(str(e))]
-                skipped = [str(e) for e in exprs if e and not validate_cron_expr(str(e))]
-                if skipped:
-                    print(
-                        f"[ws-ckpt] Ignoring invalid cron expression(s) for {ws_key}: {skipped}",
-                        flush=True,
-                    )
-                if valid:
-                    cron_schedules[str(ws_key)] = valid
+    cron_schedules: List[str] = []
+    if isinstance(raw_cron, list):
+        valid = [str(e) for e in raw_cron if e and validate_cron_expr(str(e))]
+        skipped = [str(e) for e in raw_cron if e and not validate_cron_expr(str(e))]
+        if skipped:
+            print(f"[ws-ckpt] Ignoring invalid cron expression(s): {skipped}", flush=True)
+        cron_schedules = valid
 
     return HermesPluginConfig(
         workspace=workspace,

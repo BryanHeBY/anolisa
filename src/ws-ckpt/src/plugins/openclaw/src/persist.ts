@@ -22,8 +22,8 @@ export function loadPersistedConfig(): Partial<PluginConfig> {
     const result: Partial<PluginConfig> = {};
     if (typeof parsed.autoCheckpoint === "boolean") result.autoCheckpoint = parsed.autoCheckpoint;
     if (typeof parsed.workspace === "string") result.workspace = parsed.workspace;
-    if (parsed.cronSchedules && typeof parsed.cronSchedules === "object" && !Array.isArray(parsed.cronSchedules)) {
-      result.cronSchedules = parsed.cronSchedules;
+    if (Array.isArray(parsed.cronSchedules)) {
+      result.cronSchedules = parsed.cronSchedules.filter((e: unknown) => typeof e === "string");
     }
     return result;
   } catch {
