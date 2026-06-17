@@ -30,39 +30,21 @@ Usage::
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
-# ── Colours ────────────────────────────────────────────────────────────────
-
-RED = "\033[0;31m"
-GREEN = "\033[0;32m"
-YELLOW = "\033[1;33m"
-BLUE = "\033[0;34m"
-BOLD = "\033[1m"
-NC = "\033[0m"
+import pytest
 
 # ── Globals ────────────────────────────────────────────────────────────────
 
 CLI_BIN = shutil.which("agent-sec-cli")
 VERBOSE = False
-
-
-# ── Result tracker ─────────────────────────────────────────────────────────
-
-
-@dataclass
-class Results:
-    passed: int = 0
-    failed: int = 0
-    errors: list = field(default_factory=list)
-
-
-results = Results()
 
 
 # ── Constants ─────────────────────────────────────────────────────────────
@@ -140,23 +122,6 @@ def write_findings_file(parent: Path, name: str, findings: list | dict) -> Path:
     return path
 
 
-def run_case(name: str, fn):
-    """Run a single named E2E case, catch exceptions, record results."""
-    print(f"\n{BLUE}--- {name} ---{NC}")
-    try:
-        fn()
-        print(f"{GREEN}✓ PASS{NC}")
-        results.passed += 1
-    except AssertionError as exc:
-        print(f"{RED}✗ FAIL  {exc}{NC}")
-        results.failed += 1
-        results.errors.append((name, exc))
-    except Exception as exc:
-        print(f"{RED}✗ ERROR {exc}{NC}")
-        results.failed += 1
-        results.errors.append((name, exc))
-
-
 # ── Workspace ──────────────────────────────────────────────────────────────
 
 
@@ -200,6 +165,16 @@ class Workspace:
         for key in ("XDG_DATA_HOME", "XDG_CONFIG_HOME"):
             os.environ.pop(key, None)
         shutil.rmtree(self.root, ignore_errors=True)
+
+
+@dataclass(frozen=True)
+class E2ECase:
+    """One named skill-ledger E2E scenario."""
+
+    name: str
+    fn: Callable[[Workspace], None]
+    requires_hook: bool = False
+    init_default_keys: bool = True
 
 
 # ── G1: Pre-flight & help ─────────────────────────────────────────────────
@@ -1367,240 +1342,166 @@ def case_key_rotation_old_sigs_verifiable(ws: Workspace):
     ), f"Expected 'pass' for unchanged skill after key rotation, got '{out['status']}'"
 
 
-# ── Main ───────────────────────────────────────────────────────────────────
+def _without_workspace(fn: Callable[[], None]) -> Callable[[Workspace], None]:
+    """Adapt hook-only cases to the shared case registry shape."""
+
+    def wrapped(_ws: Workspace) -> None:
+        fn()
+
+    return wrapped
 
 
-def run_all_cases() -> int:
-    """Run the script-style E2E suite and return a process-style exit code."""
-    global results
-    results = Results()
+E2E_CASES = [
+    E2ECase(
+        "G1: --help available",
+        case_help_available,
+        init_default_keys=False,
+    ),
+    E2ECase(
+        "G2: init-keys no passphrase",
+        case_init_keys_no_passphrase,
+        init_default_keys=False,
+    ),
+    E2ECase("G2: init-keys JSON structure", case_init_keys_json_structure),
+    E2ECase("G2: init-keys reject duplicate", case_init_keys_reject_duplicate),
+    E2ECase("G2: init-keys --force overwrite", case_init_keys_force_overwrite),
+    E2ECase("G2: init-keys passphrase env", case_init_keys_with_passphrase_env),
+    E2ECase("G3: full pass lifecycle", case_full_lifecycle_pass),
+    E2ECase("G3: multi-version chain", case_multi_version_lifecycle),
+    E2ECase("G3: warn findings lifecycle", case_lifecycle_with_warn_findings),
+    E2ECase("G4: no manifest → none/read-only", case_check_no_manifest_is_read_only),
+    E2ECase("G4: file added → drifted", case_check_after_file_add_drifted),
+    E2ECase("G4: file modified → drifted", case_check_after_file_modify_drifted),
+    E2ECase("G4: file removed → drifted", case_check_after_file_remove_drifted),
+    E2ECase("G4: tampered → exit 1", case_check_tampered_manifest_hash),
+    E2ECase("G4: deny → exit 1", case_check_deny_exit_code_1),
+    E2ECase("G5: bare array findings", case_certify_external_findings_bare_array),
+    E2ECase("G5: wrapped findings", case_certify_external_findings_wrapped),
+    E2ECase("G5: deny finding", case_certify_deny_finding_produces_deny),
+    E2ECase("G5: missing findings file", case_certify_missing_findings_file),
+    E2ECase("G5: invalid JSON", case_certify_invalid_json_findings),
+    E2ECase("G5: scan auto-invoke mode", case_scan_auto_invoke_default_scanners),
+    E2ECase("G5: no skill_dir no --all", case_certify_no_skill_dir_no_all),
+    E2ECase("G6: --all multiple skills", case_scan_all_multiple_skills),
+    E2ECase("G6: --all no skill dirs", case_scan_all_no_skill_dirs),
+    E2ECase("G7: valid chain", case_audit_valid_chain),
+    E2ECase("G7: no versions", case_audit_no_versions),
+    E2ECase("G7: tampered version file", case_audit_tampered_version_file),
+    E2ECase("G7: --verify-snapshots", case_audit_verify_snapshots),
+    E2ECase("G8: human-readable output", case_status_human_readable_output),
+    E2ECase("G8: drifted details", case_status_drifted_shows_details),
+    E2ECase("G9: set-policy stub", case_set_policy_stub),
+    E2ECase("G9: rotate-keys stub", case_rotate_keys_stub),
+    E2ECase("G9: list-scanners", case_list_scanners),
+    E2ECase("G9: certify empty skill dir", case_certify_empty_skill_dir),
+    E2ECase("G10: empty passphrase env", case_contract_init_keys_empty_passphrase_env),
+    E2ECase("G10: check output schema", case_contract_check_output_schema),
+    E2ECase(
+        "G10: certify --scanner flags", case_contract_certify_explicit_scanner_flags
+    ),
+    E2ECase("G10: certify output fields", case_contract_certify_output_fields),
+    E2ECase("G10: manifest path", case_contract_manifest_path),
+    E2ECase(
+        "G10: all 6 statuses reachable", case_contract_check_status_values_complete
+    ),
+    E2ECase("G11: passphrase full lifecycle", case_passphrase_full_lifecycle),
+    E2ECase("G11: missing passphrase fails", case_passphrase_missing_env_fails),
+    E2ECase(
+        "G12: hook invalid JSON → allow",
+        _without_workspace(case_hook_invalid_json_allows),
+        requires_hook=True,
+        init_default_keys=False,
+    ),
+    E2ECase(
+        "G12: hook wrong tool → allow",
+        _without_workspace(case_hook_wrong_tool_allows),
+        requires_hook=True,
+        init_default_keys=False,
+    ),
+    E2ECase(
+        "G12: hook unknown skill warns",
+        _without_workspace(case_hook_unknown_skill_warns),
+        requires_hook=True,
+        init_default_keys=False,
+    ),
+    E2ECase(
+        "G12: hook pass → silent allow",
+        case_hook_pass_status_silent,
+        requires_hook=True,
+    ),
+    E2ECase(
+        "G12: hook drifted → ask",
+        case_hook_drifted_requires_confirmation,
+        requires_hook=True,
+    ),
+    E2ECase(
+        "G12: hook path traversal",
+        case_hook_path_traversal_rejected,
+        requires_hook=True,
+        init_default_keys=False,
+    ),
+    E2ECase("G13: vetter→ledger→hook pipeline", case_full_pipeline_vetter_to_hook),
+    E2ECase(
+        "G14: old sigs verifiable after rotation", case_key_rotation_old_sigs_verifiable
+    ),
+]
 
-    # Pre-flight
-    if not CLI_BIN:
-        print(f"{RED}ERROR: agent-sec-cli not found on PATH{NC}")
-        print(
-            "Install the RPM package or ensure the binary is on PATH.\n"
-            "  rpm -q agent-sec-core  # check installation"
-        )
-        return 1
 
-    hook_available = HOOK_SCRIPT is not None
+def _ensure_default_keys(ws: Workspace) -> None:
+    """Initialize default test keys for isolated pytest case workspaces."""
+    key_path = ws.xdg_data / "agent-sec" / "skill-ledger" / "key.pub"
+    if key_path.exists():
+        return
+    r = run_skill_ledger(["init-keys"], env_extra=ws.env())
+    assert r.returncode == 0, f"init-keys preflight failed: {r.stderr}"
 
-    ws = Workspace()
+
+# ── Pytest entry points ─────────────────────────────────────────────────────
+
+
+def _case_id(case: E2ECase) -> str:
+    """Build a stable, readable pytest id from the G-case name."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", case.name).strip("_")
+
+
+@pytest.fixture
+def ws():
+    """Provide each pytest case with an isolated skill-ledger workspace."""
+    workspace = Workspace()
     try:
-        print("=" * 60)
-        print(f"{BOLD}skill-ledger CLI E2E Tests (RPM binary){NC}")
-        print(f"  CLI binary : {CLI_BIN}")
-        print(f"  Hook script: {HOOK_SCRIPT or 'NOT FOUND (hook tests skipped)'}")
-        print(f"  workspace  : {ws.root}")
-        print("=" * 60)
-
-        # G1: Pre-flight & help
-        run_case("G1: --help available", lambda: case_help_available(ws))
-
-        # G2: init-keys (run first — all subsequent tests need keys)
-        run_case(
-            "G2: init-keys no passphrase", lambda: case_init_keys_no_passphrase(ws)
-        )
-        run_case(
-            "G2: init-keys JSON structure", lambda: case_init_keys_json_structure(ws)
-        )
-        run_case(
-            "G2: init-keys reject duplicate",
-            lambda: case_init_keys_reject_duplicate(ws),
-        )
-        run_case(
-            "G2: init-keys --force overwrite",
-            lambda: case_init_keys_force_overwrite(ws),
-        )
-        run_case(
-            "G2: init-keys passphrase env",
-            lambda: case_init_keys_with_passphrase_env(ws),
-        )
-
-        # G3: Happy-path lifecycle
-        run_case("G3: full pass lifecycle", lambda: case_full_lifecycle_pass(ws))
-        run_case("G3: multi-version chain", lambda: case_multi_version_lifecycle(ws))
-        run_case(
-            "G3: warn findings lifecycle", lambda: case_lifecycle_with_warn_findings(ws)
-        )
-
-        # G4: check state machine
-        run_case(
-            "G4: no manifest → none/read-only",
-            lambda: case_check_no_manifest_is_read_only(ws),
-        )
-        run_case(
-            "G4: file added → drifted", lambda: case_check_after_file_add_drifted(ws)
-        )
-        run_case(
-            "G4: file modified → drifted",
-            lambda: case_check_after_file_modify_drifted(ws),
-        )
-        run_case(
-            "G4: file removed → drifted",
-            lambda: case_check_after_file_remove_drifted(ws),
-        )
-        run_case("G4: tampered → exit 1", lambda: case_check_tampered_manifest_hash(ws))
-        run_case("G4: deny → exit 1", lambda: case_check_deny_exit_code_1(ws))
-
-        # G5: certify command
-        run_case(
-            "G5: bare array findings",
-            lambda: case_certify_external_findings_bare_array(ws),
-        )
-        run_case(
-            "G5: wrapped findings", lambda: case_certify_external_findings_wrapped(ws)
-        )
-        run_case(
-            "G5: deny finding", lambda: case_certify_deny_finding_produces_deny(ws)
-        )
-        run_case(
-            "G5: missing findings file", lambda: case_certify_missing_findings_file(ws)
-        )
-        run_case("G5: invalid JSON", lambda: case_certify_invalid_json_findings(ws))
-        run_case(
-            "G5: scan auto-invoke mode",
-            lambda: case_scan_auto_invoke_default_scanners(ws),
-        )
-        run_case(
-            "G5: no skill_dir no --all", lambda: case_certify_no_skill_dir_no_all(ws)
-        )
-
-        # G6: scan --all
-        run_case("G6: --all multiple skills", lambda: case_scan_all_multiple_skills(ws))
-        run_case("G6: --all no skill dirs", lambda: case_scan_all_no_skill_dirs(ws))
-
-        # G7: audit
-        run_case("G7: valid chain", lambda: case_audit_valid_chain(ws))
-        run_case("G7: no versions", lambda: case_audit_no_versions(ws))
-        run_case(
-            "G7: tampered version file", lambda: case_audit_tampered_version_file(ws)
-        )
-        run_case("G7: --verify-snapshots", lambda: case_audit_verify_snapshots(ws))
-
-        # G8: status
-        run_case(
-            "G8: human-readable output", lambda: case_status_human_readable_output(ws)
-        )
-        run_case("G8: drifted details", lambda: case_status_drifted_shows_details(ws))
-
-        # G9: stubs & edge cases
-        run_case("G9: set-policy stub", lambda: case_set_policy_stub(ws))
-        run_case("G9: rotate-keys stub", lambda: case_rotate_keys_stub(ws))
-        run_case("G9: list-scanners", lambda: case_list_scanners(ws))
-        run_case(
-            "G9: certify empty skill dir", lambda: case_certify_empty_skill_dir(ws)
-        )
-
-        # G10: contract assertions
-        run_case(
-            "G10: empty passphrase env",
-            lambda: case_contract_init_keys_empty_passphrase_env(ws),
-        )
-        run_case(
-            "G10: check output schema", lambda: case_contract_check_output_schema(ws)
-        )
-        run_case(
-            "G10: certify --scanner flags",
-            lambda: case_contract_certify_explicit_scanner_flags(ws),
-        )
-        run_case(
-            "G10: certify output fields",
-            lambda: case_contract_certify_output_fields(ws),
-        )
-        run_case("G10: manifest path", lambda: case_contract_manifest_path(ws))
-        run_case(
-            "G10: all 6 statuses reachable",
-            lambda: case_contract_check_status_values_complete(ws),
-        )
-
-        # G11: passphrase-protected lifecycle
-        run_case(
-            "G11: passphrase full lifecycle", lambda: case_passphrase_full_lifecycle(ws)
-        )
-        run_case(
-            "G11: missing passphrase fails",
-            lambda: case_passphrase_missing_env_fails(ws),
-        )
-
-        # G12: cosh hook integration
-        if hook_available:
-            run_case(
-                "G12: hook invalid JSON → allow",
-                lambda: case_hook_invalid_json_allows(),
-            )
-            run_case(
-                "G12: hook wrong tool → allow", lambda: case_hook_wrong_tool_allows()
-            )
-            run_case(
-                "G12: hook unknown skill warns", lambda: case_hook_unknown_skill_warns()
-            )
-            run_case(
-                "G12: hook pass → silent allow",
-                lambda: case_hook_pass_status_silent(ws),
-            )
-            run_case(
-                "G12: hook drifted → ask",
-                lambda: case_hook_drifted_requires_confirmation(ws),
-            )
-            run_case(
-                "G12: hook path traversal",
-                lambda: case_hook_path_traversal_rejected(ws),
-            )
-        else:
-            print(f"\n{YELLOW}SKIP G12: cosh hook script not found{NC}")
-
-        # G13: full pipeline
-        run_case(
-            "G13: vetter→ledger→hook pipeline",
-            lambda: case_full_pipeline_vetter_to_hook(ws),
-        )
-
-        # G14: key rotation
-        run_case(
-            "G14: old sigs verifiable after rotation",
-            lambda: case_key_rotation_old_sigs_verifiable(ws),
-        )
-
+        yield workspace
     finally:
-        ws.cleanup()
+        workspace.cleanup()
 
-    # Summary
-    print()
-    print("=" * 60)
-    total = results.passed + results.failed
-    print(f"{BOLD}Results: {results.passed}/{total} passed{NC}")
-    if results.errors:
-        for name, exc in results.errors:
-            print(f"  {RED}FAIL{NC} {name}: {exc}")
-    print("=" * 60)
 
-    if results.failed:
-        print(f"{RED}{results.failed} case(s) failed{NC}")
-        return 1
-
-    print(f"{GREEN}All tests passed!{NC}")
-    return 0
+@pytest.mark.parametrize("case", E2E_CASES, ids=_case_id)
+def test_skill_ledger_e2e_case(case: E2ECase, ws: Workspace):
+    """Run one skill-ledger E2E scenario as its own pytest item."""
+    if not CLI_BIN:
+        pytest.fail(
+            "agent-sec-cli not found on PATH; install the RPM package or ensure "
+            "the binary is on PATH"
+        )
+    if case.requires_hook and HOOK_SCRIPT is None:
+        pytest.skip("cosh hook script not found")
+    if case.init_default_keys:
+        _ensure_default_keys(ws)
+    case.fn(ws)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point for the standalone script runner."""
+    """CLI entry point for running this pytest module directly."""
     global VERBOSE
 
     import argparse
 
     parser = argparse.ArgumentParser(description="skill-ledger CLI E2E tests (RPM)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show CLI output")
-    args = parser.parse_args(argv)
+    args, pytest_args = parser.parse_known_args(argv)
     VERBOSE = args.verbose
-    return run_all_cases()
-
-
-def test_skill_ledger_e2e():
-    """Pytest entry point for the script-style skill-ledger E2E suite."""
-    exit_code = run_all_cases()
-    assert exit_code == 0, f"skill-ledger E2E failed with exit code {exit_code}"
+    if args.verbose and "-s" not in pytest_args and "--capture=no" not in pytest_args:
+        pytest_args = ["-s", *pytest_args]
+    return pytest.main([__file__, *pytest_args])
 
 
 if __name__ == "__main__":
