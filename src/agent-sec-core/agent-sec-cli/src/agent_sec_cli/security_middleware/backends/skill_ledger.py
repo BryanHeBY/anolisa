@@ -39,12 +39,15 @@ _PASSPHRASE_EXISTING_KEY_ERROR = (
     "'agent-sec-cli skill-ledger init --force-keys --passphrase' to rotate it "
     "with passphrase protection."
 )
-_CAMEL_BOUNDARY_RE = re.compile(r"(?<!^)(?=[A-Z])")
+_CAMEL_ACRONYM_BOUNDARY_RE = re.compile(r"(.)([A-Z][a-z]+)")
+_CAMEL_WORD_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
 
 
 def _to_snake_case(value: str) -> str:
     """Convert a JSON field name from camelCase/PascalCase to snake_case."""
-    return _CAMEL_BOUNDARY_RE.sub("_", value).lower()
+    value = value.replace("-", "_")
+    value = _CAMEL_ACRONYM_BOUNDARY_RE.sub(r"\1_\2", value)
+    return _CAMEL_WORD_BOUNDARY_RE.sub(r"\1_\2", value).lower()
 
 
 def _snake_case_event_keys(value: Any) -> Any:

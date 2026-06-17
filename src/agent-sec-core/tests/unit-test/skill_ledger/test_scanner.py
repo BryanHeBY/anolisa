@@ -521,13 +521,14 @@ class TestCiscoStaticScanner(unittest.TestCase):
             findings = scan_cisco_static_skill(skill)
             self.assertEqual(findings, [])
 
-    def test_openclaw_clawhub_origin_does_not_trigger_hidden_file_warning(self):
+    def test_openclaw_current_clawhub_origin_does_not_trigger_hidden_file_warning(self):
         with TemporaryDirectory() as tmp:
             skill = self._make_skill(
                 Path(tmp),
                 {
                     "SKILL.md": "---\nname: clean\ndescription: Clean test skill\n---\n",
                     ".clawhub/origin.json": "{}\n",
+                    ".clawdhub/origin.json": "{}\n",
                     ".install-complete": "",
                     ".private-state": "opaque local state\n",
                 },
@@ -539,7 +540,10 @@ class TestCiscoStaticScanner(unittest.TestCase):
                 if finding.get("rule") == "hidden-file"
             }
 
-            self.assertEqual(hidden_files, {".install-complete", ".private-state"})
+            self.assertEqual(
+                hidden_files,
+                {".clawdhub/origin.json", ".install-complete", ".private-state"},
+            )
 
     def test_prompt_override_detected(self):
         with TemporaryDirectory() as tmp:

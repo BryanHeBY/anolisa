@@ -1,7 +1,6 @@
 """Integration tests for Skill Ledger daemon activation refresh."""
 
 import asyncio
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -47,8 +46,7 @@ def read_skill_ledger_config(root: Path) -> dict[str, Any]:
 
 def daemon_socket_path(tmp_path: Path) -> Path:
     """Return a short Unix socket path for AF_UNIX path limits."""
-    digest = hashlib.sha1(str(tmp_path).encode("utf-8")).hexdigest()[:10]
-    runtime = Path("/tmp") / f"asl-{digest}"  # noqa: S108
+    runtime = tmp_path / "r"
     runtime.mkdir(parents=True, exist_ok=True)
     runtime.chmod(0o700)
     return runtime / "d.sock"

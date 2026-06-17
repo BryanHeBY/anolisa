@@ -100,7 +100,6 @@ _ALLOWED_HIDDEN_FILE_PATHS = frozenset(
     {
         # OpenClaw ClawHub installs record per-skill origin metadata here.
         (".clawhub", "origin.json"),
-        (".clawdhub", "origin.json"),
     }
 )
 _NETWORK_HINT_RE = re.compile(

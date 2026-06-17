@@ -277,6 +277,33 @@ def test_non_scan_commands_normalize_names_without_changing_business_meaning():
             "encrypted": True,
         }
     )
+    status_result = _event_result(
+        {
+            "command": "status",
+            "keys": {
+                "initialized": True,
+                "fingerprint": "sha256:key",
+                "publicKeyPath": "/keys/pub",
+                "encrypted": False,
+                "keyringSize": 1,
+            },
+            "config": {
+                "configPath": "/config.json",
+                "customized": True,
+                "defaultSkillDirsEnabled": False,
+                "defaultSkillDirPatterns": 3,
+                "managedSkillDirPatterns": 1,
+                "ignoredDeprecatedSkillDirPatterns": 0,
+                "effectiveSkillDirPatterns": 1,
+                "registeredScanners": ["static-scanner"],
+            },
+            "skills": {
+                "discovered": 1,
+                "breakdown": {"pass": 1},
+                "health": "healthy",
+            },
+        }
+    )
 
     assert list_scanners_result == {
         "command": "list-scanners",
@@ -297,6 +324,31 @@ def test_non_scan_commands_normalize_names_without_changing_business_meaning():
         "public_key_path": "/keys/pub",
         "private_key_path": "/keys/private",
         "encrypted": True,
+    }
+    assert status_result == {
+        "command": "status",
+        "keys": {
+            "initialized": True,
+            "fingerprint": "sha256:key",
+            "public_key_path": "/keys/pub",
+            "encrypted": False,
+            "keyring_size": 1,
+        },
+        "config": {
+            "config_path": "/config.json",
+            "customized": True,
+            "default_skill_dirs_enabled": False,
+            "default_skill_dir_patterns": 3,
+            "managed_skill_dir_patterns": 1,
+            "ignored_deprecated_skill_dir_patterns": 0,
+            "effective_skill_dir_patterns": 1,
+            "registered_scanners": ["static-scanner"],
+        },
+        "skills": {
+            "discovered": 1,
+            "breakdown": {"pass": 1},
+            "health": "healthy",
+        },
     }
 
 
