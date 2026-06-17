@@ -221,17 +221,14 @@ class JsonlDiagnosticLogger:
 
 
 class BaseDiagnosticLogging:
-    """Common setup and event-writing behavior for component diagnostic logs."""
+    """Common setup behavior for component diagnostic logs."""
 
     component = ""
     stream = ""
     level_env: str | None = None
     default_level = logging.WARNING
-    max_bytes = DEFAULT_MAX_BYTES
-    backup_count = DEFAULT_BACKUP_COUNT
 
     def __init__(self) -> None:
-        self._diagnostic_logger: JsonlDiagnosticLogger | None = None
         self._setup_done = False
 
     def resolve_config(
@@ -295,67 +292,15 @@ class BaseDiagnosticLogging:
             if config.enabled and config.log_file is not None:
                 self._setup_enabled(config)
         except Exception:  # noqa: BLE001 - diagnostic logging is best-effort
-            self._diagnostic_logger = None
+            pass
         finally:
             self._setup_done = True
 
     def _setup_enabled(self, config: DiagnosticLoggingConfig) -> None:
-        self._diagnostic_logger = self.create_jsonl_logger(
-            path=config.log_file,
-            level=config.level,
-        )
-
-    def create_jsonl_logger(
-        self,
-        path: str | Path,
-        *,
-        level: int,
-    ) -> JsonlDiagnosticLogger:
-        """Create the low-level JSONL logger for this component."""
-        return JsonlDiagnosticLogger(
-            path=path,
-            level=level,
-            max_bytes=self.max_bytes,
-            backup_count=self.backup_count,
-        )
-
-    def write_event(
-        self,
-        *,
-        level: int,
-        event: str,
-        message: str = "",
-        logger_name: str | None = None,
-        function: str | None = None,
-        invocation_id: str | None = None,
-        request_id: str | None = None,
-        trace_context: TraceContext | None = None,
-        correlation_overrides: Mapping[str, Any] | None = None,
-        data: Any = None,
-        exc_info: object = None,
-    ) -> None:
-        """Write one diagnostic event through the configured JSONL logger."""
-        if self._diagnostic_logger is None:
-            return
-
-        self._diagnostic_logger.write(
-            level=level,
-            component=self.component,
-            event=event,
-            message=message,
-            logger_name=logger_name,
-            function=function,
-            invocation_id=invocation_id,
-            request_id=request_id,
-            trace_context=trace_context,
-            correlation_overrides=correlation_overrides,
-            data=data,
-            exc_info=exc_info,
-        )
+        pass
 
     def reset_for_tests(self) -> None:
         """Reset in-process setup state for tests."""
-        self._diagnostic_logger = None
         self._setup_done = False
 
 
@@ -366,6 +311,8 @@ class PythonLogRecordDiagnosticLogging(BaseDiagnosticLogging):
     event = "python_log"
     propagate_on_enable: bool | None = None
     propagate_on_reset: bool | None = None
+    max_bytes = DEFAULT_MAX_BYTES
+    backup_count = DEFAULT_BACKUP_COUNT
 
     def __init__(self) -> None:
         super().__init__()
@@ -394,6 +341,20 @@ class PythonLogRecordDiagnosticLogging(BaseDiagnosticLogging):
             level=logging.NOTSET,
         )
         return DiagnosticLogRecordHandler(self, diagnostic_logger)
+
+    def create_jsonl_logger(
+        self,
+        path: str | Path,
+        *,
+        level: int,
+    ) -> JsonlDiagnosticLogger:
+        """Create the low-level JSONL logger for this component."""
+        return JsonlDiagnosticLogger(
+            path=path,
+            level=level,
+            max_bytes=self.max_bytes,
+            backup_count=self.backup_count,
+        )
 
     def write_log_record(
         self,
