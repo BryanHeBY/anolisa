@@ -96,6 +96,13 @@ _SECRET_FILE_NAMES = frozenset(
         "id_rsa",
     }
 )
+_ALLOWED_HIDDEN_FILE_PATHS = frozenset(
+    {
+        # OpenClaw ClawHub installs record per-skill origin metadata here.
+        (".clawhub", "origin.json"),
+        (".clawdhub", "origin.json"),
+    }
+)
 _NETWORK_HINT_RE = re.compile(
     r"\b(curl|wget)\b|\brequests\.(get|post|put|delete)\s*\(|\burllib\.request\b|"
     r"\bfetch\s*\(|https?://",
@@ -407,7 +414,7 @@ def _scan_path_metadata(
                     },
                 )
             )
-        else:
+        elif not _is_allowed_hidden_file_path(parts):
             findings.append(
                 _finding(
                     rule="hidden-file",
@@ -656,6 +663,10 @@ def _slash_comment_start(line: str) -> int:
 def _is_skipped(rel_path: Path) -> bool:
     """Return whether a relative path is under a skipped directory."""
     return any(part in _SKIP_DIRS for part in rel_path.parts)
+
+
+def _is_allowed_hidden_file_path(parts: tuple[str, ...]) -> bool:
+    return parts in _ALLOWED_HIDDEN_FILE_PATHS
 
 
 def _is_code_file(path: Path, text: str) -> bool:
