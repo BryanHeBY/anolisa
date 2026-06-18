@@ -176,9 +176,14 @@ class PiiScanCapability(AgentSecCoreCapability):
                     redacted_text = self._safe_string(scan.get("redacted_text"))
                     if redacted_text:
                         output_text = redacted_text
-                    logger.warning(
-                        f"[agent-sec-core] {self.id} {verdict.upper()} model output redacted"
-                    )
+                        logger.warning(
+                            f"[agent-sec-core] {self.id} {verdict.upper()} model output redacted"
+                        )
+                    else:
+                        output_text = ""
+                        logger.warning(
+                            f"[agent-sec-core] {self.id} {verdict.upper()} model output redaction missing redacted_text; dropping raw output"
+                        )
                 elif verdict not in {"pass", "warn", "deny"}:
                     logger.warning(
                         f"[agent-sec-core] {self.id} UNKNOWN model output verdict={verdict}, fail-open"

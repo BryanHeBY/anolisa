@@ -292,11 +292,12 @@ describe("pii-scan-user-input", () => {
   });
 
   it("invalid CLI JSON fails open", async () => {
-    const { beforeDispatch } = registerHandlers(enableBlockConfig(true));
+    const { beforeDispatch, logs } = registerHandlers(enableBlockConfig(true));
     mockCli({ exitCode: 0, stdout: "not-json", stderr: "" });
 
     const result = await beforeDispatch.handler({ content: "email alice@example.com" });
 
     assert.equal(result, undefined);
+    assert.ok(logs.some((log) => log.includes("CLI returned invalid JSON")));
   });
 });

@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -449,6 +449,40 @@ class TestPiiScanCapability:
             "--source",
             "model_output",
         ]
+
+    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_model_output_drops_raw_text_when_redaction_missing(
+        self, mock_cli: MagicMock, capability: PiiScanCapability
+    ) -> None:
+        """Model output findings without redacted_text must not expose raw text."""
+        mock_cli.return_value = CliResult(
+            stdout=json.dumps(
+                {
+                    "verdict": "warn",
+                    "findings": [
+                        {
+                            "type": "email",
+                            "severity": "warn",
+                            "evidence_redacted": "a***@example.com",
+                        }
+                    ],
+                    "redacted_text": "",
+                }
+            ),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = capability._on_transform_llm_output(
+            "Contact alice@example.com",
+            session_id="session-1",
+        )
+
+        assert result is not None
+        assert "[pii-checker]" in result
+        assert "a***@example.com" in result
+        assert "alice@example.com" not in result
+        assert "Contact " not in result
 
     @patch("src.capabilities.pii_scan.call_agent_sec_cli")
     def test_tool_input_warning_is_delivered_on_transform(self, mock_cli, capability):

@@ -159,10 +159,20 @@ async function scanPiiText(
     return undefined;
   }
 
-  const scanResult = JSON.parse(result.stdout) as {
-    verdict?: unknown;
-    findings?: unknown;
-  };
+  let scanResult: { verdict?: unknown; findings?: unknown };
+  try {
+    scanResult = JSON.parse(result.stdout) as {
+      verdict?: unknown;
+      findings?: unknown;
+    };
+  } catch (error) {
+    api.logger.warn(
+      `[pii-checker] CLI returned invalid JSON, failed open: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return undefined;
+  }
   return {
     verdict: safeString(scanResult.verdict) || "pass",
     findings: Array.isArray(scanResult.findings) ? scanResult.findings : [],
