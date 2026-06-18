@@ -18,6 +18,7 @@ RUNTIME_DIR ?= $(DATADIR)/anolisa/runtime
 RUNTIME_SKILLS_DIR ?= $(RUNTIME_DIR)/skills/ws-ckpt
 COSH_SKILLS_DIR ?= $(DATADIR)/anolisa/skills/ws-ckpt
 
+COMPONENT_DIR ?= $(DATADIR)/anolisa/components/ws-ckpt
 ADAPTER_DIR ?= $(DATADIR)/anolisa/adapters/ws-ckpt
 PLUGINS_DIR ?= $(RUNTIME_DIR)/ws-ckpt/plugins
 SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
@@ -41,17 +42,21 @@ else
 	install -d -m 0755 "$(DESTDIR)$(COSH_SKILLS_DIR)"
 	cp -pr src/skills/ws-ckpt/. "$(DESTDIR)$(RUNTIME_SKILLS_DIR)"
 	cp -pr src/skills/ws-ckpt/. "$(DESTDIR)$(COSH_SKILLS_DIR)"
+	install -d -m 0755 "$(DESTDIR)$(COMPONENT_DIR)"
+	install -p -m 0644 component.toml "$(DESTDIR)$(COMPONENT_DIR)/component.toml"
 	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)"
+	rm -rf "$(DESTDIR)$(ADAPTER_DIR)/scripts" 2>/dev/null || true
 	install -p -m 0644 adapter-manifest.json "$(DESTDIR)$(ADAPTER_DIR)/manifest.json"
-	install -p -m 0644 component.toml "$(DESTDIR)$(ADAPTER_DIR)/component.toml"
-	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/scripts"
-	install -p -m 0644 scripts/lib-discover.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
-	install -p -m 0755 scripts/detect-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
-	install -p -m 0755 scripts/install-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
-	install -p -m 0755 scripts/uninstall-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
-	install -p -m 0755 scripts/detect-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
-	install -p -m 0755 scripts/install-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
-	install -p -m 0755 scripts/uninstall-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/scripts/"
+	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/openclaw"
+	install -p -m 0644 scripts/openclaw/lib-discover.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
+	install -p -m 0755 scripts/openclaw/detect-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
+	install -p -m 0755 scripts/openclaw/install-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
+	install -p -m 0755 scripts/openclaw/uninstall-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
+	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/hermes"
+	install -p -m 0644 scripts/hermes/lib-discover.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/"
+	install -p -m 0755 scripts/hermes/detect-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/"
+	install -p -m 0755 scripts/hermes/install-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/"
+	install -p -m 0755 scripts/hermes/uninstall-hermes.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/"
 	install -d -m 0755 "$(DESTDIR)$(PLUGINS_DIR)/openclaw"
 	install -p -m 0644 src/plugins/openclaw/package.json "$(DESTDIR)$(PLUGINS_DIR)/openclaw/"
 	install -p -m 0644 src/plugins/openclaw/openclaw.plugin.json "$(DESTDIR)$(PLUGINS_DIR)/openclaw/"
@@ -95,6 +100,7 @@ else
 	rm -f "$(DESTDIR)$(BINDIR)/ws-ckpt"
 	rm -rf "$(DESTDIR)$(RUNTIME_SKILLS_DIR)"
 	rm -rf "$(DESTDIR)$(COSH_SKILLS_DIR)"
+	rm -rf "$(DESTDIR)$(COMPONENT_DIR)"
 	rm -rf "$(DESTDIR)$(ADAPTER_DIR)"
 	rm -rf "$(DESTDIR)$(PLUGINS_DIR)"
 	rm -f "$(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/ws-ckpt.service"

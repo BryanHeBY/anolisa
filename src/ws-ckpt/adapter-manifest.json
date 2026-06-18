@@ -15,9 +15,9 @@
         "hooks": []
       },
       "actions": {
-        "detect":    "scripts/detect-openclaw.sh",
-        "install":   "scripts/install-openclaw.sh",
-        "uninstall": "scripts/uninstall-openclaw.sh"
+        "detect":    "openclaw/detect-openclaw.sh",
+        "install":   "openclaw/install-openclaw.sh",
+        "uninstall": "openclaw/uninstall-openclaw.sh"
       }
     },
     "hermes": {
@@ -31,9 +31,9 @@
         "hooks": []
       },
       "actions": {
-        "detect":    "scripts/detect-hermes.sh",
-        "install":   "scripts/install-hermes.sh",
-        "uninstall": "scripts/uninstall-hermes.sh"
+        "detect":    "hermes/detect-hermes.sh",
+        "install":   "hermes/install-hermes.sh",
+        "uninstall": "hermes/uninstall-hermes.sh"
       }
     }
   },

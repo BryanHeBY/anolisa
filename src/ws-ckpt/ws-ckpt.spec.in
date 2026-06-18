@@ -51,8 +51,10 @@ install -d -m 0755 %{buildroot}/etc/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/openclaw
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/ws-ckpt
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes
 
 install -p -m 0755 src/target/release/ws-ckpt %{buildroot}%{_localbindir}/ws-ckpt
 install -p -m 0644 src/systemd/ws-ckpt.service %{buildroot}%{_unitdir}/ws-ckpt.service
@@ -67,14 +69,15 @@ find %{buildroot}%{_datadir}/anolisa/runtime/ws-ckpt/plugins/hermes \
        -o -type f -name '*.pyc' -o -type f -name '.coverage' \) \
     -exec rm -rf {} +
 install -p -m 0644 adapter-manifest.json %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/manifest.json
-install -p -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/component.toml
-install -p -m 0644 scripts/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
-install -p -m 0755 scripts/detect-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
-install -p -m 0755 scripts/install-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
-install -p -m 0755 scripts/uninstall-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
-install -p -m 0755 scripts/detect-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
-install -p -m 0755 scripts/install-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
-install -p -m 0755 scripts/uninstall-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/scripts/
+install -p -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/ws-ckpt/component.toml
+install -p -m 0644 scripts/openclaw/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0755 scripts/openclaw/detect-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0755 scripts/openclaw/install-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0755 scripts/openclaw/uninstall-openclaw.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/openclaw/
+install -p -m 0644 scripts/hermes/lib-discover.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes/
+install -p -m 0755 scripts/hermes/detect-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes/
+install -p -m 0755 scripts/hermes/install-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes/
+install -p -m 0755 scripts/hermes/uninstall-hermes.sh %{buildroot}%{_datadir}/anolisa/adapters/ws-ckpt/hermes/
 
 %files
 %license LICENSE
@@ -87,6 +90,7 @@ install -p -m 0755 scripts/uninstall-hermes.sh %{buildroot}%{_datadir}/anolisa/a
 %dir %{_datadir}/anolisa/runtime/skills
 %{_datadir}/anolisa/runtime/skills/ws-ckpt/
 %{_datadir}/anolisa/runtime/ws-ckpt/
+%{_datadir}/anolisa/components/ws-ckpt/
 %{_datadir}/anolisa/adapters/ws-ckpt/
 
 %post
@@ -96,6 +100,8 @@ if [ $1 -ge 2 ]; then
        rpm -qf %{_bindir}/ws-ckpt 2>/dev/null | grep -q '^ws-ckpt-[0-9]'; then
         rm -f %{_bindir}/ws-ckpt
     fi
+    # Upgrade: remove pre-0.3.4 flat scripts/ layout (now per-framework)
+    rm -rf %{_datadir}/anolisa/adapters/ws-ckpt/scripts 2>/dev/null || true
 fi
 systemctl daemon-reload
 systemctl enable ws-ckpt.service
