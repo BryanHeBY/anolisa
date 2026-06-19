@@ -63,6 +63,7 @@ class TestRequestContext(unittest.TestCase):
                 run_id="run-1",
                 call_id="call-1",
                 tool_call_id="tool-1",
+                agent_name="hermes",
             )
         )
 
@@ -73,6 +74,7 @@ class TestRequestContext(unittest.TestCase):
         self.assertEqual(ctx.run_id, "run-1")
         self.assertEqual(ctx.call_id, "call-1")
         self.assertEqual(ctx.tool_call_id, "tool-1")
+        self.assertEqual(ctx.agent_name, "hermes")
 
     def test_generates_trace_id_when_caller_does_not_supply_one(self):
         init_process_trace_context(TraceContext(session_id="session-1"))
@@ -83,7 +85,9 @@ class TestRequestContext(unittest.TestCase):
         self.assertEqual(ctx.session_id, "session-1")
 
     def test_explicit_tracing_fields_are_preserved(self):
-        init_process_trace_context(TraceContext(session_id="process-session"))
+        init_process_trace_context(
+            TraceContext(session_id="process-session", agent_name="process-agent")
+        )
 
         ctx = RequestContext(
             action="code_scan",
@@ -92,6 +96,7 @@ class TestRequestContext(unittest.TestCase):
             run_id="explicit-run",
             call_id="explicit-call",
             tool_call_id="explicit-tool",
+            agent_name="explicit-agent",
         )
 
         self.assertEqual(ctx.trace_id, "explicit-trace")
@@ -99,6 +104,7 @@ class TestRequestContext(unittest.TestCase):
         self.assertEqual(ctx.run_id, "explicit-run")
         self.assertEqual(ctx.call_id, "explicit-call")
         self.assertEqual(ctx.tool_call_id, "explicit-tool")
+        self.assertEqual(ctx.agent_name, "explicit-agent")
 
     def test_invocation_id_comes_from_process_context(self):
         init_invocation_context()

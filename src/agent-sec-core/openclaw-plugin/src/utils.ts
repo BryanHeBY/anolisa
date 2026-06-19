@@ -16,6 +16,7 @@ export type CliCallOptions = {
 };
 
 export type TraceContext = {
+  agent_name?: string;
   trace_id?: string;
   session_id?: string;
   run_id?: string;
@@ -62,11 +63,11 @@ function traceValue(record: UnknownRecord | undefined, keys: string[]): string |
   return undefined;
 }
 
-export function buildTraceContext(event: unknown, ctx: unknown): TraceContext | undefined {
+export function buildTraceContext(event: unknown, ctx: unknown): TraceContext {
   const eventRecord = asRecord(event);
   const ctxRecord = asRecord(ctx);
   const sources = [eventRecord, ctxRecord];
-  const traceContext: TraceContext = {};
+  const traceContext: TraceContext = { agent_name: "openclaw" };
 
   for (const spec of TRACE_FIELD_SPECS) {
     for (const source of sources) {
@@ -78,7 +79,7 @@ export function buildTraceContext(event: unknown, ctx: unknown): TraceContext | 
     }
   }
 
-  return Object.keys(traceContext).length > 0 ? traceContext : undefined;
+  return traceContext;
 }
 
 // ---------------------------------------------------------------------------

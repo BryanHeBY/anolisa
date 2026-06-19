@@ -145,8 +145,15 @@ class TestCoshHookMain:
             json.dumps({"prompt": "Phone: 13800138000"}),
         )
 
+        expected_context = json.dumps(
+            {"agent_name": "cosh"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         assert captured["args"] == [
             "agent-sec-cli",
+            "--trace-context",
+            expected_context,
             "scan-pii",
             "--stdin",
             "--format",
@@ -192,6 +199,7 @@ class TestCoshHookMain:
 
         expected_context = json.dumps(
             {
+                "agent_name": "cosh",
                 "trace_id": "trace-1",
                 "session_id": "session-1",
                 "run_id": "run-1",
@@ -284,8 +292,15 @@ class TestCoshHookMain:
 
         output = self._run_main(monkeypatch, capsys, json.dumps(payload))
 
+        expected_context = json.dumps(
+            {"agent_name": "cosh"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         assert captured["args"] == [
             "agent-sec-cli",
+            "--trace-context",
+            expected_context,
             "scan-pii",
             "--stdin",
             "--format",

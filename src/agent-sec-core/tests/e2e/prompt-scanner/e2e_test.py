@@ -235,6 +235,44 @@ def _wait_for_security_event(trace_context: dict[str, str]) -> dict:
     )
 
 
+def _read_telemetry_payloads(path: Path) -> list[dict]:
+    """Read telemetry JSONL payloads from an e2e-owned file."""
+    if not path.exists():
+        return []
+
+    payloads = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _wait_for_telemetry_record(
+    path: Path,
+    *,
+    trace_id: str,
+    event_type: str,
+) -> dict:
+    """Return a telemetry record matching the trace id and event type."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        for payload in _read_telemetry_payloads(path):
+            if (
+                payload.get("seccore.trace_id") == trace_id
+                and payload.get("seccore.event_type") == event_type
+            ):
+                return payload
+        time.sleep(0.1)
+    raise AssertionError(
+        f"telemetry record not written for trace_id={trace_id!r} "
+        f"event_type={event_type!r}; payloads={_read_telemetry_payloads(path)!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # A. Basic functionality
 # ---------------------------------------------------------------------------
@@ -320,6 +358,43 @@ class TestTraceContextPropagation:
         event = _wait_for_security_event(trace_context)
         assert event["event_type"] == "prompt_scan"
         assert event["category"] == "prompt_scan"
+
+    def test_daemon_path_writes_prompt_scan_telemetry(
+        self,
+        prompt_scan_execution_path,
+    ) -> None:
+        if prompt_scan_execution_path.execution_path != "daemon":
+            pytest.skip("daemon telemetry assertion runs on the daemon-backed path")
+
+        trace_id = f"e2e-daemon-telemetry-{time.time_ns()}"
+        trace_context = {
+            "trace_id": trace_id,
+            "agent_name": "cosh",
+        }
+
+        proc = _run_scan(
+            "Hello daemon telemetry",
+            mode="fast",
+            fmt="json",
+            top_level_args=["--trace-context", json.dumps(trace_context)],
+            extra_args=["--source", "e2e_daemon_telemetry"],
+        )
+        result = _parse_result(proc)
+        assert result["verdict"] == "pass"
+
+        telemetry = _wait_for_telemetry_record(
+            prompt_scan_execution_path.telemetry_path,
+            trace_id=trace_id,
+            event_type="prompt_scan",
+        )
+        assert telemetry["component.name"] == "agent-sec-core"
+        assert telemetry["component.agent_name"] == "cosh"
+        assert telemetry["seccore.category"] == "prompt_scan"
+        assert telemetry["seccore.request"] == {
+            "text": "Hello daemon telemetry",
+            "mode": "fast",
+            "source": "e2e_daemon_telemetry",
+        }
 
 
 # ---------------------------------------------------------------------------

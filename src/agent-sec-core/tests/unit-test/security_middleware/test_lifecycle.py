@@ -137,6 +137,21 @@ class TestPostAction(unittest.TestCase):
         event = mock_log.call_args[0][0]
         self.mock_telemetry.assert_called_once_with(event)
 
+    def test_post_action_passes_agent_name_to_telemetry(self):
+        ctx = RequestContext(
+            action="code_scan",
+            trace_id="trace-telemetry",
+            agent_name="hermes",
+        )
+        result = ActionResult(success=True, data={"verdict": "pass"})
+
+        with patch("agent_sec_cli.security_middleware.lifecycle.log_event") as mock_log:
+            post_action(ctx, result, {"code": "echo ok"}, DummyBackend())
+
+        event = mock_log.call_args[0][0]
+        # agent_name is read from ambient context, not passed explicitly
+        self.mock_telemetry.assert_called_once_with(event)
+
     def test_post_action_swallows_telemetry_failure(self):
         ctx = RequestContext(action="code_scan", trace_id="trace-telemetry-fail")
         result = ActionResult(success=True, data={"verdict": "pass"})
@@ -260,6 +275,21 @@ class TestOnError(unittest.TestCase):
             on_error(ctx, exc, {"skill": "/path"}, DummyBackend())
 
         event = mock_log.call_args[0][0]
+        self.mock_telemetry.assert_called_once_with(event)
+
+    def test_on_error_passes_agent_name_to_telemetry(self):
+        ctx = RequestContext(
+            action="verify",
+            trace_id="trace-error-telemetry",
+            agent_name="cosh",
+        )
+        exc = RuntimeError("boom")
+
+        with patch("agent_sec_cli.security_middleware.lifecycle.log_event") as mock_log:
+            on_error(ctx, exc, {"skill": "/path"}, DummyBackend())
+
+        event = mock_log.call_args[0][0]
+        # agent_name is read from ambient context, not passed explicitly
         self.mock_telemetry.assert_called_once_with(event)
 
     def test_on_error_swallows_telemetry_failure(self):

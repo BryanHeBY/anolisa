@@ -124,7 +124,11 @@ describe("pii-scan-user-input", () => {
 
     await beforeDispatch.handler({ content: "hello", body: "fallback" });
 
-    assert.deepEqual(lastCliArgs, [
+    assert.deepEqual(lastCliArgs?.slice(0, 2), [
+      "--trace-context",
+      JSON.stringify({ agent_name: "openclaw" }),
+    ]);
+    assert.deepEqual(lastCliArgs?.slice(2), [
       "scan-pii",
       "--stdin",
       "--format",
@@ -227,7 +231,11 @@ describe("pii-scan-user-input", () => {
     assert.doesNotMatch(result?.blockReason, /password=secret/);
     assert.deepEqual(lastCliArgs, [
       "--trace-context",
-      '{"session_id":"session-1","tool_call_id":"tool-1"}',
+      JSON.stringify({
+        agent_name: "openclaw",
+        session_id: "session-1",
+        tool_call_id: "tool-1",
+      }),
       "scan-pii",
       "--stdin",
       "--format",

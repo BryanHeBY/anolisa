@@ -1,5 +1,5 @@
 import type { SecurityCapability } from "../types.js";
-import { callAgentSecCli } from "../utils.js";
+import { buildTraceContext, callAgentSecCli } from "../utils.js";
 
 /**
  * 用户输入 Prompt 注入 / 越狱检测。
@@ -21,7 +21,7 @@ export const promptScan: SecurityCapability = {
   hooks: ["before_dispatch"],
   register(api) {
     const cfg = (api.pluginConfig as Record<string, any>) ?? {};
-    api.on("before_dispatch", async (event: any) => {
+    api.on("before_dispatch", async (event: any, ctx: any) => {
       try {
         const text = String(event.content ?? event.body ?? "");
         if (!text.trim()) {
@@ -30,7 +30,7 @@ export const promptScan: SecurityCapability = {
 
         const result = await callAgentSecCli(
           ["scan-prompt", "--text", text, "--mode", "standard", "--format", "json", "--source", "user_input"],
-          { timeout: 10000 },
+          { timeout: 10000, traceContext: buildTraceContext(event, ctx) },
         );
 
         if (result.exitCode !== 0) {

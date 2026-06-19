@@ -17,12 +17,13 @@ from agent_sec_cli.correlation_context import (
     parse_trace_context_payload,
     reset_current_trace_context,
     set_current_trace_context,
+    trace_context_to_payload,
 )
 
 
 def test_parse_trace_context_accepts_snake_case_json():
     ctx = parse_trace_context(
-        '{"trace_id":"trace-1","session_id":"session-1","run_id":"run-1","call_id":"call-1","tool_call_id":"tool-1"}'
+        '{"trace_id":"trace-1","session_id":"session-1","run_id":"run-1","call_id":"call-1","tool_call_id":"tool-1","agent_name":"hermes"}'
     )
 
     assert ctx == TraceContext(
@@ -31,12 +32,13 @@ def test_parse_trace_context_accepts_snake_case_json():
         run_id="run-1",
         call_id="call-1",
         tool_call_id="tool-1",
+        agent_name="hermes",
     )
 
 
 def test_parse_trace_context_accepts_camel_case_json():
     ctx = parse_trace_context(
-        '{"traceId":"trace-1","sessionId":"session-1","runId":"run-1","callId":"call-1","toolCallId":"tool-1"}'
+        '{"traceId":"trace-1","sessionId":"session-1","runId":"run-1","callId":"call-1","toolCallId":"tool-1","agentName":"openclaw"}'
     )
 
     assert ctx == TraceContext(
@@ -45,21 +47,23 @@ def test_parse_trace_context_accepts_camel_case_json():
         run_id="run-1",
         call_id="call-1",
         tool_call_id="tool-1",
+        agent_name="openclaw",
     )
 
 
 def test_parse_trace_context_prefers_snake_case_when_both_are_present():
     ctx = parse_trace_context(
-        '{"sessionId":"camel-session","session_id":"snake-session","runId":"camel-run","run_id":"snake-run"}'
+        '{"sessionId":"camel-session","session_id":"snake-session","runId":"camel-run","run_id":"snake-run","agentName":"camel-agent","agent_name":"snake-agent"}'
     )
 
     assert ctx.session_id == "snake-session"
     assert ctx.run_id == "snake-run"
+    assert ctx.agent_name == "snake-agent"
 
 
 def test_parse_trace_context_ignores_unknown_empty_and_non_string_values():
     ctx = parse_trace_context(
-        '{"session_id":"","run_id":42,"call_id":"call-1","unknown":"ignored"}'
+        '{"session_id":"","run_id":42,"call_id":"call-1","agent_name":false,"agentName":"","unknown":"ignored"}'
     )
 
     assert ctx == TraceContext(call_id="call-1")
@@ -67,10 +71,10 @@ def test_parse_trace_context_ignores_unknown_empty_and_non_string_values():
 
 def test_parse_trace_context_ignores_whitespace_only_values_and_strips_values():
     ctx = parse_trace_context(
-        '{"session_id":"   ","run_id":" run-1 ","call_id":"call-1"}'
+        '{"session_id":"   ","run_id":" run-1 ","call_id":"call-1","agent_name":" hermes "}'
     )
 
-    assert ctx == TraceContext(run_id="run-1", call_id="call-1")
+    assert ctx == TraceContext(run_id="run-1", call_id="call-1", agent_name="hermes")
 
 
 def test_parse_trace_context_truncates_long_values_with_suffix():
@@ -132,6 +136,7 @@ def test_parse_trace_context_payload_accepts_structured_mapping():
             "session_id": "session-1",
             "run_id": " run-1 ",
             "toolCallId": "tool-1",
+            "agentName": "cosh",
             "ignored": "value",
         }
     )
@@ -141,7 +146,22 @@ def test_parse_trace_context_payload_accepts_structured_mapping():
         session_id="session-1",
         run_id="run-1",
         tool_call_id="tool-1",
+        agent_name="cosh",
     )
+
+
+def test_trace_context_to_payload_emits_agent_name() -> None:
+    assert trace_context_to_payload(
+        TraceContext(
+            trace_id="trace-1",
+            session_id="session-1",
+            agent_name=" hermes ",
+        )
+    ) == {
+        "trace_id": "trace-1",
+        "session_id": "session-1",
+        "agent_name": "hermes",
+    }
 
 
 def test_process_trace_context_is_visible_from_worker_threads():

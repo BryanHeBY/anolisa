@@ -119,8 +119,14 @@ def test_trace_context_normalizes_camelcase_and_strips_whitespace():
             "runId": "",
             "callId": "  ",
             "toolUseId": "u1",
+            "agentName": "spoofed",
         }
-    ) == {"trace_id": "t1", "session_id": "s1", "tool_call_id": "u1"}
+    ) == {
+        "agent_name": "hermes",
+        "trace_id": "t1",
+        "session_id": "s1",
+        "tool_call_id": "u1",
+    }
 
 
 def test_trace_context_uses_first_non_empty_alias():
@@ -132,9 +138,10 @@ def test_trace_context_uses_first_non_empty_alias():
             "toolCallId": "  ",
             "tool_use_id": " u1 ",
             "toolUseId": "u2",
+            "agent_name": "spoofed",
         }
-    ) == {"call_id": "c1", "tool_call_id": "u1"}
+    ) == {"agent_name": "hermes", "call_id": "c1", "tool_call_id": "u1"}
 
 
-def test_trace_context_returns_none_when_all_fields_missing():
-    assert trace_context({"foo": "bar"}) is None
+def test_trace_context_returns_fixed_agent_name_when_all_fields_missing():
+    assert trace_context({"foo": "bar"}) == {"agent_name": "hermes"}

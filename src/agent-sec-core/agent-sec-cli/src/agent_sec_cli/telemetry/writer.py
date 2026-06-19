@@ -35,6 +35,32 @@ def _log_telemetry_write_failure(exc: Exception) -> None:
         pass
 
 
+def _log_telemetry_write_skipped(
+    record: Mapping[str, Any],
+    *,
+    reason: str,
+    path: Path,
+) -> None:
+    """Best-effort diagnostic logging for intentionally skipped telemetry writes."""
+    try:
+        _logger.warning(
+            "telemetry JSONL write skipped",
+            extra={
+                "data": {
+                    "reason": reason,
+                    "path": str(path),
+                    "event_id": record.get("seccore.event_id")
+                    or record.get("baseline.event_id"),
+                    "event_type": record.get("seccore.event_type"),
+                    "category": record.get("seccore.category"),
+                    "agent_name": record.get("component.agent_name"),
+                }
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class TelemetryWriter:
     """Append telemetry records to an existing JSONL file.
 
@@ -73,7 +99,11 @@ class TelemetryWriter:
         except FileNotFoundError:
             pass
         except BlockingIOError:
-            pass
+            _log_telemetry_write_skipped(
+                record,
+                reason="target_flock_busy",
+                path=self._path,
+            )
         except Exception as exc:  # noqa: BLE001
             _log_telemetry_write_failure(exc)
         finally:

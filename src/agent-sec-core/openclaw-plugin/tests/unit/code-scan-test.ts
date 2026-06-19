@@ -109,7 +109,11 @@ describe("scan-code", () => {
 
       await handler(execEvent("rm -rf /"), {});
 
-      assert.deepEqual(lastCliArgs, ["scan-code", "--code", "rm -rf /", "--language", "bash"]);
+      assert.deepEqual(lastCliArgs?.slice(0, 2), [
+        "--trace-context",
+        JSON.stringify({ agent_name: "openclaw" }),
+      ]);
+      assert.deepEqual(lastCliArgs?.slice(2), ["scan-code", "--code", "rm -rf /", "--language", "bash"]);
       assert.equal(lastCliOpts?.timeout, 10000);
     });
 
@@ -131,6 +135,7 @@ describe("scan-code", () => {
       assert.deepEqual(lastCliArgs?.slice(0, 2), [
         "--trace-context",
         JSON.stringify({
+          agent_name: "openclaw",
           session_id: "session-1",
           run_id: "run-1",
           tool_call_id: "tool-1",
@@ -185,7 +190,11 @@ describe("scan-code", () => {
 
       await handler(execEvent('echo "hello world"'), {});
 
-      assert.deepEqual(lastCliArgs, ["scan-code", "--code", 'echo "hello world"', "--language", "bash"]);
+      assert.deepEqual(lastCliArgs?.slice(0, 2), [
+        "--trace-context",
+        JSON.stringify({ agent_name: "openclaw" }),
+      ]);
+      assert.deepEqual(lastCliArgs?.slice(2), ["scan-code", "--code", 'echo "hello world"', "--language", "bash"]);
     });
   });
 

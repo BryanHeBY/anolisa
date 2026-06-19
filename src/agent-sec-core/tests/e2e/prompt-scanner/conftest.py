@@ -15,6 +15,7 @@ from typing import Any, TextIO
 
 import pytest
 from agent_sec_cli.daemon.env import DAEMON_DISABLED_ENV, SOCKET_ENV
+from agent_sec_cli.telemetry.config import TELEMETRY_LOG_PATH_ENV
 
 DATA_DIR_ENV = "AGENT_SEC_DATA_DIR"
 PROMPT_PRELOAD_ENV = "AGENT_SEC_DAEMON_PROMPT_PRELOAD"
@@ -45,6 +46,7 @@ class PromptScanExecutionContext:
     execution_path: str
     socket_path: Path
     data_dir: Path
+    telemetry_path: Path
 
 
 def _resolve_daemon_command() -> list[str]:
@@ -84,18 +86,27 @@ def prompt_scan_execution_path(
     tmp_path = tmp_path_factory.mktemp(f"prompt_scan_{execution_path}")
     socket_path = tmp_path / "runtime" / "daemon.sock"
     data_dir = tmp_path / "data"
+    telemetry_path = data_dir / "telemetry.jsonl"
+    telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+    telemetry_path.write_text("", encoding="utf-8")
 
     saved_env = {
         SOCKET_ENV: os.environ.get(SOCKET_ENV),
         DAEMON_DISABLED_ENV: os.environ.get(DAEMON_DISABLED_ENV),
         DATA_DIR_ENV: os.environ.get(DATA_DIR_ENV),
+        TELEMETRY_LOG_PATH_ENV: os.environ.get(TELEMETRY_LOG_PATH_ENV),
     }
 
     daemon: DaemonProcess | None = None
     output: DaemonOutput | None = None
     try:
         if execution_path == "daemon":
-            daemon = _start_daemon(_resolve_daemon_command(), socket_path, data_dir)
+            daemon = _start_daemon(
+                _resolve_daemon_command(),
+                socket_path,
+                data_dir,
+                telemetry_path,
+            )
             _wait_for_prompt_scan_ready(socket_path, daemon)
             os.environ[SOCKET_ENV] = str(socket_path)
             os.environ.pop(DAEMON_DISABLED_ENV, None)
@@ -107,10 +118,12 @@ def prompt_scan_execution_path(
             os.environ[DAEMON_DISABLED_ENV] = "1"
 
         os.environ[DATA_DIR_ENV] = str(data_dir)
+        os.environ[TELEMETRY_LOG_PATH_ENV] = str(telemetry_path)
         yield PromptScanExecutionContext(
             execution_path=execution_path,
             socket_path=socket_path,
             data_dir=data_dir,
+            telemetry_path=telemetry_path,
         )
     finally:
         if daemon is not None:
@@ -129,11 +142,13 @@ def _start_daemon(
     daemon_command: list[str],
     socket_path: Path,
     data_dir: Path,
+    telemetry_path: Path,
 ) -> DaemonProcess:
     env = os.environ.copy()
     env.pop(SOCKET_ENV, None)
     env.pop(DAEMON_DISABLED_ENV, None)
     env[DATA_DIR_ENV] = str(data_dir)
+    env[TELEMETRY_LOG_PATH_ENV] = str(telemetry_path)
     env[PROMPT_PRELOAD_ENV] = "1"
     env["PYTHONUNBUFFERED"] = "1"
 

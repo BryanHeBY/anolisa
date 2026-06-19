@@ -83,6 +83,17 @@ class TestSecurityEventToDict(unittest.TestCase):
             "details",
         }
         self.assertEqual(set(d.keys()), expected_keys)
+        self.assertNotIn("agent_name", d)
+
+    def test_to_dict_omits_agent_name_extra_field(self):
+        evt = SecurityEvent(
+            event_type="t",
+            category="c",
+            details={"a": 1},
+            agent_name="hermes",
+        )
+
+        self.assertNotIn("agent_name", evt.to_dict())
 
     def test_to_dict_includes_top_level_tracing_fields(self):
         evt = SecurityEvent(

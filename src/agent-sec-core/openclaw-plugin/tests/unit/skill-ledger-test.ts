@@ -243,6 +243,7 @@ describe("skill-ledger", () => {
       assert.equal(
         lastInitArgs?.[1],
         JSON.stringify({
+          agent_name: "openclaw",
           session_id: "session-1",
           run_id: "run-1",
           tool_call_id: "tool-1",
@@ -327,6 +328,7 @@ describe("skill-ledger", () => {
     assert.equal(
       lastCheckArgs?.[1],
       JSON.stringify({
+        agent_name: "openclaw",
         session_id: "session-1",
         run_id: "run-1",
         tool_call_id: "tool-1",

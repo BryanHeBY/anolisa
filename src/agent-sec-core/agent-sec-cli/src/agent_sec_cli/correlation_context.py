@@ -18,6 +18,7 @@ _FIELD_ALIASES: dict[str, tuple[str, str]] = {
     "run_id": ("run_id", "runId"),
     "call_id": ("call_id", "callId"),
     "tool_call_id": ("tool_call_id", "toolCallId"),
+    "agent_name": ("agent_name", "agentName"),
 }
 CORRELATION_FIELD_NAMES: tuple[str, ...] = tuple(_FIELD_ALIASES)
 
@@ -40,6 +41,7 @@ class TraceContext:
     run_id: str | None = None
     call_id: str | None = None
     tool_call_id: str | None = None
+    agent_name: str | None = None
 
 
 # ---------------------------------------------------------------------------

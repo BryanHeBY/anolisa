@@ -58,6 +58,7 @@ def test_sandbox_guard_log_injects_trace_context_into_logging_command(monkeypatc
 
     expected_context = json.dumps(
         {
+            "agent_name": "cosh",
             "session_id": "session-1",
             "run_id": "run-1",
             "tool_call_id": "tool-1",

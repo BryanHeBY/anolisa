@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from agent_sec_cli import __version__
+from agent_sec_cli.correlation_context import get_current_trace_context
 
 COMPONENT_NAME = "agent-sec-core"
 COMPONENT_AGENT_NAME = ""
@@ -25,9 +26,19 @@ def telemetry_log_path_exists() -> bool:
 
 
 def get_component_fields() -> dict[str, str]:
-    """Return fixed Agentic OS component fields for telemetry records."""
+    """Return fixed Agentic OS component fields for telemetry records.
+
+    ``component.agent_name`` is read from the ambient trace context
+    (process-level or request-local ContextVar).  Falls back to the
+    build-time default when no trace context is active.
+    """
+    trace_ctx = get_current_trace_context()
+    raw_agent_name = trace_ctx.agent_name if trace_ctx else None
+    component_agent_name = (
+        raw_agent_name.strip() if raw_agent_name else COMPONENT_AGENT_NAME
+    )
     return {
         "component.name": COMPONENT_NAME,
         "component.version": __version__,
-        "component.agent_name": COMPONENT_AGENT_NAME,
+        "component.agent_name": component_agent_name,
     }

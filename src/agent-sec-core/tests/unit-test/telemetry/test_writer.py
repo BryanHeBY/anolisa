@@ -1,6 +1,7 @@
 """Unit tests for telemetry writer."""
 
 import json
+import logging
 import subprocess
 import sys
 import threading
@@ -9,6 +10,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import agent_sec_cli.telemetry as telemetry
+from agent_sec_cli.correlation_context import (
+    TraceContext,
+    clear_process_trace_context,
+    init_process_trace_context,
+)
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.telemetry import writer as telemetry_writer
 from agent_sec_cli.telemetry.writer import (
@@ -136,12 +142,15 @@ def test_writer_uses_short_lived_flock_on_target_fd(
     assert not Path(f"{path}.lock").exists()
 
 
-def test_writer_skips_when_target_flock_is_busy(monkeypatch, tmp_path: Path) -> None:
+def test_writer_skips_and_logs_when_target_flock_is_busy(
+    monkeypatch, tmp_path: Path, caplog
+) -> None:
     path = tmp_path / "agent-sec-core.jsonl"
     path.write_text("", encoding="utf-8")
     writer = TelemetryWriter(path=path)
     log_failure = MagicMock()
     monkeypatch.setattr(telemetry_writer, "_log_telemetry_write_failure", log_failure)
+    caplog.set_level(logging.WARNING, logger="agent_sec_cli.telemetry.writer")
 
     def busy_flock(fd: int, operation: int) -> None:
         if operation & telemetry_writer.fcntl.LOCK_EX:
@@ -149,10 +158,28 @@ def test_writer_skips_when_target_flock_is_busy(monkeypatch, tmp_path: Path) -> 
 
     monkeypatch.setattr(telemetry_writer.fcntl, "flock", busy_flock)
 
-    writer.write({"seq": 1})
+    writer.write(
+        {
+            "component.agent_name": "cosh",
+            "seccore.event_id": "event-1",
+            "seccore.event_type": "code_scan",
+            "seccore.category": "code_scan",
+        }
+    )
 
     assert path.read_text(encoding="utf-8") == ""
     log_failure.assert_not_called()
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.message == "telemetry JSONL write skipped"
+    assert record.data == {
+        "reason": "target_flock_busy",
+        "path": str(path),
+        "event_id": "event-1",
+        "event_type": "code_scan",
+        "category": "code_scan",
+        "agent_name": "cosh",
+    }
 
 
 def test_writer_skips_when_process_lock_is_busy(tmp_path: Path) -> None:
@@ -221,6 +248,26 @@ def test_record_security_event_telemetry_uses_mapping_and_writer(
     assert record["component.name"] == "agent-sec-core"
     assert record["seccore.event_id"] == "event-1"
     assert record["seccore.verdict"] == "deny"
+    assert record["component.agent_name"] == ""
+
+
+def test_record_security_event_telemetry_writes_runtime_agent_name(
+    monkeypatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "agent-sec-core.jsonl"
+    path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AGENT_SEC_TELEMETRY_LOG_PATH", str(path))
+    monkeypatch.setattr(telemetry_writer, "_writer", None)
+
+    clear_process_trace_context()
+    init_process_trace_context(TraceContext(agent_name="hermes"))
+    try:
+        record_security_event_telemetry(_event())
+    finally:
+        clear_process_trace_context()
+
+    record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert record["component.agent_name"] == "hermes"
 
 
 def test_record_security_event_telemetry_skips_mapping_when_target_missing(

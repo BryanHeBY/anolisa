@@ -665,6 +665,7 @@ class TestCoshHook:
         output = json.loads(capsys.readouterr().out)
         expected_context = json.dumps(
             {
+                "agent_name": "cosh",
                 "session_id": "session-1",
                 "run_id": "run-1",
                 "tool_call_id": "tool-1",

@@ -20,9 +20,13 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import time
+import uuid
 from typing import List, Tuple
 
 import pytest
+
+TELEMETRY_LOG_PATH_ENV = "AGENT_SEC_TELEMETRY_LOG_PATH"
 
 # Ensure the testdata package under unit-test/code_scanner is importable.
 _TESTDATA_DIR = (
@@ -41,15 +45,31 @@ _CLI_BIN = shutil.which("agent-sec-cli")
 _CLI_MODE = "binary" if _CLI_BIN else "python -m"
 
 
-def _run_scan(code: str, language: str = "bash") -> subprocess.CompletedProcess:
+def _run_scan(
+    code: str,
+    language: str = "bash",
+    *,
+    top_level_args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     """Run ``agent-sec-cli scan-code`` and return CompletedProcess."""
+    top_level = [] if top_level_args is None else top_level_args
     if _CLI_BIN:
-        cmd = [_CLI_BIN, "scan-code", "--code", code, "--language", language]
+        cmd = [
+            _CLI_BIN,
+            *top_level,
+            "scan-code",
+            "--code",
+            code,
+            "--language",
+            language,
+        ]
     else:
         cmd = [
             sys.executable,
             "-m",
             "agent_sec_cli.cli",
+            *top_level,
             "scan-code",
             "--code",
             code,
@@ -61,7 +81,7 @@ def _run_scan(code: str, language: str = "bash") -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=30,
-        env=os.environ.copy(),
+        env=os.environ.copy() if env is None else env,
     )
     print(f"\n[CLI mode={_CLI_MODE}] cmd={' '.join(cmd)}")
     print(f"[exit={proc.returncode}] stdout={proc.stdout[:200]}")
@@ -84,6 +104,41 @@ def _make_parametrize_id(tc: tuple) -> str:
     label = "TP" if expected else "TN"
     snippet = code[:30].replace("\n", "\\n")
     return f"{rule_id}-{label}-{snippet}"
+
+
+def _read_jsonl(path: pathlib.Path) -> list[dict]:
+    """Read JSONL payloads, ignoring malformed diagnostic lines."""
+    payloads = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _wait_for_telemetry_record(
+    path: pathlib.Path,
+    *,
+    trace_id: str,
+    event_type: str,
+) -> dict:
+    """Return a telemetry record matching the trace id and event type."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        for payload in _read_jsonl(path):
+            if (
+                payload.get("seccore.trace_id") == trace_id
+                and payload.get("seccore.event_type") == event_type
+            ):
+                return payload
+        time.sleep(0.1)
+    raise AssertionError(
+        f"telemetry record not written for trace_id={trace_id!r} "
+        f"event_type={event_type!r}; payloads={_read_jsonl(path)!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +168,39 @@ class TestBasicScan:
         result = _parse_result(_run_scan("rm -rf /tmp/test"))
         assert result["verdict"] in ("warn", "deny")
         assert len(result["findings"]) > 0
+
+    def test_scan_code_cli_writes_telemetry(self, tmp_path: pathlib.Path) -> None:
+        telemetry_path = tmp_path / "agent-sec-core.jsonl"
+        telemetry_path.write_text("", encoding="utf-8")
+        trace_id = f"e2e-code-telemetry-{uuid.uuid4()}"
+        trace_context = {
+            "trace_id": trace_id,
+            "agent_name": "cosh",
+        }
+        env = os.environ.copy()
+        env[TELEMETRY_LOG_PATH_ENV] = str(telemetry_path)
+
+        result = _parse_result(
+            _run_scan(
+                "echo telemetry",
+                top_level_args=["--trace-context", json.dumps(trace_context)],
+                env=env,
+            )
+        )
+
+        assert result["verdict"] == "pass"
+        telemetry = _wait_for_telemetry_record(
+            telemetry_path,
+            trace_id=trace_id,
+            event_type="code_scan",
+        )
+        assert telemetry["component.name"] == "agent-sec-core"
+        assert telemetry["component.agent_name"] == "cosh"
+        assert telemetry["seccore.category"] == "code_scan"
+        assert telemetry["seccore.request"] == {
+            "code": "echo telemetry",
+            "language": "bash",
+        }
 
 
 # ---------------------------------------------------------------------------

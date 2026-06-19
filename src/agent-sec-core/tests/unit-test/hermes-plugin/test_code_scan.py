@@ -89,6 +89,7 @@ class TestCodeScanPreToolCall:
 
         assert result is None
         assert mock_cli.call_args.kwargs["trace_context"] == {
+            "agent_name": "hermes",
             "session_id": "session-1",
             "tool_call_id": "tool-1",
         }

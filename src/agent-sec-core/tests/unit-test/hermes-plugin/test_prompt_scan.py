@@ -118,7 +118,10 @@ class TestPromptScanCapability:
         )
 
         assert result is None
-        assert mock_cli.call_args.kwargs["trace_context"] == {"session_id": "session-1"}
+        assert mock_cli.call_args.kwargs["trace_context"] == {
+            "agent_name": "hermes",
+            "session_id": "session-1",
+        }
         assert "run_id" not in mock_cli.call_args.kwargs["trace_context"]
 
     @patch("src.capabilities.prompt_scan.call_agent_sec_cli")

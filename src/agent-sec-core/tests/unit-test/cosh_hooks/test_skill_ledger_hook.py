@@ -140,6 +140,7 @@ def test_injects_trace_context_into_skill_ledger_check_command(monkeypatch, caps
     output = json.loads(capsys.readouterr().out)
     expected_context = json.dumps(
         {
+            "agent_name": "cosh",
             "trace_id": "trace-1",
             "session_id": "session-1",
             "run_id": "run-1",

@@ -7,6 +7,11 @@ from datetime import datetime
 from typing import Any
 
 from agent_sec_cli import __version__
+from agent_sec_cli.correlation_context import (
+    TraceContext,
+    clear_process_trace_context,
+    init_process_trace_context,
+)
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.telemetry.schema import build_telemetry_security_event
 
@@ -67,10 +72,26 @@ def _event(**overrides: Any) -> SecurityEvent:
     return SecurityEvent(**defaults)
 
 
-def _assert_component_fields(record: dict[str, Any]) -> None:
+def _assert_component_fields(record: dict[str, Any], agent_name: str = "") -> None:
     assert record["component.name"] == "agent-sec-core"
     assert record["component.version"] == __version__
-    assert record["component.agent_name"] == ""
+    assert record["component.agent_name"] == agent_name
+
+
+def _with_ambient_agent_name(agent_name: str):
+    """Context manager: set ambient trace context with agent_name for the block."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        clear_process_trace_context()
+        init_process_trace_context(TraceContext(agent_name=agent_name))
+        try:
+            yield
+        finally:
+            clear_process_trace_context()
+
+    return _ctx()
 
 
 def test_builds_seccore_record_with_component_and_prefixed_fields() -> None:
@@ -136,6 +157,13 @@ def test_builds_asset_verify_counts_as_seccore_fields() -> None:
     assert record["seccore.verdict"] is None
 
 
+def test_builds_seccore_record_with_runtime_agent_name() -> None:
+    with _with_ambient_agent_name("cosh"):
+        record = build_telemetry_security_event(_event())
+
+    _assert_component_fields(record, agent_name="cosh")
+
+
 def test_builds_baseline_record_with_component_and_prefixed_fields() -> None:
     event = _event(
         event_type="harden",
@@ -168,6 +196,15 @@ def test_builds_baseline_record_with_component_and_prefixed_fields() -> None:
     assert record["baseline.total"] == 13
     assert record["baseline.details"] == {}
     json.dumps(record)
+
+
+def test_builds_baseline_record_with_runtime_agent_name() -> None:
+    event = _event(event_type="harden", category="hardening")
+
+    with _with_ambient_agent_name("cosh"):
+        record = build_telemetry_security_event(event)
+
+    _assert_component_fields(record, agent_name="cosh")
 
 
 def test_error_fields_map_from_exception_details() -> None:

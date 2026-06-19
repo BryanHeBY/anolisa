@@ -6,7 +6,9 @@ from typing import Any
 
 from agent_sec_cli.correlation_context import (
     clean_correlation_value,
+    get_current_trace_context,
     get_invocation_id,
+    trace_context_to_payload,
 )
 from agent_sec_cli.daemon.errors import (
     DaemonClientTimeoutError,
@@ -45,8 +47,16 @@ class DaemonClient:
         timeout_ms: int | None = None,
         caller: str | None = None,
     ) -> DaemonResponse:
-        """Send one request and return the daemon response."""
+        """Send one request and return the daemon response.
+
+        When *trace_context* is ``None`` (the default), the current
+        process-level trace context is automatically inherited.  Pass
+        an explicit empty dict ``{}`` to suppress inheritance (e.g. for
+        health checks).
+        """
         effective_timeout_ms = timeout_ms or self.timeout_ms
+        if trace_context is None:
+            trace_context = trace_context_to_payload(get_current_trace_context())
         request = DaemonRequest(
             method=method,
             params={} if params is None else params,
@@ -104,6 +114,7 @@ def daemon_health_reachable(socket_path: Path, timeout_ms: int = 250) -> bool:
         response = DaemonClient(socket_path=socket_path, timeout_ms=timeout_ms).call(
             "daemon.health",
             timeout_ms=timeout_ms,
+            trace_context={},
         )
     except (DaemonProtocolError, DaemonTransportError):
         return False

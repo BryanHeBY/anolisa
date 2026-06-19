@@ -72,16 +72,16 @@ _TRACE_FIELD_SPECS = (
 )
 
 
-def trace_context(data: dict[str, Any]) -> dict[str, str] | None:
+def trace_context(data: dict[str, Any]) -> dict[str, str]:
     """Build agent-sec-cli trace context from Hermes hook kwargs."""
-    context: dict[str, str] = {}
+    context: dict[str, str] = {"agent_name": "hermes"}
     for output_key, input_keys in _TRACE_FIELD_SPECS:
         for input_key in input_keys:
             value = data.get(input_key)
             if isinstance(value, str) and value.strip():
                 context[output_key] = value.strip()
                 break
-    return context or None
+    return context
 
 
 def _json_dumps(value: Any) -> str:

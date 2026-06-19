@@ -15,10 +15,12 @@ from pathlib import Path
 from agent_sec_cli.correlation_context import (
     TraceContext,
     clear_invocation_context_for_tests,
+    clear_process_trace_context,
     get_current_trace_context,
     init_invocation_context,
+    init_process_trace_context,
 )
-from agent_sec_cli.daemon.client import DaemonClient
+from agent_sec_cli.daemon.client import DaemonClient, daemon_health_reachable
 from agent_sec_cli.daemon.errors import (
     DaemonProtocolError,
     DaemonRuntimePathError,
@@ -187,6 +189,124 @@ def test_daemon_client_preserves_explicit_trace_id(
         "session_id": "session-1",
     }
     assert trace_context == {"trace_id": "trace-1", "session_id": "session-1"}
+
+
+def test_daemon_client_inherits_ambient_trace_context_by_default(
+    monkeypatch,
+    tmp_path: Path,
+):
+    clear_process_trace_context()
+    init_process_trace_context(
+        TraceContext(
+            trace_id="trace-ambient",
+            session_id="session-ambient",
+            agent_name="hermes",
+        )
+    )
+    client = DaemonClient(socket_path=tmp_path / "unused.sock")
+    captured = {}
+
+    def fake_send_request(request: DaemonRequest, _timeout_ms: int) -> DaemonResponse:
+        captured["request"] = request
+        return DaemonResponse(request_id=request.request_id, ok=True)
+
+    monkeypatch.setattr(client, "_send_request", fake_send_request)
+
+    try:
+        client.call("scan-prompt")
+    finally:
+        clear_process_trace_context()
+
+    request = captured["request"]
+    assert request.trace_context == {
+        "trace_id": "trace-ambient",
+        "session_id": "session-ambient",
+        "agent_name": "hermes",
+    }
+
+
+def test_daemon_client_explicit_trace_context_overrides_ambient_context(
+    monkeypatch,
+    tmp_path: Path,
+):
+    clear_process_trace_context()
+    init_process_trace_context(
+        TraceContext(
+            trace_id="trace-ambient",
+            session_id="session-ambient",
+            agent_name="hermes",
+        )
+    )
+    client = DaemonClient(socket_path=tmp_path / "unused.sock")
+    captured = {}
+
+    def fake_send_request(request: DaemonRequest, _timeout_ms: int) -> DaemonResponse:
+        captured["request"] = request
+        return DaemonResponse(request_id=request.request_id, ok=True)
+
+    monkeypatch.setattr(client, "_send_request", fake_send_request)
+
+    try:
+        client.call(
+            "scan-prompt",
+            trace_context={"trace_id": "trace-explicit", "agent_name": "cosh"},
+        )
+    finally:
+        clear_process_trace_context()
+
+    request = captured["request"]
+    assert request.trace_context == {
+        "trace_id": "trace-explicit",
+        "agent_name": "cosh",
+    }
+
+
+def test_daemon_client_can_disable_ambient_trace_context_inheritance(
+    monkeypatch,
+    tmp_path: Path,
+):
+    clear_process_trace_context()
+    clear_invocation_context_for_tests()
+    monkeypatch.setenv("AGENT_SEC_INVOCATION_ID", "invocation-1")
+    init_invocation_context()
+    init_process_trace_context(
+        TraceContext(
+            trace_id="trace-ambient",
+            session_id="session-ambient",
+            agent_name="hermes",
+        )
+    )
+    client = DaemonClient(socket_path=tmp_path / "unused.sock")
+    captured = {}
+
+    def fake_send_request(request: DaemonRequest, _timeout_ms: int) -> DaemonResponse:
+        captured["request"] = request
+        return DaemonResponse(request_id=request.request_id, ok=True)
+
+    monkeypatch.setattr(client, "_send_request", fake_send_request)
+
+    try:
+        client.call("daemon.health", trace_context={})
+    finally:
+        clear_process_trace_context()
+        clear_invocation_context_for_tests()
+
+    request = captured["request"]
+    assert request.trace_context == {"trace_id": "invocation-1"}
+
+
+def test_daemon_health_reachable_disables_ambient_trace_context(monkeypatch) -> None:
+    calls = []
+
+    def fake_call(self, method: str, **kwargs) -> DaemonResponse:
+        calls.append((self, method, kwargs))
+        return DaemonResponse(request_id="req-health", ok=True)
+
+    monkeypatch.setattr(DaemonClient, "call", fake_call)
+
+    assert daemon_health_reachable(Path("/unused/daemon.sock")) is True
+    assert calls[0][1] == "daemon.health"
+    assert calls[0][2]["trace_context"] == {}
 
 
 def test_daemon_client_allows_caller_override(
@@ -1017,7 +1137,10 @@ def test_gateway_preserves_missing_trace_id(tmp_path: Path, caplog):
                 socket_path,
                 DaemonRequest(
                     method="capture",
-                    trace_context={"session_id": "session-default"},
+                    trace_context={
+                        "session_id": "session-default",
+                        "agent_name": "hermes",
+                    },
                 ),
             )
         finally:
@@ -1028,14 +1151,17 @@ def test_gateway_preserves_missing_trace_id(tmp_path: Path, caplog):
     assert response.ok is True
     assert response.data["trace_context"] == {
         "session_id": "session-default",
+        "agent_name": "hermes",
     }
     assert observed_contexts == [
         (
             {
                 "session_id": "session-default",
+                "agent_name": "hermes",
             },
             TraceContext(
                 session_id="session-default",
+                agent_name="hermes",
             ),
         )
     ]

@@ -18,6 +18,7 @@ import {
 } from "../../src/utils.js";
 
 const _validTraceContextTypeCheck: TraceContext = {
+  agent_name: "openclaw",
   trace_id: "trace-1",
   session_id: "session-1",
   run_id: "run-1",
@@ -58,11 +59,13 @@ describe("utils", () => {
         runId: "camel-run",
         run_id: "snake-run",
         traceId: "trace-1",
+        agentName: "spoofed",
       },
       {},
     );
 
     assert.deepEqual(context, {
+      agent_name: "openclaw",
       trace_id: "trace-1",
       session_id: "snake-session",
       run_id: "snake-run",
@@ -96,6 +99,7 @@ describe("utils", () => {
     );
 
     assert.deepEqual(context, {
+      agent_name: "openclaw",
       trace_id: "direct-ctx-trace",
       session_id: "event-session",
       run_id: "event-run",
@@ -103,7 +107,7 @@ describe("utils", () => {
     });
   });
 
-  it("buildTraceContext does not create context from nested trace-only input", () => {
+  it("buildTraceContext ignores nested trace-only input except fixed agent name", () => {
     const context = buildTraceContext(
       {
         trace: {
@@ -115,10 +119,10 @@ describe("utils", () => {
       {},
     );
 
-    assert.equal(context, undefined);
+    assert.deepEqual(context, { agent_name: "openclaw" });
   });
 
-  it("buildTraceContext ignores empty and non-string values", () => {
+  it("buildTraceContext ignores empty and non-string values except fixed agent name", () => {
     const context = buildTraceContext(
       {
         trace_id: "",
@@ -129,7 +133,16 @@ describe("utils", () => {
       {},
     );
 
-    assert.equal(context, undefined);
+    assert.deepEqual(context, { agent_name: "openclaw" });
+  });
+
+  it("buildTraceContext always returns fixed OpenClaw agent name", () => {
+    const context = buildTraceContext(
+      { agent_name: "hermes", agentName: "cosh" },
+      { agent_name: "spoofed" },
+    );
+
+    assert.deepEqual(context, { agent_name: "openclaw" });
   });
 
   it("callAgentSecCli injects trace context before the subcommand for mocks", async () => {
