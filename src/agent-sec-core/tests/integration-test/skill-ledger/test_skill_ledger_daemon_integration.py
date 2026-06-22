@@ -110,6 +110,7 @@ def test_daemon_notify_scans_and_writes_activation(monkeypatch, tmp_path: Path):
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir),
+                trace_context={},
             )
             activation = await wait_for(
                 lambda: (
@@ -121,6 +122,7 @@ def test_daemon_notify_scans_and_writes_activation(monkeypatch, tmp_path: Path):
             health = await asyncio.to_thread(
                 client.call,
                 "daemon.health",
+                trace_context={},
             )
             config = read_skill_ledger_config(tmp_path)
         finally:
@@ -159,6 +161,7 @@ def test_daemon_metadata_only_notify_does_not_change_activation(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir),
+                trace_context={},
             )
             activation = await wait_for(
                 lambda: (
@@ -171,6 +174,7 @@ def test_daemon_metadata_only_notify_does_not_change_activation(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir, [".skill-meta/latest.json"]),
+                trace_context={},
             )
             after_ignored = read_activation(skill_dir)
         finally:
@@ -205,6 +209,7 @@ def test_daemon_notify_updates_activation_after_safe_drift(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir),
+                trace_context={},
             )
             activation_v1 = await wait_for(
                 lambda: (
@@ -219,6 +224,7 @@ def test_daemon_notify_updates_activation_after_safe_drift(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir, ["run.sh"]),
+                trace_context={},
             )
             activation_v2 = await wait_for(
                 lambda: (
@@ -257,6 +263,7 @@ def test_daemon_default_latest_scanned_policy_activates_risky_snapshot(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir),
+                trace_context={},
             )
             activation_v1 = await wait_for(
                 lambda: (
@@ -279,6 +286,7 @@ def test_daemon_default_latest_scanned_policy_activates_risky_snapshot(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir, ["SKILL.md"]),
+                trace_context={},
             )
             activation_after_risk = await wait_for(
                 lambda: (
@@ -321,6 +329,7 @@ def test_daemon_latest_scanned_policy_activates_risky_snapshot(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir),
+                trace_context={},
             )
             await wait_for(
                 lambda: (
@@ -343,6 +352,7 @@ def test_daemon_latest_scanned_policy_activates_risky_snapshot(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir, ["SKILL.md"]),
+                trace_context={},
             )
             activation_after_risk = await wait_for(
                 lambda: (
@@ -404,6 +414,7 @@ def test_daemon_pass_warn_only_policy_hides_deny_snapshot(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir),
+                trace_context={},
             )
             activation_v1 = await wait_for(
                 lambda: (
@@ -420,6 +431,7 @@ def test_daemon_pass_warn_only_policy_hides_deny_snapshot(
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir, ["run.sh"]),
+                trace_context={},
             )
             activation_after_deny = await wait_for(
                 lambda: (
@@ -459,6 +471,7 @@ def test_daemon_invalid_activation_policy_sets_job_error(monkeypatch, tmp_path: 
                 client.call,
                 METHOD_SKILLFS_NOTIFY_CHANGE,
                 notify_payload(skill_dir),
+                trace_context={},
             )
             deadline = asyncio.get_running_loop().time() + 5.0
             health = None
@@ -466,6 +479,7 @@ def test_daemon_invalid_activation_policy_sets_job_error(monkeypatch, tmp_path: 
                 candidate = await asyncio.to_thread(
                     client.call,
                     "daemon.health",
+                    trace_context={},
                 )
                 jobs = {job["name"]: job for job in candidate.data["jobs"]}
                 last_error = jobs["skill-ledger-activation"].get("last_error") or ""

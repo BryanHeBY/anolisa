@@ -191,38 +191,16 @@ def test_daemon_client_preserves_explicit_trace_id(
     assert trace_context == {"trace_id": "trace-1", "session_id": "session-1"}
 
 
-def test_daemon_client_inherits_ambient_trace_context_by_default(
-    monkeypatch,
-    tmp_path: Path,
-):
-    clear_process_trace_context()
-    init_process_trace_context(
-        TraceContext(
-            trace_id="trace-ambient",
-            session_id="session-ambient",
-            agent_name="hermes",
-        )
-    )
+def test_daemon_client_requires_explicit_trace_context(tmp_path: Path):
     client = DaemonClient(socket_path=tmp_path / "unused.sock")
-    captured = {}
-
-    def fake_send_request(request: DaemonRequest, _timeout_ms: int) -> DaemonResponse:
-        captured["request"] = request
-        return DaemonResponse(request_id=request.request_id, ok=True)
-
-    monkeypatch.setattr(client, "_send_request", fake_send_request)
 
     try:
+        # Runtime guard for callers that bypass static type checking.
         client.call("scan-prompt")
-    finally:
-        clear_process_trace_context()
-
-    request = captured["request"]
-    assert request.trace_context == {
-        "trace_id": "trace-ambient",
-        "session_id": "session-ambient",
-        "agent_name": "hermes",
-    }
+    except TypeError as exc:
+        assert "trace_context" in str(exc)
+    else:
+        raise AssertionError("expected missing trace_context to fail")
 
 
 def test_daemon_client_explicit_trace_context_overrides_ambient_context(
@@ -322,7 +300,7 @@ def test_daemon_client_allows_caller_override(
 
     monkeypatch.setattr(client, "_send_request", fake_send_request)
 
-    client.call("daemon.health", caller="health-check")
+    client.call("daemon.health", trace_context={}, caller="health-check")
 
     request = captured["request"]
     assert request.caller == "health-check"
@@ -400,6 +378,7 @@ def test_daemon_client_calls_health_over_temp_socket(tmp_path: Path):
             response = await asyncio.to_thread(
                 client.call,
                 "daemon.health",
+                trace_context={},
             )
             runtime_dir_mode = stat.S_IMODE(socket_path.parent.stat().st_mode)
             socket_mode = stat.S_IMODE(socket_path.stat().st_mode)

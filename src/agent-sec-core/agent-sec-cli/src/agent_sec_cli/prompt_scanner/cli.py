@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from agent_sec_cli.correlation_context import (
+    get_current_trace_context,
+    trace_context_to_payload,
+)
 from agent_sec_cli.daemon.client import DaemonClient
 from agent_sec_cli.daemon.env import daemon_disabled
 from agent_sec_cli.daemon.protocol import DaemonResponse
@@ -232,6 +236,7 @@ def _call_scan_prompt_daemon(
     return DaemonClient(timeout_ms=DAEMON_REQUEST_TIMEOUT_MS).call(
         "scan-prompt",
         params={"text": text, "mode": mode, "source": source},
+        trace_context=trace_context_to_payload(get_current_trace_context()),
         caller="cli",
         timeout_ms=DAEMON_REQUEST_TIMEOUT_MS,
     )

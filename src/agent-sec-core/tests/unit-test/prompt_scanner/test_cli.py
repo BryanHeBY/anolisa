@@ -615,7 +615,7 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
         self.assertEqual(out.stderr, "")
 
     @patch("agent_sec_cli.prompt_scanner.cli.DaemonClient")
-    def test_daemon_call_uses_daemon_client_default_trace_context_inheritance(
+    def test_daemon_call_passes_current_trace_context_to_daemon_client(
         self, mock_client_cls
     ) -> None:
         init_process_trace_context(
@@ -641,14 +641,20 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
         mock_client.call.assert_called_once_with(
             "scan-prompt",
             params={"text": "hello", "mode": "standard", "source": "user_input"},
+            trace_context={
+                "trace_id": "trace-1",
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "call_id": "call-1",
+                "tool_call_id": "tool-1",
+                "agent_name": "hermes",
+            },
             caller="cli",
             timeout_ms=30_000,
         )
 
     @patch("agent_sec_cli.prompt_scanner.cli.DaemonClient")
-    def test_daemon_call_does_not_manually_build_trace_context_payload(
-        self, mock_client_cls
-    ) -> None:
+    def test_daemon_call_sanitizes_trace_context_payload(self, mock_client_cls) -> None:
         init_process_trace_context(
             TraceContext(
                 trace_id=" trace-1 ",
@@ -667,7 +673,10 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
 
         _call_scan_prompt_daemon("hello", "standard", "user_input")
 
-        self.assertNotIn("trace_context", mock_client.call.call_args.kwargs)
+        self.assertEqual(
+            mock_client.call.call_args.kwargs["trace_context"],
+            {"trace_id": "trace-1", "run_id": "run-1", "agent_name": "hermes"},
+        )
 
 
 # ---------------------------------------------------------------------------
