@@ -20,7 +20,6 @@ import pathlib
 import shutil
 import subprocess
 import sys
-import time
 import uuid
 from typing import List, Tuple
 
@@ -35,7 +34,12 @@ _TESTDATA_DIR = (
 if str(_TESTDATA_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTDATA_DIR))
 
-from testdata.scan_test_data import SCAN_TEST_CASES
+_HELPERS_DIR = pathlib.Path(__file__).resolve().parents[1] / "_helpers"
+if str(_HELPERS_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPERS_DIR))
+
+from telemetry_jsonl import wait_for_telemetry_record  # noqa: E402
+from testdata.scan_test_data import SCAN_TEST_CASES  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # CLI resolution — supports both installed and dev-mode environments
@@ -106,41 +110,6 @@ def _make_parametrize_id(tc: tuple) -> str:
     return f"{rule_id}-{label}-{snippet}"
 
 
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    """Read JSONL payloads, ignoring malformed diagnostic lines."""
-    payloads = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            payloads.append(payload)
-    return payloads
-
-
-def _wait_for_telemetry_record(
-    path: pathlib.Path,
-    *,
-    trace_id: str,
-    event_type: str,
-) -> dict:
-    """Return a telemetry record matching the trace id and event type."""
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        for payload in _read_jsonl(path):
-            if (
-                payload.get("seccore.trace_id") == trace_id
-                and payload.get("seccore.event_type") == event_type
-            ):
-                return payload
-        time.sleep(0.1)
-    raise AssertionError(
-        f"telemetry record not written for trace_id={trace_id!r} "
-        f"event_type={event_type!r}; payloads={_read_jsonl(path)!r}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # A. Basic functionality
 # ---------------------------------------------------------------------------
@@ -189,7 +158,7 @@ class TestBasicScan:
         )
 
         assert result["verdict"] == "pass"
-        telemetry = _wait_for_telemetry_record(
+        telemetry = wait_for_telemetry_record(
             telemetry_path,
             trace_id=trace_id,
             event_type="code_scan",

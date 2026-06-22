@@ -1,10 +1,13 @@
 """Build telemetry records from SecurityEvent values."""
 
 import uuid
-from typing import Any
+from typing import Any, Protocol
 
 from agent_sec_cli.security_events.schema import SecurityEvent
-from agent_sec_cli.telemetry.config import get_component_fields
+from agent_sec_cli.telemetry.config import (
+    COMPONENT_AGENT_NAME,
+    get_component_fields,
+)
 from agent_sec_cli.telemetry.sanitizer import (
     details_dict,
     error_type_value,
@@ -19,19 +22,31 @@ from agent_sec_cli.telemetry.sanitizer import (
 _BASELINE_ACTION = "harden"
 
 
-def build_telemetry_security_event(event: SecurityEvent) -> dict[str, Any]:
+class TelemetryContext(Protocol):
+    """Context fields consumed by telemetry mapping."""
+
+    agent_name: str | None
+
+
+def build_telemetry_security_event(
+    event: SecurityEvent,
+    ctx: TelemetryContext,
+) -> dict[str, Any]:
     """Build a telemetry JSON record from a canonical SecurityEvent."""
     if event.event_type == _BASELINE_ACTION:
-        return _build_baseline_record(event)
-    return _build_seccore_record(event)
+        return _build_baseline_record(event, ctx)
+    return _build_seccore_record(event, ctx)
 
 
-def _build_seccore_record(event: SecurityEvent) -> dict[str, Any]:
+def _build_seccore_record(
+    event: SecurityEvent,
+    ctx: TelemetryContext,
+) -> dict[str, Any]:
     """Build a seccore.* telemetry record."""
     details = details_dict(event.details)
     result = result_dict(details)
 
-    record: dict[str, Any] = get_component_fields()
+    record = _component_fields(ctx)
     record.update(
         {
             "seccore.event_id": _event_id(event),
@@ -58,12 +73,15 @@ def _build_seccore_record(event: SecurityEvent) -> dict[str, Any]:
     return record
 
 
-def _build_baseline_record(event: SecurityEvent) -> dict[str, Any]:
+def _build_baseline_record(
+    event: SecurityEvent,
+    ctx: TelemetryContext,
+) -> dict[str, Any]:
     """Build a baseline.* telemetry record."""
     details = details_dict(event.details)
     result = result_dict(details)
 
-    record: dict[str, Any] = get_component_fields()
+    record = _component_fields(ctx)
     record.update(
         {
             "baseline.event_id": _event_id(event),
@@ -80,6 +98,19 @@ def _build_baseline_record(event: SecurityEvent) -> dict[str, Any]:
         }
     )
     return record
+
+
+def _component_fields(ctx: TelemetryContext) -> dict[str, str]:
+    """Return component fields with runtime agent_name resolved at mapping time."""
+    fields = get_component_fields()
+    fields["component.agent_name"] = _component_agent_name(ctx)
+    return fields
+
+
+def _component_agent_name(ctx: TelemetryContext) -> str:
+    if ctx.agent_name:
+        return ctx.agent_name.strip() or COMPONENT_AGENT_NAME
+    return COMPONENT_AGENT_NAME
 
 
 def _event_id(event: SecurityEvent) -> str:

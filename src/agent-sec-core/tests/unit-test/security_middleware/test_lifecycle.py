@@ -135,7 +135,7 @@ class TestPostAction(unittest.TestCase):
             post_action(ctx, result, {"code": "echo ok"}, DummyBackend())
 
         event = mock_log.call_args[0][0]
-        self.mock_telemetry.assert_called_once_with(event)
+        self.mock_telemetry.assert_called_once_with(event, ctx)
 
     def test_post_action_passes_agent_name_to_telemetry(self):
         ctx = RequestContext(
@@ -149,8 +149,7 @@ class TestPostAction(unittest.TestCase):
             post_action(ctx, result, {"code": "echo ok"}, DummyBackend())
 
         event = mock_log.call_args[0][0]
-        # agent_name is read from ambient context, not passed explicitly
-        self.mock_telemetry.assert_called_once_with(event)
+        self.mock_telemetry.assert_called_once_with(event, ctx)
 
     def test_post_action_swallows_telemetry_failure(self):
         ctx = RequestContext(action="code_scan", trace_id="trace-telemetry-fail")
@@ -275,7 +274,7 @@ class TestOnError(unittest.TestCase):
             on_error(ctx, exc, {"skill": "/path"}, DummyBackend())
 
         event = mock_log.call_args[0][0]
-        self.mock_telemetry.assert_called_once_with(event)
+        self.mock_telemetry.assert_called_once_with(event, ctx)
 
     def test_on_error_passes_agent_name_to_telemetry(self):
         ctx = RequestContext(
@@ -289,8 +288,7 @@ class TestOnError(unittest.TestCase):
             on_error(ctx, exc, {"skill": "/path"}, DummyBackend())
 
         event = mock_log.call_args[0][0]
-        # agent_name is read from ambient context, not passed explicitly
-        self.mock_telemetry.assert_called_once_with(event)
+        self.mock_telemetry.assert_called_once_with(event, ctx)
 
     def test_on_error_swallows_telemetry_failure(self):
         ctx = RequestContext(action="verify", trace_id="trace-error-telemetry-fail")

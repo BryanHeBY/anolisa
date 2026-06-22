@@ -25,6 +25,8 @@ def trace_context(input_data: dict[str, Any]) -> dict[str, str]:
 def with_trace_context(args: list[str], input_data: dict[str, Any]) -> list[str]:
     """Prepend hidden agent-sec-cli trace-context args when hook input has tracing."""
     context = trace_context(input_data)
+    if context is None:
+        return args
     return [
         args[0],
         "--trace-context",

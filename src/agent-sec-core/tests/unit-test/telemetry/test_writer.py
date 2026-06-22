@@ -6,15 +6,11 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import agent_sec_cli.telemetry as telemetry
-from agent_sec_cli.correlation_context import (
-    TraceContext,
-    clear_process_trace_context,
-    init_process_trace_context,
-)
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.telemetry import writer as telemetry_writer
 from agent_sec_cli.telemetry.writer import (
@@ -22,6 +18,11 @@ from agent_sec_cli.telemetry.writer import (
     get_writer,
     record_security_event_telemetry,
 )
+
+
+@dataclass
+class _TelemetryCtx:
+    agent_name: str | None = None
 
 
 def _event() -> SecurityEvent:
@@ -242,7 +243,7 @@ def test_record_security_event_telemetry_uses_mapping_and_writer(
     monkeypatch.setenv("AGENT_SEC_TELEMETRY_LOG_PATH", str(path))
     monkeypatch.setattr(telemetry_writer, "_writer", None)
 
-    record_security_event_telemetry(_event())
+    record_security_event_telemetry(_event(), _TelemetryCtx())
 
     record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
     assert record["component.name"] == "agent-sec-core"
@@ -251,7 +252,7 @@ def test_record_security_event_telemetry_uses_mapping_and_writer(
     assert record["component.agent_name"] == ""
 
 
-def test_record_security_event_telemetry_writes_runtime_agent_name(
+def test_record_security_event_telemetry_writes_ctx_agent_name(
     monkeypatch, tmp_path: Path
 ) -> None:
     path = tmp_path / "agent-sec-core.jsonl"
@@ -259,15 +260,24 @@ def test_record_security_event_telemetry_writes_runtime_agent_name(
     monkeypatch.setenv("AGENT_SEC_TELEMETRY_LOG_PATH", str(path))
     monkeypatch.setattr(telemetry_writer, "_writer", None)
 
-    clear_process_trace_context()
-    init_process_trace_context(TraceContext(agent_name="hermes"))
-    try:
-        record_security_event_telemetry(_event())
-    finally:
-        clear_process_trace_context()
+    record_security_event_telemetry(_event(), _TelemetryCtx(agent_name="hermes"))
 
     record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
     assert record["component.agent_name"] == "hermes"
+
+
+def test_record_security_event_telemetry_strips_ctx_agent_name(
+    monkeypatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "agent-sec-core.jsonl"
+    path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AGENT_SEC_TELEMETRY_LOG_PATH", str(path))
+    monkeypatch.setattr(telemetry_writer, "_writer", None)
+
+    record_security_event_telemetry(_event(), _TelemetryCtx(agent_name=" cosh "))
+
+    record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert record["component.agent_name"] == "cosh"
 
 
 def test_record_security_event_telemetry_skips_mapping_when_target_missing(
@@ -279,7 +289,7 @@ def test_record_security_event_telemetry_skips_mapping_when_target_missing(
     mapper = MagicMock(return_value={"component.name": "agent-sec-core"})
     monkeypatch.setattr(telemetry_writer, "build_telemetry_security_event", mapper)
 
-    record_security_event_telemetry(_event())
+    record_security_event_telemetry(_event(), _TelemetryCtx())
 
     mapper.assert_not_called()
     assert not path.exists()
@@ -293,14 +303,14 @@ def test_record_security_event_telemetry_swallows_mapping_errors(
     monkeypatch.setenv("AGENT_SEC_TELEMETRY_LOG_PATH", str(path))
     monkeypatch.setattr(telemetry_writer, "_writer", None)
 
-    def fail_mapping(event: SecurityEvent) -> dict[str, object]:
+    def fail_mapping(event: SecurityEvent, ctx: _TelemetryCtx) -> dict[str, object]:
         raise RuntimeError("mapping failed")
 
     monkeypatch.setattr(
         telemetry_writer, "build_telemetry_security_event", fail_mapping
     )
 
-    record_security_event_telemetry(_event())
+    record_security_event_telemetry(_event(), _TelemetryCtx())
 
     assert path.read_text(encoding="utf-8") == ""
 

@@ -3,11 +3,6 @@
 from pathlib import Path
 
 from agent_sec_cli import __version__
-from agent_sec_cli.correlation_context import (
-    TraceContext,
-    clear_process_trace_context,
-    init_process_trace_context,
-)
 from agent_sec_cli.telemetry.config import (
     DEFAULT_TELEMETRY_LOG_PATH,
     TELEMETRY_LOG_PATH_ENV,
@@ -44,25 +39,8 @@ def test_telemetry_log_path_exists_only_for_existing_file(
 
 
 def test_component_fields_are_fixed() -> None:
-    clear_process_trace_context()
-    try:
-        assert get_component_fields() == {
-            "component.name": "agent-sec-core",
-            "component.version": __version__,
-            "component.agent_name": "",
-        }
-    finally:
-        clear_process_trace_context()
-
-
-def test_component_fields_use_runtime_agent_name_from_ambient_context() -> None:
-    clear_process_trace_context()
-    init_process_trace_context(TraceContext(agent_name="hermes"))
-    try:
-        assert get_component_fields() == {
-            "component.name": "agent-sec-core",
-            "component.version": __version__,
-            "component.agent_name": "hermes",
-        }
-    finally:
-        clear_process_trace_context()
+    assert get_component_fields() == {
+        "component.name": "agent-sec-core",
+        "component.version": __version__,
+        "component.agent_name": "",
+    }

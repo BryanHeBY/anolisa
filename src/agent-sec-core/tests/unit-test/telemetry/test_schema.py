@@ -3,15 +3,11 @@
 import copy
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from agent_sec_cli import __version__
-from agent_sec_cli.correlation_context import (
-    TraceContext,
-    clear_process_trace_context,
-    init_process_trace_context,
-)
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.telemetry.schema import build_telemetry_security_event
 
@@ -58,6 +54,11 @@ BASELINE_FIELDS = {
 }
 
 
+@dataclass
+class _TelemetryCtx:
+    agent_name: str | None = None
+
+
 def _event(**overrides: Any) -> SecurityEvent:
     defaults: dict[str, Any] = {
         "event_id": "event-1",
@@ -76,22 +77,6 @@ def _assert_component_fields(record: dict[str, Any], agent_name: str = "") -> No
     assert record["component.name"] == "agent-sec-core"
     assert record["component.version"] == __version__
     assert record["component.agent_name"] == agent_name
-
-
-def _with_ambient_agent_name(agent_name: str):
-    """Context manager: set ambient trace context with agent_name for the block."""
-    import contextlib
-
-    @contextlib.contextmanager
-    def _ctx():
-        clear_process_trace_context()
-        init_process_trace_context(TraceContext(agent_name=agent_name))
-        try:
-            yield
-        finally:
-            clear_process_trace_context()
-
-    return _ctx()
 
 
 def test_builds_seccore_record_with_component_and_prefixed_fields() -> None:
@@ -113,7 +98,7 @@ def test_builds_seccore_record_with_component_and_prefixed_fields() -> None:
         },
     )
 
-    record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx())
 
     assert set(record) == COMPONENT_FIELDS | SECCORE_FIELDS
     _assert_component_fields(record)
@@ -149,7 +134,7 @@ def test_builds_asset_verify_counts_as_seccore_fields() -> None:
         details={"request": {"skill": "/path"}, "result": {"passed": 12, "failed": 1}},
     )
 
-    record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx())
 
     _assert_component_fields(record)
     assert record["seccore.asset_passed_count"] == 12
@@ -157,11 +142,18 @@ def test_builds_asset_verify_counts_as_seccore_fields() -> None:
     assert record["seccore.verdict"] is None
 
 
-def test_builds_seccore_record_with_runtime_agent_name() -> None:
-    with _with_ambient_agent_name("cosh"):
-        record = build_telemetry_security_event(_event())
+def test_builds_seccore_record_with_ctx_agent_name() -> None:
+    record = build_telemetry_security_event(_event(), _TelemetryCtx(agent_name="cosh"))
 
     _assert_component_fields(record, agent_name="cosh")
+
+
+def test_builds_seccore_record_strips_ctx_agent_name() -> None:
+    record = build_telemetry_security_event(
+        _event(), _TelemetryCtx(agent_name=" hermes ")
+    )
+
+    _assert_component_fields(record, agent_name="hermes")
 
 
 def test_builds_baseline_record_with_component_and_prefixed_fields() -> None:
@@ -175,7 +167,7 @@ def test_builds_baseline_record_with_component_and_prefixed_fields() -> None:
         },
     )
 
-    record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx())
 
     assert set(record) == COMPONENT_FIELDS | BASELINE_FIELDS
     _assert_component_fields(record)
@@ -198,11 +190,10 @@ def test_builds_baseline_record_with_component_and_prefixed_fields() -> None:
     json.dumps(record)
 
 
-def test_builds_baseline_record_with_runtime_agent_name() -> None:
+def test_builds_baseline_record_with_ctx_agent_name() -> None:
     event = _event(event_type="harden", category="hardening")
 
-    with _with_ambient_agent_name("cosh"):
-        record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx(agent_name="cosh"))
 
     _assert_component_fields(record, agent_name="cosh")
 
@@ -219,7 +210,7 @@ def test_error_fields_map_from_exception_details() -> None:
         },
     )
 
-    record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx())
 
     assert record["seccore.error"] == "boom"
     assert record["seccore.error_type"] == "RuntimeError"
@@ -239,7 +230,7 @@ def test_error_fields_do_not_fallback_to_result_summary() -> None:
         },
     )
 
-    record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx())
 
     assert record["seccore.error"] is None
     assert record["seccore.error_type"] is None
@@ -265,7 +256,7 @@ def test_error_fields_preserve_explicit_details_null_over_result_values() -> Non
         },
     )
 
-    record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx())
 
     assert record["seccore.error"] is None
     assert record["seccore.error_type"] is None
@@ -281,7 +272,7 @@ def test_missing_fields_use_null_except_generated_event_id_timestamp_and_details
         details={},
     )
 
-    record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx())
 
     uuid.UUID(record["seccore.event_id"])
     datetime.fromisoformat(record["seccore.timestamp"])
@@ -299,7 +290,7 @@ def test_mapping_does_not_mutate_input_and_converts_values_to_json_safe() -> Non
     original = copy.deepcopy(details)
     event = _event(details=details)
 
-    record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx())
 
     assert details == original
     assert record["seccore.request"] == {"items": ["a", "b"]}
@@ -322,7 +313,7 @@ def test_mapping_converts_non_finite_floats_to_null_for_strict_json() -> None:
         }
     )
 
-    record = build_telemetry_security_event(event)
+    record = build_telemetry_security_event(event, _TelemetryCtx())
 
     assert record["seccore.request"] == {"nan": None, "values": [None, None, 1.25]}
     assert record["seccore.error"] is None

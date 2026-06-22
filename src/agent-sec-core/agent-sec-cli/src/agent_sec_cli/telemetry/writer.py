@@ -12,7 +12,10 @@ from typing import Any
 
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.telemetry.config import get_telemetry_log_path
-from agent_sec_cli.telemetry.schema import build_telemetry_security_event
+from agent_sec_cli.telemetry.schema import (
+    TelemetryContext,
+    build_telemetry_security_event,
+)
 
 _logger = logging.getLogger("agent_sec_cli.telemetry.writer")
 _writer: "TelemetryWriter | None" = None
@@ -151,12 +154,15 @@ def get_writer() -> TelemetryWriter:
     return _writer
 
 
-def record_security_event_telemetry(event: SecurityEvent) -> None:
+def record_security_event_telemetry(
+    event: SecurityEvent,
+    ctx: TelemetryContext,
+) -> None:
     """Best-effort write of telemetry mapped from a SecurityEvent."""
     try:
         writer = get_writer()
         if not writer.exists():
             return
-        writer.write(build_telemetry_security_event(event))
+        writer.write(build_telemetry_security_event(event, ctx))
     except Exception as exc:  # noqa: BLE001
         _log_telemetry_write_failure(exc)

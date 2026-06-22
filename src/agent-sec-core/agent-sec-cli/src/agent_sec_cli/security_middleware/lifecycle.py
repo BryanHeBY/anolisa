@@ -29,14 +29,14 @@ def _category_for(action: str) -> str:
     return _ACTION_CATEGORY.get(action, action)
 
 
-def _emit_event(event: SecurityEvent) -> None:
+def _emit_event(ctx: RequestContext, event: SecurityEvent) -> None:
     """Best-effort emit of security event and derived telemetry."""
     try:
         log_event(event)
     except Exception:  # noqa: BLE001
         pass
     try:
-        record_security_event_telemetry(event)
+        record_security_event_telemetry(event, ctx)
     except Exception:  # noqa: BLE001
         pass
 
@@ -81,7 +81,7 @@ def post_action(
             call_id=ctx.call_id,
             tool_call_id=ctx.tool_call_id,
         )
-        _emit_event(event)
+        _emit_event(ctx, event)
     except Exception:  # noqa: BLE001
         pass
 
@@ -110,6 +110,6 @@ def on_error(
             call_id=ctx.call_id,
             tool_call_id=ctx.tool_call_id,
         )
-        _emit_event(event)
+        _emit_event(ctx, event)
     except Exception:  # noqa: BLE001
         pass
