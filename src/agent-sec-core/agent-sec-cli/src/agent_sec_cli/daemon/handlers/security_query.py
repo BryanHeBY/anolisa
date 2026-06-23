@@ -1,7 +1,6 @@
 """Read-only daemon handlers for security and observability SQLite data."""
 
 import json
-from datetime import datetime, timezone
 from typing import Any
 
 from agent_sec_cli.daemon.errors import BadRequestError
@@ -20,6 +19,11 @@ from agent_sec_cli.observability.models import ObservabilityEventRecord
 from agent_sec_cli.observability.sqlite_reader import ObservabilityReader
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
+from agent_sec_cli.utils.timestamp import (
+    normalize_iso_to_utc_iso,
+    ns_to_utc_iso,
+    utc_iso_to_epoch,
+)
 
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 1000
@@ -443,36 +447,32 @@ def _iso_range(params: dict[str, Any]) -> tuple[str | None, str | None]:
     if until is not None and end_ns is not None:
         raise BadRequestError("until and end_ns are mutually exclusive")
     if start_ns is not None:
-        since = _ns_to_iso(_integer_param(params, "start_ns"))
+        # Nanosecond filters are absolute epoch time, so convert directly to UTC.
+        since = ns_to_utc_iso(_integer_param(params, "start_ns"))
+    elif since is not None:
+        # String filters may be naive local time; normalize before reader/repository calls.
+        since = _normalize_iso_timestamp(since, "since")
     if end_ns is not None:
-        until = _ns_to_iso(_integer_param(params, "end_ns"))
-    if since is not None:
-        _validate_iso_timestamp(since, "since")
-    if until is not None:
-        _validate_iso_timestamp(until, "until")
+        until = ns_to_utc_iso(_integer_param(params, "end_ns"))
+    elif until is not None:
+        until = _normalize_iso_timestamp(until, "until")
     return since, until
 
 
 def _epoch_range(params: dict[str, Any]) -> tuple[float | None, float | None]:
     since, until = _iso_range(params)
     start_epoch = (
-        datetime.fromisoformat(since).timestamp() if since is not None else None
+        utc_iso_to_epoch(since, field_name="since") if since is not None else None
     )
-    end_epoch = datetime.fromisoformat(until).timestamp() if until is not None else None
+    end_epoch = (
+        utc_iso_to_epoch(until, field_name="until") if until is not None else None
+    )
     return start_epoch, end_epoch
 
 
-def _ns_to_iso(value: int) -> str:
-    return datetime.fromtimestamp(_ns_to_epoch(value), tz=timezone.utc).isoformat()
-
-
-def _ns_to_epoch(value: int) -> float:
-    return value / 1_000_000_000
-
-
-def _validate_iso_timestamp(value: str, name: str) -> None:
+def _normalize_iso_timestamp(value: str, name: str) -> str:
     try:
-        datetime.fromisoformat(value)
+        return normalize_iso_to_utc_iso(value, field_name=name)
     except ValueError as exc:
         raise BadRequestError(f"{name} must be an ISO-8601 timestamp") from exc
 

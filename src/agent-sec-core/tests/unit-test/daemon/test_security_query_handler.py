@@ -356,6 +356,31 @@ def test_security_events_list_filters_by_verdict(tmp_path: Path) -> None:
     assert returned_ids == {"deny-1", "deny-2"}
 
 
+def test_security_events_list_normalizes_explicit_since_until(tmp_path: Path) -> None:
+    _write_security_event(
+        tmp_path,
+        event_id="offset-window",
+        timestamp="2026-05-20T04:00:00+00:00",
+    )
+    _write_security_event(
+        tmp_path,
+        event_id="outside-window",
+        timestamp="2026-05-20T06:00:00+00:00",
+    )
+
+    response = _call_daemon(
+        tmp_path,
+        "sec.events.list",
+        {
+            "since": "2026-05-20T11:59:00+08:00",
+            "until": "2026-05-20T12:01:00+08:00",
+        },
+    )
+
+    assert response.ok is True
+    assert [item["event_id"] for item in response.data["items"]] == ["offset-window"]
+
+
 def test_security_events_count_by_verdict_group(tmp_path: Path) -> None:
     """Count-by with group_by=verdict returns correct grouped counts."""
     _write_security_event(tmp_path, event_id="d1", details={"verdict": "deny"})

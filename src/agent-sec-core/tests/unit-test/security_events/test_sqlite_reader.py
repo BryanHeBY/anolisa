@@ -1,7 +1,6 @@
 """Unit tests for security_events.sqlite_reader — SqliteEventReader."""
 
 import io
-import os
 import sqlite3
 import sys
 import time
@@ -331,53 +330,24 @@ class TestSqliteEventReader:
 
         assert reader.count_by("category", offset=1) == {"alpha": 1, "beta": 1}
 
-    def test_query_naive_time_range_uses_local_timezone(
-        self,
-        writer: SqliteEventWriter,
-        reader: SqliteEventReader,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_query_rejects_naive_time_range_at_repository_boundary(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
     ) -> None:
-        if not hasattr(time, "tzset"):
-            pytest.skip("time.tzset is required to validate local timezone parsing")
-
-        old_tz = os.environ.get("TZ")
-        monkeypatch.setenv("TZ", "Asia/Shanghai")
-        time.tzset()
-        try:
-            writer.write(
-                SecurityEvent(
-                    event_type="scan",
-                    category="prompt_scan",
-                    timestamp=datetime(
-                        2026, 5, 20, 4, 0, tzinfo=timezone.utc
-                    ).isoformat(),
-                    trace_id="local-match",
-                    details={},
-                )
+        writer.write(
+            SecurityEvent(
+                event_type="scan",
+                category="prompt_scan",
+                timestamp=datetime(2026, 5, 20, 4, 0, tzinfo=timezone.utc).isoformat(),
+                trace_id="local-match",
+                details={},
             )
-            writer.write(
-                SecurityEvent(
-                    event_type="scan",
-                    category="prompt_scan",
-                    timestamp=datetime(
-                        2026, 5, 20, 6, 0, tzinfo=timezone.utc
-                    ).isoformat(),
-                    trace_id="outside-window",
-                    details={},
-                )
-            )
+        )
 
-            events = reader.query(
+        with pytest.raises(ValueError, match="timezone information"):
+            reader.query(
                 since="2026-05-20T11:59:00",
                 until="2026-05-20T12:01:00",
             )
-            assert [event.trace_id for event in events] == ["local-match"]
-        finally:
-            if old_tz is None:
-                monkeypatch.delenv("TZ", raising=False)
-            else:
-                monkeypatch.setenv("TZ", old_tz)
-            time.tzset()
 
     def test_query_count_and_count_by_support_dashboard_filters(
         self, writer: SqliteEventWriter, reader: SqliteEventReader

@@ -5,7 +5,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from agent_sec_cli.utils.timestamp import normalize_iso_to_utc_iso
+from pydantic import BaseModel, Field, field_validator
 
 
 def extract_verdict(details: dict[str, Any]) -> str | None:
@@ -64,6 +65,14 @@ class SecurityEvent(BaseModel):
     run_id: str | None = None
     call_id: str | None = None
     tool_call_id: str | None = None
+
+    @field_validator("timestamp")
+    @classmethod
+    def _normalize_timestamp(cls, value: str) -> str:
+        if not value:
+            return _now_iso()
+        # Keep JSONL and SQLite writers aligned: SecurityEvent timestamps are stored as UTC.
+        return normalize_iso_to_utc_iso(value, field_name="timestamp")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain ``dict`` suitable for ``json.dumps``."""

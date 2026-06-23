@@ -62,12 +62,22 @@ class TestSqliteEventWriter:
         """Invalid timestamps are dropped without writing to stderr."""
         writer = SqliteEventWriter(path=db_path)
 
-        # Create event with malformed timestamp
-        evt = SecurityEvent(
+        # Bypass schema validation to exercise writer drop behavior for
+        # corrupted/in-memory events.
+        evt = SecurityEvent.model_construct(
+            event_id="invalid-timestamp-event",
             event_type="test",
             category="test",
+            result="succeeded",
+            trace_id="",
             details={"key": "value"},
             timestamp="not-a-valid-timestamp",
+            pid=1,
+            uid=1,
+            session_id=None,
+            run_id=None,
+            call_id=None,
+            tool_call_id=None,
         )
 
         with caplog.at_level(logging.WARNING, logger=SQLITE_WRITER_LOGGER):
@@ -205,6 +215,26 @@ class TestSqliteEventWriter:
         conn.close()
         assert len(rows) == 1
         writer.close()
+
+    def test_write_persists_schema_normalized_utc_timestamp(self, db_path: str) -> None:
+        writer = SqliteEventWriter(path=db_path, max_age_days=None)
+        writer.write(
+            SecurityEvent(
+                event_type="offset_timestamp",
+                category="test",
+                timestamp="2026-05-20T12:00:00+08:00",
+                details={},
+            )
+        )
+        writer.close()
+
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT timestamp, timestamp_epoch FROM security_events"
+        ).fetchone()
+        conn.close()
+
+        assert row == ("2026-05-20T04:00:00+00:00", 1779249600.0)
 
     def test_db_file_permissions_are_restrictive(self, db_path: str) -> None:
         """Verify that the database file is created with 0o600 permissions."""

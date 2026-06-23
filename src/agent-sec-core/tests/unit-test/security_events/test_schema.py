@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime
 
 from agent_sec_cli.security_events.schema import SecurityEvent
+from pydantic import ValidationError
 
 
 class TestSecurityEventRequiredFields(unittest.TestCase):
@@ -31,6 +32,31 @@ class TestSecurityEventAutoFill(unittest.TestCase):
         evt = SecurityEvent(event_type="t", category="c", details={})
         ts = datetime.fromisoformat(evt.timestamp)
         self.assertIsNotNone(ts.tzinfo)
+
+    def test_timestamp_is_normalized_to_utc(self):
+        evt = SecurityEvent(
+            event_type="t",
+            category="c",
+            details={},
+            timestamp="2026-05-20T12:00:00+08:00",
+        )
+
+        self.assertEqual(evt.timestamp, "2026-05-20T04:00:00+00:00")
+
+    def test_empty_timestamp_uses_generated_utc_timestamp(self):
+        evt = SecurityEvent(event_type="t", category="c", details={}, timestamp="")
+
+        ts = datetime.fromisoformat(evt.timestamp)
+        self.assertIsNotNone(ts.tzinfo)
+
+    def test_invalid_timestamp_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            SecurityEvent(
+                event_type="t",
+                category="c",
+                details={},
+                timestamp="not-a-valid-timestamp",
+            )
 
     def test_pid_matches_current(self):
         evt = SecurityEvent(event_type="t", category="c", details={})

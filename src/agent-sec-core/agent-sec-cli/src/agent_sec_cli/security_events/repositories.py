@@ -5,12 +5,12 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Sequence
 
 from agent_sec_cli.security_events.models import SecurityEventRecord
 from agent_sec_cli.security_events.orm_store import SqliteStore
 from agent_sec_cli.security_events.schema import SecurityEvent, extract_verdict
+from agent_sec_cli.utils.timestamp import utc_iso_to_epoch
 from sqlalchemy import Select, delete, func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -74,7 +74,8 @@ class SecurityEventRepository:
             "category": event.category,
             "result": event.result,
             "timestamp": event.timestamp,
-            "timestamp_epoch": datetime.fromisoformat(event.timestamp).timestamp(),
+            # SecurityEvent validation normalizes timestamps before repository entry.
+            "timestamp_epoch": utc_iso_to_epoch(event.timestamp),
             "trace_id": event.trace_id,
             "pid": event.pid,
             "uid": event.uid,
@@ -407,8 +408,8 @@ class SecurityEventRepository:
 
     @staticmethod
     def _timestamp_epoch(value: str) -> float:
-        """Parse an ISO timestamp using local time when timezone is absent."""
-        return datetime.fromisoformat(value).timestamp()
+        """Convert a repository-bound UTC ISO timestamp to epoch seconds."""
+        return utc_iso_to_epoch(value)
 
     def _build_filters(
         self,

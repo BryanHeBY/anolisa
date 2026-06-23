@@ -24,6 +24,10 @@ from agent_sec_cli.security_middleware.backends.hardening import (
 )
 from agent_sec_cli.security_middleware.lifecycle import _ACTION_CATEGORY
 from agent_sec_cli.skill_ledger.cli import app as skill_ledger_app
+from agent_sec_cli.utils.timestamp import (
+    epoch_to_utc_iso,
+    optional_iso_to_utc_iso,
+)
 
 # Get version from package metadata
 try:
@@ -336,31 +340,16 @@ def _resolve_time_range(
     ValueError
         If since or until parameters are not valid ISO-8601 format.
     """
-    # Validate since parameter if provided
-    if since is not None:
-        try:
-            datetime.fromisoformat(since)
-        except ValueError:
-            raise ValueError(
-                f"Invalid time format for --since: {since!r}. "
-                "Expected ISO 8601 format (e.g., 2024-01-01 or 2024-01-01T12:00:00)"
-            )
-
-    # Validate until parameter if provided
-    if until is not None:
-        try:
-            datetime.fromisoformat(until)
-        except ValueError:
-            raise ValueError(
-                f"Invalid time format for --until: {until!r}. "
-                "Expected ISO 8601 format (e.g., 2024-01-01 or 2024-01-01T12:00:00)"
-            )
-
     if last_hours is not None:
         now = time.time()
         since_epoch = now - last_hours * 3600
-        since = datetime.fromtimestamp(since_epoch, tz=timezone.utc).isoformat()
-        until = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
+        # Relative ranges are epoch-based already; emit UTC before querying SQLite.
+        since = epoch_to_utc_iso(since_epoch)
+        until = epoch_to_utc_iso(now)
+    else:
+        # Explicit CLI timestamps may be naive local time; normalize at the CLI boundary.
+        since = optional_iso_to_utc_iso(since, field_name="--since")
+        until = optional_iso_to_utc_iso(until, field_name="--until")
     return since, until
 
 
