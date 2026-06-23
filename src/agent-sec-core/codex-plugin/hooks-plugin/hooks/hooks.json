@@ -1,0 +1,53 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/code_scanner_hook.py",
+            "timeout": 10,
+            "statusMessage": "Scanning command for security issues..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/prompt_scanner_hook.py",
+            "timeout": 10,
+            "statusMessage": "Scanning prompt for injection attempts..."
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/pii_checker_hook.py",
+            "timeout": 10,
+            "statusMessage": "Checking for PII in prompt..."
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/skill_ledger_hook.py",
+            "timeout": 10,
+            "statusMessage": "Checking skill integrity..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/pii_checker_hook.py",
+            "timeout": 10,
+            "statusMessage": "Checking for PII in tool output..."
+          }
+        ]
+      }
+    ]
+  }
+}
