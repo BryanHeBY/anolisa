@@ -91,7 +91,7 @@ pub fn log_operation(ops_name: &'static str, agent_name: &str, response: &Respon
     };
 
     if let Err(e) = write_record(&record) {
-        tracing::warn!("ops log write failed: {e}");
+        tracing::debug!("ops log write failed: {e}");
     }
 }
 
