@@ -60,8 +60,8 @@ export async function handleCheckpoint(
         return { text: mapErrorToLLMMessage(output.stderr, { id }), isError: true };
       }
       const timing = extractTiming(output.stdout);
-      if (output.stdout && (output.stdout.includes('Skipped') || output.stdout.includes('Empty workspace'))) {
-        return { text: `Empty workspace, no snapshot created.${timing}`, isError: false };
+      if (`${output.stdout}\n${output.stderr}`.includes("Empty workspace, no snapshot created.")) {
+        return { text: 'Empty workspace, no snapshot created.', isError: false };
       }
       return { text: `Checkpoint created: ${id}${timing}`, isError: false };
     } catch (error) {

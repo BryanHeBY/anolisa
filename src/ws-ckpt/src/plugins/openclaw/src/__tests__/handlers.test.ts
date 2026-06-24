@@ -333,8 +333,8 @@ describe("handlers — explicit workspace", () => {
 
   it("checkpoint explicit workspace skipped (empty)", async () => {
     promisifiedMock.mockResolvedValue({
-      stdout: "Skipped: Empty workspace",
-      stderr: "",
+      stdout: "",
+      stderr: "\u001b[33m⚠ Empty workspace, no snapshot created.\u001b[0m\n",
     });
     const r = await handleCheckpoint(
       JSON.stringify({ id: "snap1", workspace: "/explicit" }),

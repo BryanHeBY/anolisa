@@ -60,7 +60,7 @@ export class CommandExecutor {
    *
    * Equivalent to:
    * ```
-   * ws-ckpt checkpoint --workspace <ws> --id <id> [--message <msg>] [--metadata <json>]
+   * ws-ckpt checkpoint --workspace <ws> --snapshot <id> [--message <msg>] [--metadata <json>]
    * ```
    *
    * @param workspace - Workspace directory path.
@@ -75,7 +75,7 @@ export class CommandExecutor {
     const args = [
       "checkpoint",
       "--workspace", workspace,
-      "--id", id,
+      "--snapshot", id,
     ];
 
     if (options?.message) {

@@ -176,12 +176,12 @@ class CheckpointManager:
         """Create a checkpoint (snapshot) of the workspace.
 
         Equivalent to:
-            ws-ckpt checkpoint --workspace <ws> --id <id> [--message <msg>] [--metadata <json>]
+            ws-ckpt checkpoint --workspace <ws> --snapshot <id> [--message <msg>] [--metadata <json>]
         """
         args = [
             "checkpoint",
             "--workspace", self._config.workspace,
-            "--id", snapshot_id,
+            "--snapshot", snapshot_id,
         ]
 
         if message:
@@ -196,6 +196,16 @@ class CheckpointManager:
             return CheckpointResult(
                 success=False,
                 message=map_error_to_message(output.stderr, {"id": snapshot_id}),
+            )
+
+        # CheckpointSkipped is a successful CLI response reported on stderr.
+        combined_output = f"{output.stdout}\n{output.stderr}"
+        if "Empty workspace, no snapshot created." in combined_output:
+            return CheckpointResult(
+                success=True,
+                skipped=True,
+                reason="Empty workspace, no snapshot created.",
+                message="Empty workspace, no snapshot created.",
             )
 
         return CheckpointResult(

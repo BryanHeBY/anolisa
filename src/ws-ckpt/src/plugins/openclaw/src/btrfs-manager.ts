@@ -182,8 +182,8 @@ export class BtrfsManager {
         };
       }
 
-      // Check for skipped checkpoint (empty workspace)
-      if (output.stdout && (output.stdout.includes('Skipped') || output.stdout.includes('Empty workspace'))) {
+      // The CLI reports CheckpointSkipped on stderr while keeping exit code 0.
+      if (`${output.stdout}\n${output.stderr}`.includes("Empty workspace, no snapshot created.")) {
         return { success: true, skipped: true, reason: 'Empty workspace, no snapshot created.', message: 'Empty workspace, no snapshot created.' };
       }
 

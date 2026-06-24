@@ -646,7 +646,7 @@ def handle_ws_ckpt_checkpoint(args: Dict[str, Any], **_kwargs) -> str:
 
     message = (args.get("message") or "").strip() or "manual checkpoint"
 
-    cmd = ["ws-ckpt", "checkpoint", "-w", workspace, "-i", snapshot_id,
+    cmd = ["ws-ckpt", "checkpoint", "-w", workspace, "-s", snapshot_id,
            "-m", message]
     success, output = _run_ws_ckpt_cmd(cmd)
     return _ok(output) if success else _err(output)

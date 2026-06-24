@@ -172,6 +172,20 @@ class TestCheckpointManager:
         assert result.snapshot == "abc123"
 
     @patch("hermes.checkpoint_manager.subprocess.run")
+    def test_create_checkpoint_skipped_from_stderr(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="",
+            stderr="\x1b[33m⚠ Empty workspace, no snapshot created.\x1b[0m\n",
+        )
+        mgr = self._make("/ws")
+        result = mgr.create_checkpoint(snapshot_id="empty")
+        assert result.success is True
+        assert result.skipped is True
+        assert result.snapshot == ""
+        assert result.reason == "Empty workspace, no snapshot created."
+
+    @patch("hermes.checkpoint_manager.subprocess.run")
     def test_create_checkpoint_with_metadata(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         mgr = self._make("/ws")

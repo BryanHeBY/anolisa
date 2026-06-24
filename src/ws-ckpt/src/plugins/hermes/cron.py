@@ -21,7 +21,7 @@ def _build_cron_line(workspace: str, schedule: str) -> str:
     quoted_ws = "'" + workspace.replace("'", "'\\''") + "'"
     return (
         f"{schedule} ws-ckpt checkpoint -w {quoted_ws}"
-        f' -i "cron-$(date +\\%s)"'
+        f' -s "cron-$(date +\\%s)"'
         f' -m "scheduled snapshot"'
         f" --metadata '{{\"auto\":true,\"type\":\"cron\"}}'"
         f" >/dev/null 2>&1"

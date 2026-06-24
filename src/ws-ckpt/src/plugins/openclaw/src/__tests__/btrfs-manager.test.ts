@@ -214,10 +214,15 @@ describe("BtrfsManager with mocked executor", () => {
     exec.list = vi.fn().mockResolvedValue(ok("[]"));
     await mgr.initialize("/ws");
 
-    exec.checkpoint = vi.fn().mockResolvedValue(ok("Skipped: Empty workspace"));
+    exec.checkpoint = vi.fn().mockResolvedValue({
+      exitCode: 0,
+      stdout: "",
+      stderr: "\u001b[33m⚠ Empty workspace, no snapshot created.\u001b[0m\n",
+    });
     const r = await mgr.createCheckpoint({ id: "s1" });
     expect(r.success).toBe(true);
     expect(r.skipped).toBe(true);
+    expect(mgr.getStore().getAll()).toHaveLength(0);
   });
 
   it("createCheckpoint handles exception", async () => {
