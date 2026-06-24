@@ -57,7 +57,10 @@ from trace_context import with_trace_context
 # -- config ----------------------------------------------------------------
 
 MODE = os.environ.get("SKILL_LEDGER_MODE", "observe").lower()
-TIMEOUT = int(os.environ.get("SKILL_LEDGER_TIMEOUT", "5"))
+try:
+    TIMEOUT = int(os.environ.get("SKILL_LEDGER_TIMEOUT", "5"))
+except (ValueError, TypeError):
+    TIMEOUT = 5
 _INIT_TIMEOUT = 3  # seconds for key initialization
 
 # -- constants -------------------------------------------------------------
@@ -113,39 +116,138 @@ _STATUS_LABELS = {
 
 # -- skill directory resolution --------------------------------------------
 
+# Markers used to detect project root (mirrors Codex's default_project_root_markers).
+_PROJECT_ROOT_MARKERS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "package.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "go.mod",
+        "Makefile",
+        "CMakeLists.txt",
+    }
+)
+
+
+def _find_project_root(cwd: Path) -> Path:
+    """Walk up from cwd to find project root via marker files."""
+    current = cwd.resolve()
+    for ancestor in [current, *current.parents]:
+        if any((ancestor / marker).exists() for marker in _PROJECT_ROOT_MARKERS):
+            return ancestor
+    return current  # fallback to cwd if no marker found
+
 
 def _skill_roots(cwd: str) -> list[Path]:
     """Return known Codex skill root directories.
 
-    Mirrors Codex's `skill_roots_from_layer_stack_inner` in loader.rs:
-    - Repository level: <project>/.agents/skills/
+    Mirrors Codex's skill_roots logic (loader.rs):
+    - Repo level: every .agents/skills/ from project root down to cwd
     - User level: $CODEX_HOME/skills/ and $HOME/.agents/skills/
     - System level: /etc/codex/skills/
     """
+    cwd_path = Path(cwd).resolve()
+    project_root = _find_project_root(cwd_path)
     codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    return [
-        Path(cwd) / ".agents" / "skills",
-        codex_home / "skills",
-        Path.home() / ".agents" / "skills",
-        Path("/etc/codex/skills"),
-    ]
+
+    roots: list[Path] = []
+
+    # Repo-level: project_root -> ... -> cwd, each .agents/skills/
+    if cwd_path.is_relative_to(project_root):
+        rel = cwd_path.relative_to(project_root)
+        dirs = [project_root] + [
+            project_root / Path(*rel.parts[: i + 1]) for i in range(len(rel.parts))
+        ]
+        for d in dirs:
+            candidate = d / ".agents" / "skills"
+            if candidate.is_dir():
+                roots.append(candidate)
+    else:
+        candidate = cwd_path / ".agents" / "skills"
+        if candidate.is_dir():
+            roots.append(candidate)
+
+    # User-level
+    roots.append(codex_home / "skills")
+    roots.append(Path.home() / ".agents" / "skills")
+
+    # System-level
+    roots.append(Path("/etc/codex/skills"))
+
+    return roots
 
 
-def _resolve_skill_dir(skill_name: str, cwd: str) -> str | None:
-    """Resolve a skill name to its on-disk directory path.
+def _parse_skill_name(skill_md_path: Path) -> str | None:
+    """Extract 'name' from SKILL.md YAML frontmatter. Returns None on failure."""
+    try:
+        text = skill_md_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    frontmatter_lines: list[str] = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        frontmatter_lines.append(line)
+    else:
+        return None  # no closing ---
+    # Simple YAML parse for 'name: xxx' (avoid importing yaml)
+    for line in frontmatter_lines:
+        if line.startswith("name:"):
+            value = line[5:].strip().strip('"').strip("'")
+            return value if value else None
+    return None
 
-    Returns the resolved path string if found, None otherwise.
-    Only returns a path if the directory exists and contains a SKILL.md file.
+
+def _build_skill_catalog(cwd: str) -> dict[str, str]:
+    """Build {canonical_name: dir_path} catalog from all skill roots.
+
+    Scans each root's immediate subdirectories for SKILL.md, reads the
+    frontmatter name field. Falls back to directory name if no name field.
+    First match wins (higher-priority roots first).
+
+    Security: after resolving symlinks, verifies the resolved path is still
+    within the skill root boundary (prevents path traversal via symlinks).
     """
+    catalog: dict[str, str] = {}
     for root in _skill_roots(cwd):
-        candidate = root / skill_name
+        if not root.is_dir():
+            continue
         try:
-            resolved = candidate.resolve()
+            resolved_root = root.resolve()
         except (OSError, ValueError):
             continue
-        if resolved.is_dir() and (resolved / "SKILL.md").is_file():
-            return str(resolved)
-    return None
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            try:
+                resolved_entry = entry.resolve()
+            except (OSError, ValueError):
+                continue
+            # Path traversal check: resolved entry must stay within root
+            if not resolved_entry.is_relative_to(resolved_root):
+                continue
+            skill_md = resolved_entry / "SKILL.md"
+            if not skill_md.is_file():
+                continue
+            name = _parse_skill_name(skill_md) or entry.name
+            if name not in catalog:
+                catalog[name] = str(resolved_entry)
+    return catalog
+
+
+def _resolve_skill_dir(skill_name: str, catalog: dict[str, str]) -> str | None:
+    """Resolve a skill name using the pre-built catalog."""
+    return catalog.get(skill_name)
 
 
 # -- prompt parsing --------------------------------------------------------
@@ -208,7 +310,7 @@ def _block(failed_skills: list[tuple[str, str]]) -> None:
     Args:
         failed_skills: list of (skill_name, status) tuples that failed check.
     """
-    lines = ["[skill-ledger] \U0001f6ab 技能完整性校验失败："]
+    lines = ["[skill-ledger] ⛔ 技能完整性校验失败："]
     for name, status in failed_skills:
         label = _STATUS_LABELS.get(status, f"状态异常({status})")
         lines.append(f"  - {name}: {label}")
@@ -240,11 +342,12 @@ def main() -> None:
     if not mentions:
         return  # no skill mentions, allow
 
-    # 4. Resolve mentions to installed skill directories
+    # 4. Resolve mentions to installed skill directories via catalog
     cwd = input_data.get("cwd", ".")
+    catalog = _build_skill_catalog(cwd)
     skills_to_check: list[tuple[str, str]] = []  # (name, dir_path)
     for skill_name in mentions:
-        skill_dir = _resolve_skill_dir(skill_name, cwd)
+        skill_dir = _resolve_skill_dir(skill_name, catalog)
         if skill_dir is not None:
             skills_to_check.append((skill_name, skill_dir))
 

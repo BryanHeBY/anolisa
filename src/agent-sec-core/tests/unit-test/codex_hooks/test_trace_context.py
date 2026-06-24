@@ -1,0 +1,125 @@
+"""Unit tests for codex-plugin/hooks/trace_context.py."""
+
+import json
+import sys
+from pathlib import Path
+
+_HOOKS_DIR = str(
+    Path(__file__).resolve().parents[2]
+    / ".."
+    / "codex-plugin"
+    / "hooks-plugin"
+    / "hooks"
+)
+if _HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _HOOKS_DIR)
+
+import trace_context  # noqa: E402
+
+
+class TestTraceContext:
+    """Tests for trace_context() function."""
+
+    def test_returns_agent_name_for_empty_input(self):
+        """Even with no trace fields, agent_name is always injected."""
+        ctx = trace_context.trace_context({})
+        assert ctx == {"agent_name": "codex"}
+
+    def test_returns_agent_name_for_no_matching_fields(self):
+        ctx = trace_context.trace_context({"foo": "bar", "baz": 123})
+        assert ctx == {"agent_name": "codex"}
+
+    def test_extracts_all_fields(self):
+        data = {
+            "trace_id": "t1",
+            "session_id": "s1",
+            "run_id": "r1",
+            "tool_use_id": "c1",
+            "call_id": "c2",
+        }
+        ctx = trace_context.trace_context(data)
+        assert ctx == {
+            "agent_name": "codex",
+            "trace_id": "t1",
+            "session_id": "s1",
+            "run_id": "r1",
+            "call_id": "c2",
+            "tool_call_id": "c1",
+        }
+
+    def test_skips_empty_string_fields(self):
+        data = {
+            "trace_id": "t1",
+            "session_id": "",
+            "run_id": "   ",
+        }
+        ctx = trace_context.trace_context(data)
+        assert ctx == {"agent_name": "codex", "trace_id": "t1"}
+
+    def test_skips_non_string_fields(self):
+        data = {
+            "trace_id": 123,
+            "session_id": None,
+            "run_id": "r1",
+        }
+        ctx = trace_context.trace_context(data)
+        assert ctx == {"agent_name": "codex", "run_id": "r1"}
+
+    def test_strips_whitespace(self):
+        data = {"trace_id": "  t1  "}
+        ctx = trace_context.trace_context(data)
+        assert ctx == {"agent_name": "codex", "trace_id": "t1"}
+
+    def test_partial_fields(self):
+        data = {"trace_id": "t1", "session_id": "s1"}
+        ctx = trace_context.trace_context(data)
+        assert ctx == {"agent_name": "codex", "trace_id": "t1", "session_id": "s1"}
+
+
+class TestWithTraceContext:
+    """Tests for with_trace_context() function."""
+
+    def test_always_injects_agent_name(self):
+        """Even with no trace fields, agent_name causes injection."""
+        args = ["agent-sec-cli", "scan-code", "--code", "echo hi"]
+        result = trace_context.with_trace_context(args, {})
+        # agent_name is always present, so --trace-context is always injected
+        assert "--trace-context" in result
+        ctx_json = result[result.index("--trace-context") + 1]
+        ctx = json.loads(ctx_json)
+        assert ctx == {"agent_name": "codex"}
+
+    def test_injects_trace_context_after_first_arg(self):
+        args = ["agent-sec-cli", "scan-code", "--code", "echo hi"]
+        data = {"trace_id": "t1", "session_id": "s1"}
+        result = trace_context.with_trace_context(args, data)
+
+        expected_ctx = json.dumps(
+            {"agent_name": "codex", "trace_id": "t1", "session_id": "s1"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        assert result == [
+            "agent-sec-cli",
+            "--trace-context",
+            expected_ctx,
+            "scan-code",
+            "--code",
+            "echo hi",
+        ]
+
+    def test_preserves_original_args_list(self):
+        """Ensure original list is not mutated."""
+        args = ["agent-sec-cli", "scan-code"]
+        original = args.copy()
+        trace_context.with_trace_context(args, {"trace_id": "t1"})
+        assert args == original
+
+    def test_full_field_mapping(self):
+        """Verify tool_use_id maps to tool_call_id in output."""
+        data = {"tool_use_id": "tu1"}
+        result = trace_context.with_trace_context(["cli", "cmd"], data)
+        ctx_json = result[2]
+        ctx = json.loads(ctx_json)
+        assert "tool_call_id" in ctx
+        assert ctx["tool_call_id"] == "tu1"

@@ -18,7 +18,7 @@ bash /path/to/codex-plugin/install.sh
 |------|------|
 | `codex` | Codex CLI，已安装且在 PATH 中 |
 | `agent-sec-cli` | agent-sec-core 安全扫描引擎，已安装且在 PATH 中 |
-| `python3` | Python 3.8+，用于运行 hook 脚本 |
+| `python3` | Python 3.11+，用于运行 hook 脚本 |
 
 ### 步骤 1：注册 Marketplace
 
@@ -79,7 +79,7 @@ codex plugin marketplace remove agent-sec
 | `PROMPT_SCANNER_TIMEOUT` | `10` | 提示词扫描 agent-sec-cli 超时秒数 |
 | `SKILL_LEDGER_MODE` | `observe` | Skill 完整性校验透出模式：`observe`(仅观察记录，不拦截) / `deny`(校验失败时拦截 prompt) |
 | `SKILL_LEDGER_TIMEOUT` | `5` | Skill 完整性校验 agent-sec-cli 超时秒数 |
-| `PII_CHECKER_MODE` | `observe` | PII 敏感信息检测透出模式：`observe`(仅观察记录，不拦截) / `deny`(检测到 PII 时拦截) |
+| `PII_CHECKER_MODE` | `observe` | PII 敏感信息检测透出模式：`observe`(仅观察记录，不拦截) / `deny`(检测到 PII 时阻断当次 payload，不做脱敏放行) |
 | `PII_CHECKER_TIMEOUT` | `5` | PII 检测 agent-sec-cli 超时秒数 |
 
 启动示例：
@@ -106,7 +106,9 @@ codex
 
 ### 自我保护机制
 
-无论 MODE 设为何值，匹配 `shell-self-protect-*` 规则的命令**始终被拦截**。这防止 AI agent 禁用自身的安全防护。
+> **当前已禁用**：agent-sec-cli 中尚无针对 Codex 的 `shell-self-protect-codex` 规则，
+> 为避免误匹配其他 agent 的 self-protect 规则，此功能暂时关闭。
+> 待 CLI 新增 codex 专属规则后可重新启用。
 
 ## 目录结构
 
@@ -132,7 +134,7 @@ codex-plugin/
 |-----------|--------|---------|------|
 | `code_scanner_hook.py` | PreToolUse | `Bash` | 扫描 shell 命令，检测反弹shell、危险删除等 |
 | `prompt_scanner_hook.py` | UserPromptSubmit | (all) | 检测用户输入中的 prompt 注入攻击 |
-| `pii_checker_hook.py` | UserPromptSubmit + PostToolUse | (all) | 检测敏感个人信息，阻止 PII 流入模型 |
+| `pii_checker_hook.py` | UserPromptSubmit + PostToolUse | (all) | 检测用户输入和工具输出中的 PII，deny 模式下阻断对应 payload（不支持脱敏放行） |
 | `skill_ledger_hook.py` | UserPromptSubmit | (all) | 解析 prompt 中的 $skill-name，验证 skill 文件完整性和签名 |
 
 ## 调试

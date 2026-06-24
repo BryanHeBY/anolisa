@@ -11,8 +11,9 @@ Modes (controlled by CODE_SCANNER_MODE env var, default: observe):
   - deny: block execution with reason when risk is detected.
           (agent-sec-cli's "warn" verdict is escalated to block in this mode)
 
-Self-protect: regardless of mode, commands matching shell-self-protect-*
-rules are always blocked.
+Self-protect: currently disabled — no codex-specific self-protect rule exists
+in agent-sec-cli yet. When shell-self-protect-codex is added, re-enable the
+check below.
 
 Usage::
 
@@ -33,7 +34,10 @@ from trace_context import with_trace_context
 # -- config ----------------------------------------------------------------
 
 MODE = os.environ.get("CODE_SCANNER_MODE", "observe").lower()
-TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
+try:
+    TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
+except (ValueError, TypeError):
+    TIMEOUT = 10
 _DEFAULT_LANGUAGE = "bash"
 
 
@@ -47,7 +51,7 @@ def _block(findings: list[dict]) -> None:
         for f in findings
     ]
     msg = (
-        f"[code-scanner] \U0001f6ab 安全拦截\uff1a检测到 {len(findings)} 个风险项:\n"
+        f"[code-scanner] ⛔ 安全拦截：检测到 {len(findings)} 个风险项:\n"
         + "\n".join(descs)
         + "\n\n该命令已被安全策略阻止。"
     )
@@ -57,10 +61,10 @@ def _block(findings: list[dict]) -> None:
 def _block_self_protect(command: str) -> None:
     """Force block for self-protect rule hits, regardless of mode."""
     msg = (
-        "[code-scanner] \U0001f6e1\ufe0f 自我保护\uff1a该命令将禁用 agent-sec 安全插件。\n"
-        "如果您确实需要禁用\uff0c请手动执行以下命令\uff1a\n\n"
+        "[code-scanner] 🛡️ 自我保护：该命令将禁用 agent-sec 安全插件。\n"
+        "如果您确实需要禁用，请手动执行以下命令：\n\n"
         f"  {command}\n\n"
-        "出于安全原因\uff0cAI agent 无法执行此操作。"
+        "出于安全原因，AI agent 无法执行此操作。"
     )
     print(json.dumps({"decision": "block", "reason": msg}, ensure_ascii=False))
 
@@ -117,16 +121,23 @@ def main() -> None:
         return  # fail-open on parse error
 
     # 5. Self-protect check (highest priority, ignores MODE)
-    findings = scan_result.get("findings", [])
-    self_protect = next(
-        (f for f in findings if f.get("rule_id", "").startswith("shell-self-protect")),
-        None,
-    )
-    if self_protect is not None:
-        _block_self_protect(command)
-        return
+    # NOTE: 当前 agent-sec-cli 中仅有 shell-self-protect-hermes 和
+    #       shell-self-protect-openclaw 两条规则，尚无针对 Codex 的
+    #       shell-self-protect-codex 规则。startswith("shell-self-protect")
+    #       可能误匹配其他 agent 的规则，因此暂时禁用此检查。
+    #       待 CLI 新增 codex 专属 self-protect 规则后，可取消注释并
+    #       改为精确匹配 "shell-self-protect-codex"。
+    # findings_all = scan_result.get("findings", [])
+    # self_protect = next(
+    #     (f for f in findings_all if f.get("rule_id", "").startswith("shell-self-protect")),
+    #     None,
+    # )
+    # if self_protect is not None:
+    #     _block_self_protect(command)
+    #     return
 
     # 6. Mode-based output
+    findings = scan_result.get("findings", [])
     verdict = scan_result.get("verdict", "pass")
 
     if verdict in ("pass", "error"):

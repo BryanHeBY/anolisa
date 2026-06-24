@@ -40,7 +40,10 @@ from trace_context import with_trace_context
 # -- config ----------------------------------------------------------------
 
 MODE = os.environ.get("PII_CHECKER_MODE", "observe").lower()
-TIMEOUT = int(os.environ.get("PII_CHECKER_TIMEOUT", "5"))
+try:
+    TIMEOUT = int(os.environ.get("PII_CHECKER_TIMEOUT", "5"))
+except (ValueError, TypeError):
+    TIMEOUT = 5
 
 _MAX_EVIDENCE_ITEMS = 3
 _MAX_EVIDENCE_CHARS = 80
