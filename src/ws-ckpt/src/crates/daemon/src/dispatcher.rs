@@ -42,6 +42,22 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Response {
                 crate::snapshot_mgr::rollback(state, &workspace, to.as_deref(), num_ancestors).await
             }
         },
+        Request::RollbackPreview {
+            workspace,
+            to,
+            num_ancestors,
+        } => match state.ensure_bootstrapped().await {
+            Err(e) => Err(e),
+            Ok(()) => {
+                crate::snapshot_mgr::rollback_preview(
+                    state,
+                    &workspace,
+                    to.as_deref(),
+                    num_ancestors,
+                )
+                .await
+            }
+        },
         Request::Delete {
             workspace,
             snapshot,

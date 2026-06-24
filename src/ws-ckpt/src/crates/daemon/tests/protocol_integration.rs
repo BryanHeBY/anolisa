@@ -50,6 +50,14 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
             from: "ws-test".to_string(),
             to: to.unwrap_or_default(),
         },
+        Request::RollbackPreview { to, .. } => Response::RollbackPreviewOk {
+            to: to.unwrap_or_default(),
+            changes: vec![DiffEntry {
+                path: "src/main.rs".to_string(),
+                change_type: ChangeType::Modified,
+                detail: Some("content changed".to_string()),
+            }],
+        },
         Request::Delete { snapshot, .. } => Response::DeleteOk { target: snapshot },
         Request::List { .. } => Response::ListOk {
             snapshots: vec![SnapshotEntry {
@@ -336,6 +344,47 @@ async fn full_rollback_request_response_over_socket() {
             assert_eq!(to, "msg1-step2");
         }
         _ => panic!("expected RollbackOk, got {:?}", response),
+    }
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn full_rollback_preview_request_response_over_socket() {
+    let socket_path = temp_socket_path();
+
+    let listener = UnixListener::bind(&socket_path).expect("bind");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        mock_server_handle(stream).await;
+    });
+
+    tokio::task::yield_now().await;
+
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+
+    let request = Request::RollbackPreview {
+        workspace: "/ws".to_string(),
+        to: Some("msg1-step2".to_string()),
+        num_ancestors: None,
+    };
+    let frame = encode_frame(&request).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let mut len_buf = [0u8; 4];
+    client.read_exact(&mut len_buf).await.unwrap();
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut payload = vec![0u8; len];
+    client.read_exact(&mut payload).await.unwrap();
+
+    let response: Response = decode_payload(&payload).unwrap();
+    match response {
+        Response::RollbackPreviewOk { to, changes } => {
+            assert_eq!(to, "msg1-step2");
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].change_type, ChangeType::Modified);
+        }
+        _ => panic!("expected RollbackPreviewOk, got {:?}", response),
     }
 
     server.await.unwrap();

@@ -176,6 +176,10 @@ enum Commands {
         /// Roll back N ancestors along parent chain — mutually exclusive with -s
         #[arg(long = "num-ancestors", short = 'n', conflicts_with = "to", value_parser = clap::value_parser!(u32).range(1..))]
         num_ancestors: Option<u32>,
+
+        /// Preview file changes without executing rollback
+        #[arg(long)]
+        preview: bool,
     },
 
     /// Delete a specific snapshot
@@ -402,17 +406,28 @@ async fn run(cli: Cli) -> Result<()> {
             workspace,
             to,
             num_ancestors,
+            preview,
         } => {
             if to.is_none() && num_ancestors.is_none() {
                 anyhow::bail!("either --snapshot/-s or --num-ancestors/-n must be specified");
             }
-            let request = Request::Rollback {
-                workspace: resolve_workspace_arg(&workspace),
-                to,
-                num_ancestors,
-            };
-            let response = send_request_to_daemon(&request).await?;
-            handle_response(response, &request).await?;
+            if preview {
+                let request = Request::RollbackPreview {
+                    workspace: resolve_workspace_arg(&workspace),
+                    to,
+                    num_ancestors,
+                };
+                let response = send_request_to_daemon(&request).await?;
+                handle_rollback_preview_response(response)?;
+            } else {
+                let request = Request::Rollback {
+                    workspace: resolve_workspace_arg(&workspace),
+                    to,
+                    num_ancestors,
+                };
+                let response = send_request_to_daemon(&request).await?;
+                handle_response(response, &request).await?;
+            }
         }
         Commands::Delete {
             workspace,
@@ -938,25 +953,7 @@ fn handle_list_response(response: Response, format: &str) -> Result<()> {
 fn handle_diff_response(response: Response) -> Result<()> {
     match response {
         Response::DiffOk { changes } => {
-            if changes.is_empty() {
-                println!("No differences found.");
-            } else {
-                for entry in &changes {
-                    let marker = match entry.change_type {
-                        ChangeType::Added => "\x1b[32m+",
-                        ChangeType::Deleted => "\x1b[31m-",
-                        ChangeType::Modified => "\x1b[33mM",
-                        ChangeType::Renamed => "\x1b[36mR",
-                    };
-                    let detail = entry
-                        .detail
-                        .as_deref()
-                        .map(|d| format!(" ({})", d))
-                        .unwrap_or_default();
-                    println!("{}  {}{}\x1b[0m", marker, entry.path, detail);
-                }
-                println!("\n{} change(s)", changes.len());
-            }
+            print_diff_entries(&changes);
         }
         Response::Error { code, message } => {
             eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
@@ -967,6 +964,49 @@ fn handle_diff_response(response: Response) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Handle RollbackPreviewOk response, formatting the rollback diff summary.
+fn handle_rollback_preview_response(response: Response) -> Result<()> {
+    match response {
+        Response::RollbackPreviewOk { to, changes } => {
+            println!("\x1b[1mRollback preview (no changes applied)\x1b[0m");
+            println!("Target snapshot: {}\n", to);
+            println!("Changes since target snapshot (rollback will revert these):");
+            print_diff_entries(&changes);
+        }
+        Response::Error { code, message } => {
+            eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
+            process::exit(1);
+        }
+        _ => {
+            eprintln!("\x1b[33mUnexpected response type\x1b[0m");
+        }
+    }
+    Ok(())
+}
+
+fn print_diff_entries(changes: &[ws_ckpt_common::DiffEntry]) {
+    if changes.is_empty() {
+        println!("No differences found.");
+        return;
+    }
+
+    for entry in changes {
+        let marker = match entry.change_type {
+            ChangeType::Added => "\x1b[32m+",
+            ChangeType::Deleted => "\x1b[31m-",
+            ChangeType::Modified => "\x1b[33mM",
+            ChangeType::Renamed => "\x1b[36mR",
+        };
+        let detail = entry
+            .detail
+            .as_deref()
+            .map(|d| format!(" ({})", d))
+            .unwrap_or_default();
+        println!("{}  {}{}\x1b[0m", marker, entry.path, detail);
+    }
+    println!("\n{} change(s)", changes.len());
 }
 
 /// Handle StatusOk response, formatting the status report.
@@ -2149,10 +2189,12 @@ mod tests {
                 workspace,
                 to,
                 num_ancestors,
+                preview,
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(to.as_deref(), Some("msg1-step1"));
                 assert_eq!(num_ancestors, None);
+                assert!(!preview);
             }
             _ => panic!("expected Rollback"),
         }
@@ -2174,10 +2216,39 @@ mod tests {
                 workspace,
                 to,
                 num_ancestors,
+                preview,
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(to, None);
                 assert_eq!(num_ancestors, Some(3));
+                assert!(!preview);
+            }
+            _ => panic!("expected Rollback"),
+        }
+    }
+
+    #[test]
+    fn parse_rollback_preview() {
+        let cli = Cli::try_parse_from([
+            "ws-ckpt",
+            "rollback",
+            "--workspace",
+            "/tmp/test",
+            "--snapshot",
+            "msg1-step1",
+            "--preview",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Rollback {
+                workspace,
+                to,
+                preview,
+                ..
+            } => {
+                assert_eq!(workspace, "/tmp/test");
+                assert_eq!(to.as_deref(), Some("msg1-step1"));
+                assert!(preview);
             }
             _ => panic!("expected Rollback"),
         }

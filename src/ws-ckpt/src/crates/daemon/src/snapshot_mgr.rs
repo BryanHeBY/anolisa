@@ -276,49 +276,13 @@ pub async fn rollback(
     // 4. Write lock: validate snapshot + execute rollback
     let mut ws = arc.write().await;
 
-    let resolved_id = if let Some(n) = num_ancestors {
-        match ws.index.ancestor(n as usize) {
-            Ok((id, _)) => id.clone(),
-            Err(e) => {
-                return Ok(Response::Error {
-                    code: ErrorCode::SnapshotNotFound,
-                    message: e.to_string(),
-                });
-            }
-        }
-    } else if let Some(target) = to {
-        match ws.index.resolve_by_prefix(target) {
-            Ok((id, _)) => id.clone(),
-            Err(ResolveError::NotFound) => {
-                return Ok(Response::Error {
-                    code: ErrorCode::SnapshotNotFound,
-                    message: format!("snapshot not found: {}", target),
-                });
-            }
-            Err(ResolveError::Ambiguous(n)) => {
-                return Ok(Response::Error {
-                    code: ErrorCode::SnapshotNotFound,
-                    message: format!("ambiguous snapshot prefix '{}': {} matches", target, n),
-                });
-            }
-        }
-    } else {
-        return Ok(Response::Error {
-            code: ErrorCode::SnapshotNotFound,
-            message: "either --snapshot or --num-ancestors must be specified".to_string(),
-        });
+    let resolved_id = match resolve_rollback_target(&ws.index, to, num_ancestors) {
+        Ok(id) => id,
+        Err(resp) => return Ok(*resp),
     };
 
-    if ws
-        .index
-        .snapshots
-        .get(&resolved_id)
-        .is_some_and(|s| s.missing)
-    {
-        return Ok(Response::Error {
-            code: ErrorCode::SnapshotNotFound,
-            message: format!("Snapshot '{}' subvolume is missing (data lost). Use 'ws-ckpt delete --force -w <workspace> -s {}' to remove the record.", resolved_id, resolved_id),
-        });
+    if let Err(resp) = reject_missing_snapshot(&ws.index, &resolved_id) {
+        return Ok(*resp);
     }
 
     // 5. Rollback via backend (includes warmup, snapshot, cleanup)
@@ -351,6 +315,82 @@ pub async fn rollback(
         from: ws.ws_id.clone(),
         to: resolved_id,
     })
+}
+
+/// Preview the file changes a rollback would apply without replacing the live workspace.
+pub async fn rollback_preview(
+    state: &Arc<DaemonState>,
+    workspace: &str,
+    to: Option<&str>,
+    num_ancestors: Option<u32>,
+) -> anyhow::Result<Response> {
+    let arc = match state.resolve_workspace(workspace).await {
+        Some(a) => a,
+        None => return Ok(workspace_not_found(workspace)),
+    };
+
+    let (ws_id, resolved_id) = {
+        let ws = arc.read().await;
+        let id = match resolve_rollback_target(&ws.index, to, num_ancestors) {
+            Ok(id) => id,
+            Err(resp) => return Ok(*resp),
+        };
+        if let Err(resp) = reject_missing_snapshot(&ws.index, &id) {
+            return Ok(*resp);
+        }
+        (ws.ws_id.clone(), id)
+    };
+
+    let changes = state.backend.diff(&ws_id, &resolved_id, None).await?;
+
+    Ok(Response::RollbackPreviewOk {
+        to: resolved_id,
+        changes,
+    })
+}
+
+fn resolve_rollback_target(
+    index: &ws_ckpt_common::SnapshotIndex,
+    to: Option<&str>,
+    num_ancestors: Option<u32>,
+) -> Result<String, Box<Response>> {
+    if let Some(n) = num_ancestors {
+        return index
+            .ancestor(n as usize)
+            .map(|(id, _)| id.clone())
+            .map_err(|e| {
+                Box::new(Response::Error {
+                    code: ErrorCode::SnapshotNotFound,
+                    message: e.to_string(),
+                })
+            });
+    }
+
+    if let Some(target) = to {
+        return index
+            .resolve_by_prefix(target)
+            .map(|(id, _)| id.clone())
+            .map_err(|err| Box::new(snapshot_resolve_error_response(target, err)));
+    }
+
+    Err(Box::new(Response::Error {
+        code: ErrorCode::SnapshotNotFound,
+        message: "either --snapshot or --num-ancestors must be specified".to_string(),
+    }))
+}
+
+fn reject_missing_snapshot(
+    index: &ws_ckpt_common::SnapshotIndex,
+    snapshot_id: &str,
+) -> Result<(), Box<Response>> {
+    if index.snapshots.get(snapshot_id).is_some_and(|s| s.missing) {
+        return Err(Box::new(Response::Error {
+            code: ErrorCode::SnapshotNotFound,
+            message: format!("Snapshot '{}' subvolume is missing (data lost). Use 'ws-ckpt delete --force -w <workspace> -s {}' to remove the record.", snapshot_id, snapshot_id),
+        }));
+    }
+
+    Ok(())
 }
 
 /// Warm up snapshot metadata cache — forwards to backends::btrfs_common.
@@ -1074,7 +1114,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn diff_snapshots_to_none_skips_resolution_and_reaches_backend() {
+    async fn diff_and_rollback_preview_reach_live_diff_backend() {
         use ws_ckpt_common::DiffEntry;
 
         struct DiffStubBackend;
@@ -1092,10 +1132,12 @@ mod tests {
             }
             async fn diff(
                 &self,
-                _ws_id: &str,
-                _from: &str,
+                ws_id: &str,
+                from: &str,
                 to: Option<&str>,
             ) -> anyhow::Result<Vec<DiffEntry>> {
+                assert_eq!(ws_id, "ws-diff-live");
+                assert_eq!(from, "snap-from");
                 assert!(to.is_none(), "expected to=None, got {:?}", to);
                 Ok(vec![DiffEntry {
                     path: "live-change.txt".into(),
@@ -1172,6 +1214,63 @@ mod tests {
                 assert_eq!(changes[0].path, "live-change.txt");
             }
             other => panic!("expected DiffOk, got: {:?}", other),
+        }
+
+        let resp = rollback_preview(&state, "ws-diff-live", Some("snap-from"), None)
+            .await
+            .unwrap();
+        match resp {
+            Response::RollbackPreviewOk { to, changes } => {
+                assert_eq!(to, "snap-from");
+                assert_eq!(changes.len(), 1);
+                assert_eq!(changes[0].path, "live-change.txt");
+            }
+            other => panic!("expected RollbackPreviewOk, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_preview_workspace_not_found() {
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+
+        let resp = rollback_preview(&state, "missing-workspace", Some("snap1"), None)
+            .await
+            .unwrap();
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::WorkspaceNotFound);
+                assert!(message.contains("missing-workspace"));
+            }
+            other => panic!("expected WorkspaceNotFound, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_preview_snapshot_not_found() {
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        state.register_workspace(
+            "ws-preview".to_string(),
+            PathBuf::from("/home/user/ws"),
+            SnapshotIndex::new(PathBuf::from("/home/user/ws")),
+        );
+
+        let resp = rollback_preview(&state, "ws-preview", Some("missing-snapshot"), None)
+            .await
+            .unwrap();
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::SnapshotNotFound);
+                assert!(message.contains("missing-snapshot"));
+            }
+            other => panic!("expected SnapshotNotFound, got: {:?}", other),
         }
     }
 

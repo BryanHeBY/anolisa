@@ -129,6 +129,11 @@ pub enum Request {
         auto_cleanup: PolicyFieldOp<bool>,
         auto_cleanup_keep: PolicyFieldOp<CleanupRetention>,
     },
+    RollbackPreview {
+        workspace: String,
+        to: Option<String>,
+        num_ancestors: Option<u32>,
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -219,6 +224,10 @@ pub enum Response {
         config: ConfigReport,
         ws_total: usize,
         ws_with_override: usize,
+    },
+    RollbackPreviewOk {
+        to: String,
+        changes: Vec<DiffEntry>,
     },
 }
 
@@ -1861,6 +1870,28 @@ mod tests {
     }
 
     #[test]
+    fn request_rollback_preview_round_trip() {
+        let req = Request::RollbackPreview {
+            workspace: "/tmp/ws".to_string(),
+            to: Some("msg1-step0".to_string()),
+            num_ancestors: None,
+        };
+        let decoded = round_trip_request(&req);
+        match decoded {
+            Request::RollbackPreview {
+                workspace,
+                to,
+                num_ancestors,
+            } => {
+                assert_eq!(workspace, "/tmp/ws");
+                assert_eq!(to.as_deref(), Some("msg1-step0"));
+                assert_eq!(num_ancestors, None);
+            }
+            _ => panic!("expected RollbackPreview variant"),
+        }
+    }
+
+    #[test]
     fn request_status_round_trip() {
         let req = Request::Status {
             workspace: Some("/tmp/ws".to_string()),
@@ -2063,6 +2094,27 @@ mod tests {
                 assert_eq!(changes[1].change_type, ChangeType::Added);
             }
             _ => panic!("expected DiffOk variant"),
+        }
+    }
+
+    #[test]
+    fn response_rollback_preview_ok_round_trip() {
+        let resp = Response::RollbackPreviewOk {
+            to: "msg1-step0".to_string(),
+            changes: vec![DiffEntry {
+                path: "src/main.rs".to_string(),
+                change_type: ChangeType::Modified,
+                detail: Some("content changed".to_string()),
+            }],
+        };
+        let decoded = round_trip_response(&resp);
+        match decoded {
+            Response::RollbackPreviewOk { to, changes } => {
+                assert_eq!(to, "msg1-step0");
+                assert_eq!(changes.len(), 1);
+                assert_eq!(changes[0].change_type, ChangeType::Modified);
+            }
+            _ => panic!("expected RollbackPreviewOk variant"),
         }
     }
 
