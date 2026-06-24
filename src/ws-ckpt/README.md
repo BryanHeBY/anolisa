@@ -69,16 +69,19 @@ sudo systemctl start ws-ckpt
 ws-ckpt init --workspace ~/my-workspace
 
 # 创建检查点
-ws-ckpt checkpoint --workspace ~/my-workspace -M 1 -S 1 -m "initial version"
+ws-ckpt checkpoint --workspace ~/my-workspace -s initial -m "initial version"
 
 # 再次修改后创建检查点
-ws-ckpt checkpoint --workspace ~/my-workspace -M 1 -S 2 -m "add feature"
+ws-ckpt checkpoint --workspace ~/my-workspace -s feature -m "add feature"
+
+# 回滚前预览将恢复的文件变更
+ws-ckpt rollback --workspace ~/my-workspace -s initial --preview
 
 # 回滚到指定快照
-ws-ckpt rollback --workspace ~/my-workspace --to msg1-step1
+ws-ckpt rollback --workspace ~/my-workspace -s initial
 
 # 删除快照
-ws-ckpt delete --workspace ~/my-workspace --snapshot msg1-step2
+ws-ckpt delete --workspace ~/my-workspace -s feature
 ```
 
 ### 快照管理
@@ -138,7 +141,7 @@ ws-ckpt reload
 |------|------|
 | `init` | 初始化工作区 |
 | `checkpoint` | 创建快照检查点 |
-| `rollback` | 回滚到指定快照 |
+| `rollback` | 预览或回滚到指定快照 |
 | `delete` | 删除工作区或单个快照 |
 | `list` | 列出工作区所有快照 |
 | `diff` | 查看两个快照间的文件变更 |

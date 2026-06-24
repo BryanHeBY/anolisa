@@ -133,7 +133,7 @@ Plugin 把以下七个工具用 OpenAI Function Calling 格式注册到 runtime:
 |------|------|----------|----------|
 | `ws-ckpt-config` | 查看 / 更新 plugin 配置 | — | `action`, `key`, `value` |
 | `ws-ckpt-checkpoint` | 手动创建快照 | `id` | `message`, `workspace` |
-| `ws-ckpt-rollback` | 回滚到指定快照或沿 parent 链回退 | — | `target`, `num_ancestors`/`numAncestors`, `workspace` |
+| `ws-ckpt-rollback` | 回滚到指定快照或沿 parent 链回退或预览回滚 | — | `target`, `num_ancestors`/`numAncestors`, `workspace`, `preview` |
 | `ws-ckpt-list` | 列出工作区所有快照 | — | — |
 | `ws-ckpt-diff` | 对比两个快照 | `from`, `to` | — |
 | `ws-ckpt-delete` | 删除指定快照 | `snapshot` | `workspace` |
@@ -141,7 +141,9 @@ Plugin 把以下七个工具用 OpenAI Function Calling 格式注册到 runtime:
 
 ### ws-ckpt-rollback 的 DAG 祖先回退
 
-`target` 和 `num_ancestors`（hermes snake_case）/ `numAncestors`（openclaw camelCase）互斥，至少提供一个。`num_ancestors` 沿 `SnapshotIndex.head` 的 parent 链回退 N 步（`1` = head 本身），映射到 CLI `ws-ckpt rollback -w <ws> -n <N>`。两个 plugin 各自校验 `>= 1`，与 `ancestor()` 入口校验形成四层防御。
+`target` 和 `num_ancestors`（hermes snake_case）/ `numAncestors`（openclaw camelCase）互斥，至少提供一个。CLI 的 `-n 1` 表示 head 本身；plugin 在每轮结束后已经为当前状态创建 head，因此面向用户的“回退 N 轮”会映射到 CLI `ws-ckpt rollback -w <ws> -n <N+1>`。两个 plugin 各自校验 `>= 1`，与 `ancestor()` 入口校验形成四层防御。
+
+两个 plugin 均暴露可选布尔参数 `preview`。为 `true` 时透传 CLI `--preview`，返回完整文件变更摘要，不刷新 snapshot cache，也不把成功结果描述为已经完成回滚。
 
 ### Workspace 解析:显式参数绕过缓存
 
@@ -161,7 +163,7 @@ plugin 配置和 daemon 配置是两层:plugin 管"开不开自动 checkpoint、
 
 ## CWD 守卫
 
-Plugin 在每次 hook/tool 入口自查 `cwd_inside_workspace`——如果自身进程的 cwd 落在工作区内，立即拒绝并返回 NOT retryable 消息。
+Plugin 在会替换工作区 inode 的 hook/tool 入口自查 `cwd_inside_workspace`——如果自身进程的 cwd 落在工作区内，立即拒绝并返回 NOT retryable 消息。`rollback preview` 只创建临时只读快照并计算差异，不替换工作区 inode，因此不受该守卫限制。
 
 这是 daemon 端 `/proc` guard 的**提前短路优化**（节省一次 RPC 往返 + 给出更友好的错误原因），不是安全边界——即使 plugin 漏检，daemon 也会强制拒绝。
 

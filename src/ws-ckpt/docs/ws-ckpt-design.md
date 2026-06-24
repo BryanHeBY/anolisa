@@ -220,7 +220,7 @@ ws-ckpt init -w <workspace>
 ### `checkpoint`
 
 ```bash
-ws-ckpt checkpoint -w <workspace> -i <id> [-m <message>] [--metadata <json>]
+ws-ckpt checkpoint -w <workspace> [-s <id>] [-m <message>] [--metadata <json>]
 ```
 
 daemon 端的关键序列（[`snapshot_mgr::checkpoint`](../src/crates/daemon/src/snapshot_mgr.rs)）：
@@ -235,7 +235,7 @@ daemon 端的关键序列（[`snapshot_mgr::checkpoint`](../src/crates/daemon/sr
 设计取舍：
 
 - **不阻塞磁盘满**：btrfs 快照是元数据 + COW，满盘也能成功；空间不足只通过 `status` / health-check 上报，不在 checkpoint 路径上 fail
-- **id 由调用方提供**：plugin 用 `secrets.token_hex(4)` / `crypto.randomUUID().slice(0,8)`，daemon 不替它生成——这样 plugin 失败重试时能用同一个 id 实现幂等
+- **id 在 CLI 边界确定**：CLI 未收到 `-s` 时自动生成 ID；plugin 使用 `secrets.token_hex(4)` / `crypto.randomUUID().slice(0,8)` 显式提供 ID；daemon 不替调用方生成
 - **metadata 用 String 而非 Value**：IPC 走 bincode，`serde_json::Value` 需要 `deserialize_any`，bincode 不支持；daemon 端再解析回 Value 存盘
 
 ### `rollback`
@@ -243,11 +243,14 @@ daemon 端的关键序列（[`snapshot_mgr::checkpoint`](../src/crates/daemon/sr
 ```bash
 ws-ckpt rollback -w <workspace> -s <snapshot>        # 按 snapshot id 回滚
 ws-ckpt rollback -w <workspace> -n 3                  # 沿 parent 链回退 3 个祖先
+ws-ckpt rollback -w <workspace> -s <snapshot> --preview # 仅预览文件变更
 ```
 
 `--snapshot/-s` 和 `--num-ancestors/-n` 互斥（clap `conflicts_with`），至少指定一个。`-n` 值由 `value_parser` 约束 `>= 1`。
 
 `-n` 路径先调用 `SnapshotIndex::ancestor(n)` 沿 `parent_id` 链解析目标 snapshot，然后走与 `-s` 相同的子卷替换流程。
+
+`--preview` 复用相同的目标解析逻辑，但不执行子卷替换。它直接复用 `backend.diff(ws_id, target, None)`，为当前工作区创建短生命周期只读快照并计算目标快照到当前工作区的标准 diff。输出表示目标快照之后发生、rollback 将撤销的变化，不尝试把 `DiffEntry` 反向转换成回滚动作；尤其 `Renamed` 没有结构化的起止路径，不能可靠反转。临时快照在成功或失败路径都会尽力删除。
 
 `backend.rollback()` 的核心是**子卷原地替换**：
 
@@ -681,7 +684,7 @@ Plugin（[Hermes](../src/plugins/hermes/) / [OpenClaw](../src/plugins/openclaw/)
 ```
 LLM Agent runtime
   └── ws-ckpt Plugin (hooks: session_start / pre_llm_call / agent_end)
-        └── subprocess: ws-ckpt checkpoint -w <ws> -i <uuid> -m "<msg>"
+        └── subprocess: ws-ckpt checkpoint -w <ws> -s <uuid> -m "<msg>"
               └── Unix Socket → daemon → btrfs
 ```
 
@@ -729,4 +732,3 @@ LLM Agent runtime
 - CLI / Plugin 不需要 root，只需对 `/run/ws-ckpt/ws-ckpt.sock` 有读写权限（socket 文件 0o666）
 - BtrfsBase 后端：宿主机器必须有 btrfs 格式磁盘
 - BtrfsLoop 后端：宿主在 `/var/lib/ws-ckpt` 有足够空间放镜像（target = `min(30 GB, 宿主总空间 × 40%)`,target 超过当前可用空间时降级为 `可用空间 × 40%`）
-
