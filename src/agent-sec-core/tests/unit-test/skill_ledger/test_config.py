@@ -29,6 +29,7 @@ from agent_sec_cli.skill_ledger.config import (
     load_config,
     remember_skill_dir,
     resolve_activation_policy,
+    resolve_managed_skill_dirs,
     resolve_skill_dirs,
 )
 from agent_sec_cli.skill_ledger.errors import ConfigError
@@ -120,6 +121,42 @@ class TestConfigMerge(unittest.TestCase):
         config = {"enableDefaultSkillDirs": True, "managedSkillDirs": ["/opt/custom/*"]}
         entries = effective_skill_dir_entries(config)
         self.assertEqual(entries, [*DEFAULT_SKILL_DIRS, "/opt/custom/*"])
+
+    def test_managed_resolver_excludes_default_skill_dirs(self):
+        tmpdir = Path(tempfile.mkdtemp())
+        try:
+            default_parent = tmpdir / "default-skills"
+            managed_parent = tmpdir / "managed-skills"
+            default_parent.mkdir()
+            managed_parent.mkdir()
+            default_skill = default_parent / "default-only"
+            managed_skill = managed_parent / "managed-only"
+            for skill in (default_skill, managed_skill):
+                skill.mkdir()
+                (skill / "SKILL.md").write_text("---\nname: test\n---\n")
+            config = {
+                "enableDefaultSkillDirs": True,
+                "managedSkillDirs": [str(managed_parent / "*")],
+            }
+
+            with patch.object(
+                config_module,
+                "DEFAULT_SKILL_DIRS",
+                [str(default_parent / "*")],
+            ):
+                all_dirs = resolve_skill_dirs(config)
+                managed_dirs = resolve_managed_skill_dirs(config)
+
+            self.assertEqual(
+                {path.resolve() for path in all_dirs},
+                {default_skill.resolve(), managed_skill.resolve()},
+            )
+            self.assertEqual(
+                [path.resolve() for path in managed_dirs],
+                [managed_skill.resolve()],
+            )
+        finally:
+            shutil.rmtree(tmpdir)
 
     def test_effective_entries_can_disable_defaults(self):
         config = {

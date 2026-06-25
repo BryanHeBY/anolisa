@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_sec_cli.skill_ledger.config import resolve_skill_dirs
+from agent_sec_cli.skill_ledger.config import resolve_managed_skill_dirs
 from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
@@ -106,7 +106,7 @@ def _configured_input_skill_dir(input_dir: Path) -> Path | None:
         input_resolved = input_dir.resolve()
     except OSError:
         return None
-    for candidate in resolve_skill_dirs():
+    for candidate in resolve_managed_skill_dirs():
         if candidate.name != input_dir.name:
             continue
         try:
@@ -128,7 +128,8 @@ def require_live_skill_dir(
     raise SkillLedgerError(
         f"cannot resolve live skill root for {Path(skill_dir)}; the path may be "
         "a SkillFS runtime view. Run the command against a Skill Ledger managed "
-        "skill path or ensure the backing skill directory is in managedSkillDirs."
+        "source/backing skill path or ensure managedSkillDirs points to "
+        "source/backing roots."
     )
 
 
@@ -139,7 +140,7 @@ def _matching_configured_skill_dirs(
 ) -> list[Path]:
     candidates: list[Path] = []
     seen: set[Path] = set()
-    for candidate in resolve_skill_dirs():
+    for candidate in resolve_managed_skill_dirs():
         if candidate.name != input_dir.name:
             continue
         try:

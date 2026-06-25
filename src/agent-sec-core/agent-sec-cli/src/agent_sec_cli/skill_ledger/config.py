@@ -136,6 +136,11 @@ def effective_skill_dir_entries(config: dict[str, Any]) -> list[str]:
     return _compact_skill_dirs(entries)
 
 
+def managed_skill_dir_entries(config: dict[str, Any]) -> list[str]:
+    """Return only explicitly managed skill directory entries."""
+    return _compact_skill_dirs([str(v) for v in config.get("managedSkillDirs", [])])
+
+
 def deprecated_skill_dir_entries(config: dict[str, Any]) -> list[str]:
     """Return deprecated skillDirs entries retained only for diagnostics."""
     entries = config.get(_DEPRECATED_SKILL_DIRS_KEY)
@@ -196,11 +201,22 @@ def resolve_skill_dirs(config: dict[str, Any] | None = None) -> list[Path]:
     """
     if config is None:
         config = load_config()
+    return _resolve_skill_dir_entries(effective_skill_dir_entries(config))
 
+
+def resolve_managed_skill_dirs(config: dict[str, Any] | None = None) -> list[Path]:
+    """Expand only explicitly managed source/backing skill directories."""
+    if config is None:
+        config = load_config()
+    return _resolve_skill_dir_entries(managed_skill_dir_entries(config))
+
+
+def _resolve_skill_dir_entries(entries: list[str]) -> list[Path]:
+    """Expand skill directory entries into concrete directories."""
     skill_dirs: list[Path] = []
     seen: set[Path] = set()
 
-    for entry in effective_skill_dir_entries(config):
+    for entry in entries:
         entry = str(entry)
         expanded = Path(entry).expanduser()
 
