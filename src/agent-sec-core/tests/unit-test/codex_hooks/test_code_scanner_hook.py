@@ -34,9 +34,18 @@ _HOOKS_DIR = str(
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-# Register under a unique sys.modules key ("codex_code_scanner_hook") so that
-# cosh-extension's same-named module is not shadowed/loaded by mistake
-# when the full test suite is collected in a single pytest invocation.
+# Temporarily register codex's trace_context so the hook's internal
+# "from trace_context import ..." resolves to the codex version,
+# not cosh-extension's same-named module that may already be cached.
+_saved_tc = sys.modules.pop("trace_context", None)
+_tc_spec = importlib.util.spec_from_file_location(
+    "trace_context", os.path.join(_HOOKS_DIR, "trace_context.py")
+)
+_tc_mod = importlib.util.module_from_spec(_tc_spec)
+sys.modules["trace_context"] = _tc_mod
+_tc_spec.loader.exec_module(_tc_mod)
+
+# Register hook under a unique sys.modules key to avoid collision.
 _spec = importlib.util.spec_from_file_location(
     "codex_code_scanner_hook",
     os.path.join(_HOOKS_DIR, "code_scanner_hook.py"),
@@ -44,6 +53,12 @@ _spec = importlib.util.spec_from_file_location(
 code_scanner_hook = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = code_scanner_hook
 _spec.loader.exec_module(code_scanner_hook)
+
+# Restore original trace_context to avoid polluting other test modules.
+if _saved_tc is not None:
+    sys.modules["trace_context"] = _saved_tc
+else:
+    sys.modules.pop("trace_context", None)
 
 _HOOK_SCRIPT = os.path.join(_HOOKS_DIR, "code_scanner_hook.py")
 
