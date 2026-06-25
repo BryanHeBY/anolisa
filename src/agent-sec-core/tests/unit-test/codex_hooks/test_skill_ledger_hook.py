@@ -148,21 +148,24 @@ class TestFailOpen:
 
     def test_empty_prompt_allows(self, mock_cli):
         env = mock_cli(output=_DRIFTED_CHECK, extra={"SKILL_LEDGER_MODE": "deny"})
-        output = _run_hook({"hook_event_name": "UserPromptSubmit", "prompt": "", "cwd": "/tmp"},
+        output = _run_hook(
+            {"hook_event_name": "UserPromptSubmit", "prompt": "", "cwd": "/tmp"},
             env_override=env,
         )
         assert output == {}
 
     def test_whitespace_prompt_allows(self, mock_cli):
         env = mock_cli(output=_DRIFTED_CHECK, extra={"SKILL_LEDGER_MODE": "deny"})
-        output = _run_hook({"hook_event_name": "UserPromptSubmit", "prompt": "   ", "cwd": "/tmp"},
+        output = _run_hook(
+            {"hook_event_name": "UserPromptSubmit", "prompt": "   ", "cwd": "/tmp"},
             env_override=env,
         )
         assert output == {}
 
     def test_no_skill_mentions_allows(self, mock_cli):
         env = mock_cli(output=_DRIFTED_CHECK, extra={"SKILL_LEDGER_MODE": "deny"})
-        output = _run_hook({
+        output = _run_hook(
+            {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "hello world no skills here",
                 "cwd": "/tmp",
@@ -173,7 +176,8 @@ class TestFailOpen:
 
     def test_only_env_var_mentions_allows(self, mock_cli):
         env = mock_cli(output=_DRIFTED_CHECK, extra={"SKILL_LEDGER_MODE": "deny"})
-        output = _run_hook({
+        output = _run_hook(
+            {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "echo $HOME $PATH",
                 "cwd": "/tmp",
@@ -184,7 +188,8 @@ class TestFailOpen:
 
     def test_unresolvable_skill_allows(self, mock_cli):
         env = mock_cli(output=_DRIFTED_CHECK, extra={"SKILL_LEDGER_MODE": "deny"})
-        output = _run_hook({
+        output = _run_hook(
+            {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "$nonexistent-skill-xyz hello",
                 "cwd": "/tmp",
@@ -219,9 +224,7 @@ class TestSkillMentionParsing:
         assert result == ["my-skill"]
 
     def test_env_vars_excluded(self):
-        result = skill_ledger_hook._extract_skill_mentions(
-            "$PATH $HOME $my-skill"
-        )
+        result = skill_ledger_hook._extract_skill_mentions("$PATH $HOME $my-skill")
         assert result == ["my-skill"]
 
     def test_codex_home_excluded(self):
@@ -517,9 +520,7 @@ class TestSkillCatalog:
         (project / ".git").mkdir()
         skill_dir = project / ".agents" / "skills" / "parent-skill"
         skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(
-            "---\nname: parent-skill\n---\n# Parent"
-        )
+        (skill_dir / "SKILL.md").write_text("---\nname: parent-skill\n---\n# Parent")
 
         cwd = project / "src" / "deep"
         cwd.mkdir(parents=True)
@@ -538,9 +539,7 @@ class TestSkillCatalog:
         # Create a real dir outside the skill root
         outside = tmp_path / "outside-secret"
         outside.mkdir()
-        (outside / "SKILL.md").write_text(
-            "---\nname: evil-skill\n---\n# Evil"
-        )
+        (outside / "SKILL.md").write_text("---\nname: evil-skill\n---\n# Evil")
 
         # Create a symlink inside skills_dir pointing to outside
         symlink = skills_dir / "evil-link"
@@ -561,9 +560,7 @@ class TestSkillCatalog:
         # Create a real skill dir inside the root
         real_skill = skills_dir / "real-skill"
         real_skill.mkdir()
-        (real_skill / "SKILL.md").write_text(
-            "---\nname: good-skill\n---\n# Good"
-        )
+        (real_skill / "SKILL.md").write_text("---\nname: good-skill\n---\n# Good")
 
         # Symlink inside root pointing to another dir inside root
         alias = skills_dir / "alias-skill"
@@ -641,7 +638,8 @@ class TestDenyMode:
                 "XDG_DATA_HOME": str(tmp_path / "xdg"),
             },
         )
-        output = _run_hook({
+        output = _run_hook(
+            {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "$my-skill 帮我重构",
                 "cwd": str(tmp_path),
@@ -669,7 +667,8 @@ class TestDenyMode:
                 "XDG_DATA_HOME": str(tmp_path / "xdg"),
             },
         )
-        output = _run_hook({
+        output = _run_hook(
+            {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "$good-skill hello",
                 "cwd": str(tmp_path),
@@ -695,7 +694,8 @@ class TestDenyMode:
                 "XDG_DATA_HOME": str(tmp_path / "xdg"),
             },
         )
-        output = _run_hook({
+        output = _run_hook(
+            {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "$bad-skill do something",
                 "cwd": str(tmp_path),
@@ -726,7 +726,8 @@ class TestObserveMode:
                 "XDG_DATA_HOME": str(tmp_path / "xdg"),
             },
         )
-        output = _run_hook({
+        output = _run_hook(
+            {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "$my-skill hello",
                 "cwd": str(tmp_path),
@@ -756,7 +757,8 @@ class TestUnknownMode:
                 "XDG_DATA_HOME": str(tmp_path / "xdg"),
             },
         )
-        output = _run_hook({
+        output = _run_hook(
+            {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "$my-skill hello",
                 "cwd": str(tmp_path),
@@ -944,11 +946,15 @@ class TestBlockStatuses:
         monkeypatch.setattr(
             skill_ledger_hook.sys,
             "stdin",
-            io.StringIO(json.dumps({
-                "hook_event_name": "UserPromptSubmit",
-                "prompt": "$s hello",
-                "cwd": str(tmp_path),
-            })),
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": "$s hello",
+                        "cwd": str(tmp_path),
+                    }
+                )
+            ),
         )
         skill_ledger_hook.main()
         out = capsys.readouterr().out
@@ -973,11 +979,15 @@ class TestBlockStatuses:
         monkeypatch.setattr(
             skill_ledger_hook.sys,
             "stdin",
-            io.StringIO(json.dumps({
-                "hook_event_name": "UserPromptSubmit",
-                "prompt": "$s hello",
-                "cwd": str(tmp_path),
-            })),
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": "$s hello",
+                        "cwd": str(tmp_path),
+                    }
+                )
+            ),
         )
         skill_ledger_hook.main()
         out = capsys.readouterr().out
@@ -1000,11 +1010,15 @@ class TestBlockStatuses:
         monkeypatch.setattr(
             skill_ledger_hook.sys,
             "stdin",
-            io.StringIO(json.dumps({
-                "hook_event_name": "UserPromptSubmit",
-                "prompt": "$s hello",
-                "cwd": str(tmp_path),
-            })),
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": "$s hello",
+                        "cwd": str(tmp_path),
+                    }
+                )
+            ),
         )
         skill_ledger_hook.main()
         out = capsys.readouterr().out
