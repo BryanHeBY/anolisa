@@ -107,11 +107,7 @@ class TestCodeScannerE2E:
     def test_self_protect_always_blocks(self):
         output = _run_hook(
             "code_scanner_hook.py",
-            {
-                "tool_input": {
-                    "command": "hermes plugins remove agent-sec-core-hermes-plugin"
-                }
-            },
+            {"tool_input": {"command": "hermes plugins remove agent-sec-core-hermes-plugin"}},
             env_extra={"CODE_SCANNER_MODE": "observe"},
         )
         assert output.get("decision") == "block"
@@ -128,7 +124,7 @@ class TestCodeScannerE2E:
     def test_python_inline_detection(self):
         output = _run_hook(
             "code_scanner_hook.py",
-            {"tool_input": {"command": 'python3 -c "pickle.loads(data)"'}},
+            {"tool_input": {"command": "python3 -c \"pickle.loads(data)\""}},
             env_extra={"CODE_SCANNER_MODE": "deny"},
         )
         assert output.get("decision") == "block"
@@ -176,10 +172,7 @@ class TestPIICheckerE2E:
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
         assert output.get("decision") == "block"
-        assert (
-            "phone" in output.get("reason", "").lower()
-            or "pii" in output.get("reason", "").lower()
-        )
+        assert "phone" in output.get("reason", "").lower() or "pii" in output.get("reason", "").lower()
 
     def test_phone_in_prompt_passes_observe(self):
         output = _run_hook(

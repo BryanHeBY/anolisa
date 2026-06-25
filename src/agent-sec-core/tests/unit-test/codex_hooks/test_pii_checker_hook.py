@@ -124,31 +124,27 @@ _POST_TOOL_USE_EVENT = {
     "session_id": "sess-1",
 }
 
-_PII_FOUND_RESULT = json.dumps(
-    {
-        "verdict": "warn",
-        "findings": [
-            {
-                "type": "phone_cn",
-                "severity": "warn",
-                "evidence_redacted": "138****8000",
-            }
-        ],
-    }
-)
+_PII_FOUND_RESULT = json.dumps({
+    "verdict": "warn",
+    "findings": [
+        {
+            "type": "phone_cn",
+            "severity": "warn",
+            "evidence_redacted": "138****8000",
+        }
+    ],
+})
 
-_PII_DENY_RESULT = json.dumps(
-    {
-        "verdict": "deny",
-        "findings": [
-            {
-                "type": "credential",
-                "severity": "deny",
-                "evidence_redacted": "password=[REDACTED]",
-            }
-        ],
-    }
-)
+_PII_DENY_RESULT = json.dumps({
+    "verdict": "deny",
+    "findings": [
+        {
+            "type": "credential",
+            "severity": "deny",
+            "evidence_redacted": "password=[REDACTED]",
+        }
+    ],
+})
 
 
 # ---------------------------------------------------------------------------
@@ -169,32 +165,28 @@ class TestFailOpen:
 
     def test_unknown_hook_event_allows(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT)
-        output = _run_hook(
-            {"hook_event_name": "PreToolUse", "prompt": "hello"},
+        output = _run_hook({"hook_event_name": "PreToolUse", "prompt": "hello"},
             env_override=env,
         )
         assert output == {}
 
     def test_missing_hook_event_allows(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT)
-        output = _run_hook(
-            {"prompt": "hello"},
+        output = _run_hook({"prompt": "hello"},
             env_override=env,
         )
         assert output == {}
 
     def test_empty_prompt_allows(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT)
-        output = _run_hook(
-            {"hook_event_name": "UserPromptSubmit", "prompt": ""},
+        output = _run_hook({"hook_event_name": "UserPromptSubmit", "prompt": ""},
             env_override=env,
         )
         assert output == {}
 
     def test_whitespace_prompt_allows(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT)
-        output = _run_hook(
-            {"hook_event_name": "UserPromptSubmit", "prompt": "   "},
+        output = _run_hook({"hook_event_name": "UserPromptSubmit", "prompt": "   "},
             env_override=env,
         )
         assert output == {}
@@ -215,8 +207,7 @@ class TestTextExtraction:
 
     def test_post_tool_use_string_response(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
-        output = _run_hook(
-            {
+        output = _run_hook({
                 "hook_event_name": "PostToolUse",
                 "tool_response": "Phone: 13800138000",
             },
@@ -226,8 +217,7 @@ class TestTextExtraction:
 
     def test_post_tool_use_dict_response(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
-        output = _run_hook(
-            {
+        output = _run_hook({
                 "hook_event_name": "PostToolUse",
                 "tool_response": {"output": "email: alice@corp.com"},
             },
@@ -237,16 +227,14 @@ class TestTextExtraction:
 
     def test_post_tool_use_empty_string_allows(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
-        output = _run_hook(
-            {"hook_event_name": "PostToolUse", "tool_response": ""},
+        output = _run_hook({"hook_event_name": "PostToolUse", "tool_response": ""},
             env_override=env,
         )
         assert output == {}
 
     def test_post_tool_use_none_response_allows(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
-        output = _run_hook(
-            {"hook_event_name": "PostToolUse"},
+        output = _run_hook({"hook_event_name": "PostToolUse"},
             env_override=env,
         )
         assert output == {}
@@ -310,19 +298,15 @@ class TestDenyMode:
     def test_no_raw_pii_in_output(self, mock_cli):
         """Block reason must never contain raw PII content."""
         env = mock_cli(
-            output=json.dumps(
-                {
-                    "verdict": "warn",
-                    "findings": [
-                        {
-                            "type": "phone_cn",
-                            "severity": "warn",
-                            "evidence_redacted": "138****8000",
-                            "raw_evidence": "13800138000",
-                        }
-                    ],
-                }
-            ),
+            output=json.dumps({
+                "verdict": "warn",
+                "findings": [{
+                    "type": "phone_cn",
+                    "severity": "warn",
+                    "evidence_redacted": "138****8000",
+                    "raw_evidence": "13800138000",
+                }],
+            }),
             extra={"PII_CHECKER_MODE": "deny"},
         )
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
@@ -446,30 +430,22 @@ class TestMainMonkeypatch:
 
     def test_deny_mode_blocks_with_findings(self, monkeypatch, capsys):
         """deny mode + PII findings → block."""
-
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
-                stdout=json.dumps(
-                    {
-                        "verdict": "warn",
-                        "findings": [
-                            {
-                                "type": "phone_cn",
-                                "severity": "warn",
-                                "evidence_redacted": "138****",
-                            },
-                        ],
-                    }
-                ),
+                stdout=json.dumps({
+                    "verdict": "warn",
+                    "findings": [
+                        {"type": "phone_cn", "severity": "warn", "evidence_redacted": "138****"},
+                    ],
+                }),
                 stderr="",
             )
 
         monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
         output = self._run_main(
-            monkeypatch,
-            capsys,
+            monkeypatch, capsys,
             {"hook_event_name": "UserPromptSubmit", "prompt": "my phone 13800138000"},
             mode="deny",
         )
@@ -478,34 +454,23 @@ class TestMainMonkeypatch:
 
     def test_deny_mode_blocks_post_tool_use(self, monkeypatch, capsys):
         """deny mode + PostToolUse PII → block with tool output message."""
-
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
-                stdout=json.dumps(
-                    {
-                        "verdict": "deny",
-                        "findings": [
-                            {
-                                "type": "email",
-                                "severity": "deny",
-                                "evidence_redacted": "a***@x.com",
-                            },
-                        ],
-                    }
-                ),
+                stdout=json.dumps({
+                    "verdict": "deny",
+                    "findings": [
+                        {"type": "email", "severity": "deny", "evidence_redacted": "a***@x.com"},
+                    ],
+                }),
                 stderr="",
             )
 
         monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
         output = self._run_main(
-            monkeypatch,
-            capsys,
-            {
-                "hook_event_name": "PostToolUse",
-                "tool_response": "email is alice@example.com",
-            },
+            monkeypatch, capsys,
+            {"hook_event_name": "PostToolUse", "tool_response": "email is alice@example.com"},
             mode="deny",
         )
         assert output["decision"] == "block"
@@ -513,24 +478,20 @@ class TestMainMonkeypatch:
 
     def test_observe_mode_allows_findings(self, monkeypatch, capsys):
         """observe mode + findings → allow."""
-
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
-                stdout=json.dumps(
-                    {
-                        "verdict": "warn",
-                        "findings": [{"type": "phone_cn", "severity": "warn"}],
-                    }
-                ),
+                stdout=json.dumps({
+                    "verdict": "warn",
+                    "findings": [{"type": "phone_cn", "severity": "warn"}],
+                }),
                 stderr="",
             )
 
         monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
         output = self._run_main(
-            monkeypatch,
-            capsys,
+            monkeypatch, capsys,
             {"hook_event_name": "UserPromptSubmit", "prompt": "13800138000"},
             mode="observe",
         )
@@ -538,7 +499,6 @@ class TestMainMonkeypatch:
 
     def test_nonzero_returncode_allows(self, monkeypatch, capsys):
         """CLI error → fail-open."""
-
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(
                 args=args, returncode=1, stdout="", stderr="error"
@@ -546,15 +506,13 @@ class TestMainMonkeypatch:
 
         monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
         output = self._run_main(
-            monkeypatch,
-            capsys,
+            monkeypatch, capsys,
             {"hook_event_name": "UserPromptSubmit", "prompt": "13800138000"},
         )
         assert output == {}
 
     def test_invalid_json_stdout_allows(self, monkeypatch, capsys):
         """Invalid JSON from CLI → fail-open."""
-
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(
                 args=args, returncode=0, stdout="not-json", stderr=""
@@ -562,8 +520,7 @@ class TestMainMonkeypatch:
 
         monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
         output = self._run_main(
-            monkeypatch,
-            capsys,
+            monkeypatch, capsys,
             {"hook_event_name": "UserPromptSubmit", "prompt": "hello"},
         )
         assert output == {}
@@ -576,8 +533,7 @@ class TestMainMonkeypatch:
     def test_unknown_hook_event_allows(self, monkeypatch, capsys):
         """Unknown hook event → fail-open."""
         output = self._run_main(
-            monkeypatch,
-            capsys,
+            monkeypatch, capsys,
             {"hook_event_name": "UnknownEvent", "prompt": "hello"},
         )
         assert output == {}
@@ -597,8 +553,7 @@ class TestMainMonkeypatch:
 
         monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
         self._run_main(
-            monkeypatch,
-            capsys,
+            monkeypatch, capsys,
             {"hook_event_name": "PostToolUse", "tool_response": {"data": "value"}},
         )
         # Should be JSON-serialized
@@ -608,8 +563,7 @@ class TestMainMonkeypatch:
     def test_post_tool_use_empty_string_allows(self, monkeypatch, capsys):
         """PostToolUse with empty string response → nothing to scan."""
         output = self._run_main(
-            monkeypatch,
-            capsys,
+            monkeypatch, capsys,
             {"hook_event_name": "PostToolUse", "tool_response": "  "},
         )
         assert output == {}
@@ -617,15 +571,13 @@ class TestMainMonkeypatch:
     def test_post_tool_use_none_response_allows(self, monkeypatch, capsys):
         """PostToolUse with null response → nothing to scan."""
         output = self._run_main(
-            monkeypatch,
-            capsys,
+            monkeypatch, capsys,
             {"hook_event_name": "PostToolUse", "tool_response": None},
         )
         assert output == {}
 
     def test_pass_verdict_allows(self, monkeypatch, capsys):
         """verdict=pass with empty findings → allow."""
-
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(
                 args=args,
@@ -636,8 +588,7 @@ class TestMainMonkeypatch:
 
         monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
         output = self._run_main(
-            monkeypatch,
-            capsys,
+            monkeypatch, capsys,
             {"hook_event_name": "UserPromptSubmit", "prompt": "hello world"},
         )
         assert output == {}
@@ -695,18 +646,16 @@ class TestFormatBlockReason:
         assert "UserPromptSubmit" in reason
 
     def test_evidence_limited_to_max(self):
-        findings = [{"type": f"t{i}", "evidence_redacted": f"ev{i}"} for i in range(10)]
-        reason = pii_checker_hook._format_block_reason(
-            findings, "PostToolUse", "工具输出"
-        )
+        findings = [
+            {"type": f"t{i}", "evidence_redacted": f"ev{i}"} for i in range(10)
+        ]
+        reason = pii_checker_hook._format_block_reason(findings, "PostToolUse", "工具输出")
         # Should only include _MAX_EVIDENCE_ITEMS
         assert reason.count("ev") <= pii_checker_hook._MAX_EVIDENCE_ITEMS + 1
 
     def test_post_tool_use_message(self):
         findings = [{"type": "phone_cn", "severity": "warn"}]
-        reason = pii_checker_hook._format_block_reason(
-            findings, "PostToolUse", "工具输出"
-        )
+        reason = pii_checker_hook._format_block_reason(findings, "PostToolUse", "工具输出")
         assert "工具输出已被拦截" in reason
 
     def test_user_prompt_submit_message(self):
