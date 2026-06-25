@@ -7,6 +7,7 @@ Coverage targets:
   - Trace context injection
 """
 
+import importlib.util
 import io
 import json
 import os
@@ -32,7 +33,16 @@ _HOOKS_DIR = str(
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-import prompt_scanner_hook  # noqa: E402
+# Register under a unique sys.modules key ("codex_prompt_scanner_hook") so that
+# cosh-extension's same-named module can still be imported as "prompt_scanner_hook"
+# when the full test suite is collected in a single pytest invocation.
+_spec = importlib.util.spec_from_file_location(
+    "codex_prompt_scanner_hook",
+    os.path.join(_HOOKS_DIR, "prompt_scanner_hook.py"),
+)
+prompt_scanner_hook = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = prompt_scanner_hook
+_spec.loader.exec_module(prompt_scanner_hook)
 
 _HOOK_SCRIPT = os.path.join(_HOOKS_DIR, "prompt_scanner_hook.py")
 

@@ -10,6 +10,7 @@ Coverage targets:
   - Trace context injection
 """
 
+import importlib.util
 import io
 import json
 import os
@@ -35,7 +36,16 @@ _HOOKS_DIR = str(
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-import pii_checker_hook  # noqa: E402
+# Register under a unique sys.modules key ("codex_pii_checker_hook") so that
+# cosh-extension's same-named module can still be imported as "pii_checker_hook"
+# when the full test suite is collected in a single pytest invocation.
+_spec = importlib.util.spec_from_file_location(
+    "codex_pii_checker_hook",
+    os.path.join(_HOOKS_DIR, "pii_checker_hook.py"),
+)
+pii_checker_hook = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = pii_checker_hook
+_spec.loader.exec_module(pii_checker_hook)
 
 _HOOK_SCRIPT = os.path.join(_HOOKS_DIR, "pii_checker_hook.py")
 
