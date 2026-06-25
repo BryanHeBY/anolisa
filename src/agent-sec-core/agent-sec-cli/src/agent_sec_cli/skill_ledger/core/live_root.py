@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from agent_sec_cli.skill_ledger.errors import SkillLedgerError
 from agent_sec_cli.skill_ledger.models.manifest import SignedManifest
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from agent_sec_cli.skill_ledger.utils import validate_skill_dir
+
+_MANAGED_RESOLUTION_REASONS = frozenset({"configured_input", "configured"})
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,35 @@ def require_live_skill_dir(
         "source/backing skill path or ensure managedSkillDirs points to "
         "source/backing roots."
     )
+
+
+def live_skill_dir_manageability(
+    resolution: LiveSkillDirResolution,
+) -> tuple[bool, str]:
+    """Return whether *resolution* names a daemon-manageable live root."""
+    if resolution.skill_dir is None:
+        return (
+            False,
+            "skill root is not resolvable from managedSkillDirs",
+        )
+    if resolution.reason not in _MANAGED_RESOLUTION_REASONS:
+        return (
+            False,
+            "skill root is not configured in managedSkillDirs as a source/backing root",
+        )
+    return ledger_update_access(resolution.skill_dir)
+
+
+def ledger_update_access(skill_dir: str | Path) -> tuple[bool, str]:
+    """Return whether current process can update this skill's ledger state."""
+    root = Path(skill_dir)
+    meta = root / ".skill-meta"
+    writable_target = meta if meta.exists() else root
+    if os.access(writable_target, os.W_OK):
+        return True, "skill root is managed and ledger state is writable"
+    if meta.exists():
+        return False, f"ledger metadata is not writable: {meta}"
+    return False, f"skill root is not writable for ledger bootstrap: {root}"
 
 
 def _matching_configured_skill_dirs(

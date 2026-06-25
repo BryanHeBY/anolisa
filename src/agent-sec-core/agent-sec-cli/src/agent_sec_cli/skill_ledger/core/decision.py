@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     diff_file_hashes,
 )
 from agent_sec_cli.skill_ledger.core.live_root import (
+    live_skill_dir_manageability,
     require_live_skill_dir,
     resolve_live_skill_dir,
 )
@@ -54,6 +56,7 @@ _TRUSTED_CURRENT_STATUSES = {"pass", "warn", "deny"}
 _ALLOWING_DECISIONS = {"allow", "always_allow", "rollback"}
 _ROOT_COPY_EXCLUDED = {SKILL_META_DIR, ".git"}
 _DECISION_LOCK = "decision.lock"
+logger = logging.getLogger(__name__)
 
 
 def decide_skill(
@@ -186,6 +189,18 @@ def show_skill(
         {"activationPolicy": policy} if policy is not None else None
     )
     live_resolution = resolve_live_skill_dir(skill_dir, backend)
+    managed, manageability_reason = live_skill_dir_manageability(live_resolution)
+    if not managed:
+        logger.info(
+            "skill-ledger show skipped unmanaged skill root: skill_dir=%s reason=%s",
+            skill_dir,
+            manageability_reason,
+        )
+        return _unmanaged_show_payload(
+            skill_dir,
+            policy=resolved_policy,
+            reason=manageability_reason,
+        )
     effective_skill_dir = (
         str(live_resolution.skill_dir)
         if live_resolution.skill_dir is not None
@@ -232,6 +247,35 @@ def show_skill(
         "consistencyReason": consistency_reason,
         "findings": status_result.get("findings", []),
         "warnings": warnings,
+    }
+
+
+def _unmanaged_show_payload(
+    skill_dir: str,
+    *,
+    policy: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "latestStatus": "unmanaged",
+        "latestVersionId": None,
+        "activeVersionId": None,
+        "target": None,
+        "userDecision": None,
+        "reasonCode": "unmanaged_skill_root",
+        "message": None,
+        "managed": False,
+        "manageabilityReason": reason,
+        "skillName": Path(skill_dir).name,
+        "activationPolicy": policy,
+        "latest": None,
+        "active": None,
+        "rootMatchesActive": None,
+        "consistencyReason": (
+            f"skill root is not managed by the current Skill Ledger daemon: {reason}"
+        ),
+        "findings": [],
+        "warnings": [],
     }
 
 

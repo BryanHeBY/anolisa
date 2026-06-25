@@ -566,6 +566,25 @@ class TestOutputMapping:
         assert output["decision"] == "block"
         assert "Latest skill status is deny" in output["reason"]
 
+    def test_block_policy_allows_unmanaged_summary_without_message(self, mock_cli_env):
+        """Unmanaged roots are diagnostic-only and must not block hook execution."""
+        env = mock_cli_env["make_env"](
+            json.dumps(
+                {
+                    "latestStatus": "unmanaged",
+                    "managed": False,
+                    "reasonCode": "unmanaged_skill_root",
+                    "message": None,
+                }
+            )
+        )
+        env["SKILL_LEDGER_HOOK_POLICY"] = "block"
+        output = _run_hook(
+            _make_skill_event("test-skill", mock_cli_env["cwd"]),
+            env_override=env,
+        )
+        assert output == {"decision": "allow"}
+
     def test_missing_message_field_allows(self, mock_cli_env):
         """CLI returns JSON without message → fail-open silent allow."""
         env = mock_cli_env["make_env"](json.dumps({"latestStatus": "deny"}))

@@ -32,6 +32,7 @@ import pytest
 from agent_sec_cli.cli import app as cli_app
 from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.core import decision as decision_core
+from agent_sec_cli.skill_ledger.core import live_root as live_root_core
 from agent_sec_cli.skill_ledger.core import resolver as resolver_core
 from agent_sec_cli.skill_ledger.core.resolver import resolve_activation
 from agent_sec_cli.skill_ledger.errors import KeyNotFoundError
@@ -2404,6 +2405,78 @@ def test_show_on_fuse_view_uses_live_root_for_status(ws):
     assert "danger.sh" not in json.dumps(fuse_out)
 
 
+def test_show_unmanaged_skill_root_returns_diagnostic(ws):
+    """show reports unmanaged roots without asking for a user decision."""
+    unmanaged_parent = ws.root / "unmanaged-skills"
+    unmanaged_skill = make_skill(
+        unmanaged_parent,
+        "decision-show-unmanaged",
+        {"data.txt": "v1"},
+    )
+    write_skill_ledger_config(
+        ws.root,
+        {"enableDefaultSkillDirs": False, "managedSkillDirs": []},
+    )
+
+    r = run_skill_ledger(["show", str(unmanaged_skill)], env_extra=ws.env())
+
+    assert r.returncode == 0, f"show failed: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    assert out["latestStatus"] == "unmanaged"
+    assert out["activeVersionId"] is None
+    assert out["target"] is None
+    assert out["userDecision"] is None
+    assert out["reasonCode"] == "unmanaged_skill_root"
+    assert out["message"] is None
+    assert out["managed"] is False
+    assert out["warnings"] == []
+    assert out["findings"] == []
+    assert out["rootMatchesActive"] is None
+    assert "managedSkillDirs" in out["manageabilityReason"]
+
+
+def test_show_managed_read_only_root_returns_unmanaged(ws, monkeypatch):
+    """A configured root that cannot update .skill-meta is diagnostic-only."""
+    skill = make_skill(
+        ws.skills_dir,
+        "decision-show-read-only",
+        {"data.txt": "v1"},
+    )
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-show-read-only-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+
+    real_access = live_root_core.os.access
+
+    def fake_access(path, mode):
+        if Path(path) == skill / ".skill-meta" and mode == os.W_OK:
+            return False
+        return real_access(path, mode)
+
+    monkeypatch.setattr(live_root_core.os, "access", fake_access)
+    previous = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    try:
+        out = decision_core.show_skill(str(skill), NativeEd25519Backend())
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert out["latestStatus"] == "unmanaged"
+    assert out["managed"] is False
+    assert out["message"] is None
+    assert "not writable" in out["manageabilityReason"]
+
+
 def test_decide_allow_on_fuse_view_updates_latest_without_rescanning(ws):
     """allow via FUSE view must not sign the active snapshot as a new version."""
     skill = make_skill(ws.skills_dir, "decision-allow-fuse-view", {"data.txt": "safe"})
@@ -2478,6 +2551,13 @@ def test_decide_does_not_trust_fuse_view_from_default_skill_dirs(ws, monkeypatch
         {"enableDefaultSkillDirs": True, "managedSkillDirs": []},
     )
     monkeypatch.setattr(config_module, "DEFAULT_SKILL_DIRS", [str(fuse_parent / "*")])
+
+    shown = run_skill_ledger(["show", str(fuse_view)], env_extra=env)
+    assert shown.returncode == 0, f"show failed: {shown.stderr}"
+    shown_out = parse_json_output(shown.stdout)
+    assert shown_out["latestStatus"] == "unmanaged"
+    assert shown_out["managed"] is False
+    assert shown_out["message"] is None
 
     r = run_skill_ledger(
         ["decide", str(fuse_view), "--action", "allow", "--reason", "reviewed"],
