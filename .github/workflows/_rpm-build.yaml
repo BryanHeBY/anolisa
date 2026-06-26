@@ -51,7 +51,7 @@ jobs:
               dnf install -y nodejs npm
               ;;
             agent-sec-core)
-              dnf install -y clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip
+              dnf install -y clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip systemd-rpm-macros
               ;;
             agentsight)
               dnf install -y rust cargo clang-devel elfutils-libelf-devel zlib-devel

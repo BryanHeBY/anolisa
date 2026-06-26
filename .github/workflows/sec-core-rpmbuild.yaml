@@ -24,7 +24,7 @@ jobs:
       - name: Configure mirrors and install dependencies
         run: |
           sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
-          dnf install -y tar git rpm-build gcc make clang llvm \
+          dnf install -y tar git rpm-build systemd-rpm-macros gcc make clang llvm \
                          openssl-devel libseccomp-devel bubblewrap \
                          python3-pip
 
