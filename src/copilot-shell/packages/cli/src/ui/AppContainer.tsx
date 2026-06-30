@@ -662,6 +662,7 @@ export const AppContainer = (props: AppContainerProps) => {
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
+    hookMultiSelectRequest,
   } = useSlashCommandProcessor(
     config,
     settings,
@@ -1562,6 +1563,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isFolderTrustDialogOpen ||
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
+    !!hookMultiSelectRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
@@ -1623,6 +1625,7 @@ export const AppContainer = (props: AppContainerProps) => {
       commandContext,
       shellConfirmationRequest,
       confirmationRequest,
+      hookMultiSelectRequest,
       confirmUpdateExtensionRequests,
       settingInputRequests,
       pluginChoiceRequests,
@@ -1725,6 +1728,7 @@ export const AppContainer = (props: AppContainerProps) => {
       commandContext,
       shellConfirmationRequest,
       confirmationRequest,
+      hookMultiSelectRequest,
       confirmUpdateExtensionRequests,
       settingInputRequests,
       pluginChoiceRequests,
