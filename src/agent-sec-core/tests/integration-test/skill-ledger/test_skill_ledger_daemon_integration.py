@@ -5,11 +5,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agent_sec_cli.daemon import skill_ledger_activation
 from agent_sec_cli.daemon.client import DaemonClient
 from agent_sec_cli.daemon.server import DaemonServer
 from agent_sec_cli.daemon.skill_ledger_activation import (
     METHOD_SKILLFS_NOTIFY_CHANGE,
 )
+from agent_sec_cli.skill_ledger import config as config_module
+from agent_sec_cli.skill_ledger.errors import SkillLedgerError
 
 PENDING_DECISION_TARGET = ".skill-meta/versions/__pending_decision__.snapshot"
 
@@ -209,8 +212,6 @@ def test_daemon_reconcile_existing_clean_skill_keeps_existing_version(
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
     socket_path = daemon_socket_path(tmp_path)
     scan_calls = {"count": 0}
-
-    from agent_sec_cli.daemon import skill_ledger_activation
 
     real_scan = skill_ledger_activation._scan_skill
 
@@ -692,6 +693,126 @@ def test_daemon_invalid_activation_policy_sets_job_error(monkeypatch, tmp_path: 
     assert activation_job["state"] == "error"
     assert "activationPolicy" in activation_job["last_error"]
     assert not (skill_dir / ".skill-meta" / "activation.json").exists()
+
+
+def test_daemon_startup_reconcile_ignores_default_discovery_dirs(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
+    managed_skill = make_skill(
+        tmp_path / "managed-skills",
+        "managed-weather",
+        {"run.sh": "echo ok\n"},
+    )
+    default_skill = make_skill(
+        tmp_path / "default-skills",
+        "default-weather",
+        {"run.sh": "echo ok\n"},
+    )
+    monkeypatch.setattr(
+        config_module,
+        "DEFAULT_SKILL_DIRS",
+        [str(default_skill.parent / "*")],
+    )
+    write_isolated_config(
+        tmp_path,
+        {
+            "enableDefaultSkillDirs": True,
+            "managedSkillDirs": [str(managed_skill)],
+        },
+    )
+    socket_path = daemon_socket_path(tmp_path)
+    scanned: list[str] = []
+
+    real_scan = skill_ledger_activation._scan_skill
+
+    def spy_scan(skill_path: str, backend: Any) -> dict[str, Any]:
+        scanned.append(skill_path)
+        return real_scan(skill_path, backend)
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        spy_scan,
+    )
+
+    async def scenario():
+        server = DaemonServer(socket_path=socket_path)
+        await server.start()
+        try:
+            activation = await wait_for(
+                lambda: (
+                    read_activation(managed_skill)
+                    if (managed_skill / ".skill-meta" / "activation.json").is_file()
+                    else None
+                )
+            )
+        finally:
+            await server.stop()
+        return activation
+
+    activation = asyncio.run(scenario())
+
+    assert activation["target"] == ".skill-meta/versions/v000001.snapshot"
+    assert scanned == [str(managed_skill.resolve())]
+    assert not (default_skill / ".skill-meta" / "activation.json").exists()
+
+
+def test_daemon_unresolved_live_root_keeps_job_running(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
+    write_isolated_config(tmp_path)
+    skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
+    socket_path = daemon_socket_path(tmp_path)
+    message = (
+        f"cannot resolve live skill root for {skill_dir.resolve()}; the path may be "
+        "a SkillFS runtime view. Run the command against a Skill Ledger managed "
+        "source/backing skill path or ensure managedSkillDirs points to "
+        "source/backing roots."
+    )
+    scan_calls = {"count": 0}
+
+    def fail_live_root(_skill_path: str, _backend: Any) -> dict[str, Any]:
+        scan_calls["count"] += 1
+        raise SkillLedgerError(message)
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        fail_live_root,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation",
+        lambda _skill_path, _backend, _policy: {"target": None},
+    )
+
+    async def scenario():
+        server = DaemonServer(socket_path=socket_path)
+        await server.start()
+        try:
+            client = DaemonClient(socket_path=socket_path, timeout_ms=3000)
+            response = await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                notify_payload(skill_dir),
+                trace_context={},
+            )
+            await wait_for(lambda: scan_calls["count"] == 1)
+            health = await asyncio.to_thread(
+                client.call,
+                "daemon.health",
+                trace_context={},
+            )
+        finally:
+            await server.stop()
+        return response, health
+
+    response, health = asyncio.run(scenario())
+
+    assert response.ok is True
+    jobs = {job["name"]: job for job in health.data["jobs"]}
+    activation_job = jobs["skill-ledger-activation"]
+    assert activation_job["state"] == "running"
+    assert activation_job["last_error"] is None
 
 
 def test_daemon_startup_reconciles_managed_skill(monkeypatch, tmp_path: Path):

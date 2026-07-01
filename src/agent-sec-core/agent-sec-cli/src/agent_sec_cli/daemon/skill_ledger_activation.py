@@ -16,6 +16,7 @@ from agent_sec_cli.daemon.jobs.base import BackgroundJob, JobStatus, utc_now
 from agent_sec_cli.daemon.protocol import DaemonRequest
 from agent_sec_cli.daemon.registry import HandlerResult, MethodSpec
 from agent_sec_cli.daemon.runtime import DaemonRuntime
+from agent_sec_cli.skill_ledger.errors import SkillLedgerError
 
 METHOD_SKILLFS_NOTIFY_CHANGE = "skill_ledger.skillfs_notify_change"
 SCHEMA_VERSION = 1
@@ -37,6 +38,7 @@ _ALLOWED_EVENT_KINDS = frozenset(
         "reconcile",
     }
 )
+_UNRESOLVED_LIVE_ROOT_PREFIX = "cannot resolve live skill root for "
 
 
 @dataclass
@@ -273,9 +275,16 @@ def process_skill_change(change: SkillFsChange) -> dict[str, Any]:
     try:
         scan_result = _scan_skill(str(change.skill_dir), backend)
     except Exception as exc:
+        if _is_unresolved_live_root_error(exc):
+            return _skipped_unmanaged_result(change, str(exc))
         scan_error = str(exc)
 
-    activation_result = _resolve_activation(str(change.skill_dir), backend, policy)
+    try:
+        activation_result = _resolve_activation(str(change.skill_dir), backend, policy)
+    except Exception as exc:
+        if scan_error is None and _is_unresolved_live_root_error(exc):
+            return _skipped_unmanaged_result(change, str(exc))
+        raise
     result: dict[str, Any] = {
         "status": "processed" if scan_error is None else "error",
         "skill": change.to_dict(),
@@ -285,6 +294,23 @@ def process_skill_change(change: SkillFsChange) -> dict[str, Any]:
     if scan_error is not None:
         result["error"] = scan_error
     return result
+
+
+def _is_unresolved_live_root_error(exc: Exception) -> bool:
+    return isinstance(exc, SkillLedgerError) and str(exc).startswith(
+        _UNRESOLVED_LIVE_ROOT_PREFIX
+    )
+
+
+def _skipped_unmanaged_result(change: SkillFsChange, message: str) -> dict[str, Any]:
+    return {
+        "status": "skipped",
+        "reasonCode": "unmanaged_skill_root",
+        "message": message,
+        "skill": change.to_dict(),
+        "scan": None,
+        "activation": None,
+    }
 
 
 def _validate_skill_dir(value: Any) -> Path:
@@ -361,7 +387,7 @@ def _resolve_activation_policy() -> str:
 
 def _resolve_managed_skill_dirs() -> list[Path]:
     from agent_sec_cli.skill_ledger.config import (  # noqa: PLC0415
-        resolve_skill_dirs,
+        resolve_managed_skill_dirs,
     )
 
-    return resolve_skill_dirs()
+    return resolve_managed_skill_dirs()

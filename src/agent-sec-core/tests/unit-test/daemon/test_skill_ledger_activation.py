@@ -19,6 +19,7 @@ from agent_sec_cli.daemon.skill_ledger_activation import (
     process_skill_change,
     skillfs_notify_change_handler,
 )
+from agent_sec_cli.skill_ledger.errors import SkillLedgerError
 
 
 def make_skill(tmp_path: Path, name: str = "demo-skill") -> Path:
@@ -384,6 +385,118 @@ def test_process_skill_change_resolves_activation_after_scan_error(
         ("scan", str(skill_dir.resolve()), backend),
         ("resolve", str(skill_dir.resolve()), backend, "pass_only"),
     ]
+
+
+def test_process_skill_change_skips_unresolved_live_root_from_scan(
+    monkeypatch,
+    tmp_path: Path,
+):
+    skill_dir = make_skill(tmp_path, "weather")
+    backend = object()
+    message = (
+        f"cannot resolve live skill root for {skill_dir.resolve()}; the path may be "
+        "a SkillFS runtime view. Run the command against a Skill Ledger managed "
+        "source/backing skill path or ensure managedSkillDirs points to "
+        "source/backing roots."
+    )
+
+    def fake_backend() -> object:
+        return backend
+
+    def fail_scan(path: str, received_backend: object) -> dict[str, Any]:
+        assert path == str(skill_dir.resolve())
+        assert received_backend is backend
+        raise SkillLedgerError(message)
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._ensure_default_backend",
+        fake_backend,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        fail_scan,
+    )
+
+    result = process_skill_change(
+        SkillFsChange(
+            skill_dir=skill_dir.resolve(),
+            skill_name=skill_dir.name,
+            event_kinds={"write"},
+            paths={"SKILL.md"},
+        )
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reasonCode"] == "unmanaged_skill_root"
+    assert result["message"] == message
+    assert result["skill"]["skillName"] == "weather"
+    assert result["scan"] is None
+    assert result["activation"] is None
+    assert "error" not in result
+
+
+def test_process_skill_change_skips_unresolved_live_root_from_activation(
+    monkeypatch,
+    tmp_path: Path,
+):
+    skill_dir = make_skill(tmp_path, "weather")
+    backend = object()
+    message = (
+        f"cannot resolve live skill root for {skill_dir.resolve()}; the path may be "
+        "a SkillFS runtime view. Run the command against a Skill Ledger managed "
+        "source/backing skill path or ensure managedSkillDirs points to "
+        "source/backing roots."
+    )
+
+    def fake_backend() -> object:
+        return backend
+
+    def fake_scan(path: str, received_backend: object) -> dict[str, Any]:
+        assert path == str(skill_dir.resolve())
+        assert received_backend is backend
+        return {"status": "noop"}
+
+    def fail_resolve(
+        path: str, received_backend: object, policy: str
+    ) -> dict[str, Any]:
+        assert path == str(skill_dir.resolve())
+        assert received_backend is backend
+        assert policy == "pass_only"
+        raise SkillLedgerError(message)
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._ensure_default_backend",
+        fake_backend,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        fake_scan,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation",
+        fail_resolve,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation_policy",
+        lambda: "pass_only",
+    )
+
+    result = process_skill_change(
+        SkillFsChange(
+            skill_dir=skill_dir.resolve(),
+            skill_name=skill_dir.name,
+            event_kinds={"write"},
+            paths={"SKILL.md"},
+        )
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reasonCode"] == "unmanaged_skill_root"
+    assert result["message"] == message
+    assert result["skill"]["skillName"] == "weather"
+    assert result["scan"] is None
+    assert result["activation"] is None
+    assert "error" not in result
 
 
 def test_default_job_name_is_stable():
