@@ -170,7 +170,8 @@ class TestVerifySkillsDir(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     def test_nonexistent_dir(self):
-        results = verify_skills_dir("/nonexistent/path", [])
+        missing_dir = os.path.join(self.tmpdir, "missing_skills")
+        results = verify_skills_dir(missing_dir, [])
         self.assertEqual(results["passed"], [])
         self.assertEqual(results["failed"], [])
 
@@ -192,8 +193,9 @@ class TestLoadConfig(unittest.TestCase):
     def test_missing_config(self):
         from pathlib import Path
 
+        missing_config = Path(self.tmpdir) / "missing.conf"
         with self.assertRaises(ErrConfigMissing):
-            load_config(Path("/nonexistent/config.conf"))
+            load_config(missing_config)
 
     def test_single_skills_dir(self):
         from pathlib import Path
@@ -229,8 +231,9 @@ class TestLoadTrustedKeys(unittest.TestCase):
     def test_nonexistent_dir(self):
         from pathlib import Path
 
+        missing_dir = Path(self.tmpdir) / "missing_keys"
         with self.assertRaises(ErrNoTrustedKeys):
-            load_trusted_keys(Path("/nonexistent/keys"))
+            load_trusted_keys(missing_dir)
 
     def test_empty_keys_dir(self):
         from pathlib import Path

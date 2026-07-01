@@ -76,8 +76,10 @@ rules:
         self.assertEqual(rules[0].patterns, ["(?i)test\\s+pattern"])
 
     def test_load_file_not_found(self):
-        with self.assertRaises(FileNotFoundError):
-            load_rules_from_yaml(Path("/nonexistent/rules.yaml"))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_path = Path(tmpdir) / "missing_rules.yaml"
+            with self.assertRaises(FileNotFoundError):
+                load_rules_from_yaml(missing_path)
 
     def test_load_invalid_yaml_syntax(self):
         with tempfile.NamedTemporaryFile(
