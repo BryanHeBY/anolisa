@@ -16,7 +16,7 @@ from agent_sec_cli.daemon.jobs.base import BackgroundJob, JobStatus, utc_now
 from agent_sec_cli.daemon.protocol import DaemonRequest
 from agent_sec_cli.daemon.registry import HandlerResult, MethodSpec
 from agent_sec_cli.daemon.runtime import DaemonRuntime
-from agent_sec_cli.skill_ledger.errors import SkillLedgerError
+from agent_sec_cli.skill_ledger.errors import UnresolvedLiveRootError
 
 METHOD_SKILLFS_NOTIFY_CHANGE = "skill_ledger.skillfs_notify_change"
 SCHEMA_VERSION = 1
@@ -38,7 +38,6 @@ _ALLOWED_EVENT_KINDS = frozenset(
         "reconcile",
     }
 )
-_UNRESOLVED_LIVE_ROOT_PREFIX = "cannot resolve live skill root for "
 
 
 @dataclass
@@ -272,18 +271,26 @@ def process_skill_change(change: SkillFsChange) -> dict[str, Any]:
     policy = _resolve_activation_policy()
     scan_result: dict[str, Any] | None = None
     scan_error: str | None = None
+    scan_exception: Exception | None = None
     try:
         scan_result = _scan_skill(str(change.skill_dir), backend)
     except Exception as exc:
         if _is_unresolved_live_root_error(exc):
             return _skipped_unmanaged_result(change, str(exc))
         scan_error = str(exc)
+        scan_exception = exc
 
     try:
         activation_result = _resolve_activation(str(change.skill_dir), backend, policy)
     except Exception as exc:
-        if scan_error is None and _is_unresolved_live_root_error(exc):
-            return _skipped_unmanaged_result(change, str(exc))
+        if _is_unresolved_live_root_error(exc):
+            if scan_exception is None:
+                return _skipped_unmanaged_result(change, str(exc))
+            # A prior scanner failure is the health signal; keep it attached
+            # instead of downgrading the later live-root failure to skipped.
+            raise exc from scan_exception
+        if scan_exception is not None:
+            raise exc from scan_exception
         raise
     result: dict[str, Any] = {
         "status": "processed" if scan_error is None else "error",
@@ -297,9 +304,7 @@ def process_skill_change(change: SkillFsChange) -> dict[str, Any]:
 
 
 def _is_unresolved_live_root_error(exc: Exception) -> bool:
-    return isinstance(exc, SkillLedgerError) and str(exc).startswith(
-        _UNRESOLVED_LIVE_ROOT_PREFIX
-    )
+    return isinstance(exc, UnresolvedLiveRootError)
 
 
 def _skipped_unmanaged_result(change: SkillFsChange, message: str) -> dict[str, Any]:

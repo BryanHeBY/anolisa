@@ -12,7 +12,7 @@ from agent_sec_cli.daemon.skill_ledger_activation import (
     METHOD_SKILLFS_NOTIFY_CHANGE,
 )
 from agent_sec_cli.skill_ledger import config as config_module
-from agent_sec_cli.skill_ledger.errors import SkillLedgerError
+from agent_sec_cli.skill_ledger.errors import UnresolvedLiveRootError
 
 PENDING_DECISION_TARGET = ".skill-meta/versions/__pending_decision__.snapshot"
 
@@ -764,17 +764,12 @@ def test_daemon_unresolved_live_root_keeps_job_running(monkeypatch, tmp_path: Pa
     write_isolated_config(tmp_path)
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
     socket_path = daemon_socket_path(tmp_path)
-    message = (
-        f"cannot resolve live skill root for {skill_dir.resolve()}; the path may be "
-        "a SkillFS runtime view. Run the command against a Skill Ledger managed "
-        "source/backing skill path or ensure managedSkillDirs points to "
-        "source/backing roots."
-    )
+    live_root_error = UnresolvedLiveRootError(skill_dir.resolve())
     scan_calls = {"count": 0}
 
     def fail_live_root(_skill_path: str, _backend: Any) -> dict[str, Any]:
         scan_calls["count"] += 1
-        raise SkillLedgerError(message)
+        raise live_root_error
 
     monkeypatch.setattr(
         "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",

@@ -1,5 +1,7 @@
 """Custom exception hierarchy for skill-ledger."""
 
+from pathlib import Path
+
 
 class SkillLedgerError(Exception):
     """Base exception for all skill-ledger errors."""
@@ -60,6 +62,24 @@ class ConfigError(SkillLedgerError):
     def __init__(self, reason: str) -> None:
         super().__init__(f"Configuration error: {reason}")
         self.reason = reason
+
+
+# ---------------------------------------------------------------------------
+# Live root resolution
+# ---------------------------------------------------------------------------
+
+
+class UnresolvedLiveRootError(SkillLedgerError):
+    """A user-visible skill path cannot be resolved to a live source root."""
+
+    def __init__(self, skill_dir: str | Path) -> None:
+        self.skill_dir = Path(skill_dir)
+        super().__init__(
+            f"cannot resolve live skill root for {self.skill_dir}; the path may be "
+            "a SkillFS runtime view. Run the command against a Skill Ledger managed "
+            "source/backing skill path or ensure managedSkillDirs points to "
+            "source/backing roots."
+        )
 
 
 # ---------------------------------------------------------------------------

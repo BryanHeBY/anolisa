@@ -19,7 +19,7 @@ from agent_sec_cli.daemon.skill_ledger_activation import (
     process_skill_change,
     skillfs_notify_change_handler,
 )
-from agent_sec_cli.skill_ledger.errors import SkillLedgerError
+from agent_sec_cli.skill_ledger.errors import UnresolvedLiveRootError
 
 
 def make_skill(tmp_path: Path, name: str = "demo-skill") -> Path:
@@ -393,12 +393,7 @@ def test_process_skill_change_skips_unresolved_live_root_from_scan(
 ):
     skill_dir = make_skill(tmp_path, "weather")
     backend = object()
-    message = (
-        f"cannot resolve live skill root for {skill_dir.resolve()}; the path may be "
-        "a SkillFS runtime view. Run the command against a Skill Ledger managed "
-        "source/backing skill path or ensure managedSkillDirs points to "
-        "source/backing roots."
-    )
+    live_root_error = UnresolvedLiveRootError(skill_dir.resolve())
 
     def fake_backend() -> object:
         return backend
@@ -406,7 +401,7 @@ def test_process_skill_change_skips_unresolved_live_root_from_scan(
     def fail_scan(path: str, received_backend: object) -> dict[str, Any]:
         assert path == str(skill_dir.resolve())
         assert received_backend is backend
-        raise SkillLedgerError(message)
+        raise live_root_error
 
     monkeypatch.setattr(
         "agent_sec_cli.daemon.skill_ledger_activation._ensure_default_backend",
@@ -428,7 +423,7 @@ def test_process_skill_change_skips_unresolved_live_root_from_scan(
 
     assert result["status"] == "skipped"
     assert result["reasonCode"] == "unmanaged_skill_root"
-    assert result["message"] == message
+    assert result["message"] == str(live_root_error)
     assert result["skill"]["skillName"] == "weather"
     assert result["scan"] is None
     assert result["activation"] is None
@@ -441,12 +436,7 @@ def test_process_skill_change_skips_unresolved_live_root_from_activation(
 ):
     skill_dir = make_skill(tmp_path, "weather")
     backend = object()
-    message = (
-        f"cannot resolve live skill root for {skill_dir.resolve()}; the path may be "
-        "a SkillFS runtime view. Run the command against a Skill Ledger managed "
-        "source/backing skill path or ensure managedSkillDirs points to "
-        "source/backing roots."
-    )
+    live_root_error = UnresolvedLiveRootError(skill_dir.resolve())
 
     def fake_backend() -> object:
         return backend
@@ -462,7 +452,7 @@ def test_process_skill_change_skips_unresolved_live_root_from_activation(
         assert path == str(skill_dir.resolve())
         assert received_backend is backend
         assert policy == "pass_only"
-        raise SkillLedgerError(message)
+        raise live_root_error
 
     monkeypatch.setattr(
         "agent_sec_cli.daemon.skill_ledger_activation._ensure_default_backend",
@@ -492,11 +482,67 @@ def test_process_skill_change_skips_unresolved_live_root_from_activation(
 
     assert result["status"] == "skipped"
     assert result["reasonCode"] == "unmanaged_skill_root"
-    assert result["message"] == message
+    assert result["message"] == str(live_root_error)
     assert result["skill"]["skillName"] == "weather"
     assert result["scan"] is None
     assert result["activation"] is None
     assert "error" not in result
+
+
+def test_process_skill_change_does_not_skip_live_root_after_scan_error(
+    monkeypatch,
+    tmp_path: Path,
+):
+    skill_dir = make_skill(tmp_path, "weather")
+    backend = object()
+    scan_failure = RuntimeError("scanner failed")
+    live_root_error = UnresolvedLiveRootError(skill_dir.resolve())
+
+    def fake_backend() -> object:
+        return backend
+
+    def fail_scan(path: str, received_backend: object) -> dict[str, Any]:
+        assert path == str(skill_dir.resolve())
+        assert received_backend is backend
+        raise scan_failure
+
+    def fail_resolve(
+        path: str, received_backend: object, policy: str
+    ) -> dict[str, Any]:
+        assert path == str(skill_dir.resolve())
+        assert received_backend is backend
+        assert policy == "pass_only"
+        raise live_root_error
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._ensure_default_backend",
+        fake_backend,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        fail_scan,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation",
+        fail_resolve,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation_policy",
+        lambda: "pass_only",
+    )
+
+    with pytest.raises(UnresolvedLiveRootError) as exc_info:
+        process_skill_change(
+            SkillFsChange(
+                skill_dir=skill_dir.resolve(),
+                skill_name=skill_dir.name,
+                event_kinds={"write"},
+                paths={"SKILL.md"},
+            )
+        )
+
+    assert exc_info.value is live_root_error
+    assert exc_info.value.__cause__ is scan_failure
 
 
 def test_default_job_name_is_stable():

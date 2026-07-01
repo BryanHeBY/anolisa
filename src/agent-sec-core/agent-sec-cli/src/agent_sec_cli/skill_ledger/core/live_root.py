@@ -19,7 +19,10 @@ from agent_sec_cli.skill_ledger.core.manifest_integrity import (
     verify_manifest_integrity,
 )
 from agent_sec_cli.skill_ledger.core.version_chain import snapshot_dir_path
-from agent_sec_cli.skill_ledger.errors import SkillLedgerError
+from agent_sec_cli.skill_ledger.errors import (
+    SkillLedgerError,
+    UnresolvedLiveRootError,
+)
 from agent_sec_cli.skill_ledger.models.manifest import SignedManifest
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from agent_sec_cli.skill_ledger.utils import validate_skill_dir
@@ -128,12 +131,7 @@ def require_live_skill_dir(
     resolution = resolve_live_skill_dir(skill_dir, backend)
     if resolution.skill_dir is not None:
         return resolution.skill_dir
-    raise SkillLedgerError(
-        f"cannot resolve live skill root for {Path(skill_dir)}; the path may be "
-        "a SkillFS runtime view. Run the command against a Skill Ledger managed "
-        "source/backing skill path or ensure managedSkillDirs points to "
-        "source/backing roots."
-    )
+    raise UnresolvedLiveRootError(Path(skill_dir))
 
 
 def live_skill_dir_manageability(
