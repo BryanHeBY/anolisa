@@ -104,7 +104,10 @@ export function registerHooks(api: OpenClawPluginApi, config: PluginConfig): voi
           console.warn("[ws-ckpt] Cron sync error:", err instanceof Error ? err.message : String(err));
         }
       }
+    }
+
     if (!config.autoCheckpoint) return;
+    const workspace = pluginState.resolvedConfig?.workspace;
     if (!pluginState.manager || !pluginState.environmentReady || !workspace) return;
 
     const cwdCheckStart = cwdInsideWorkspace(workspace);
