@@ -2329,7 +2329,8 @@ mod tests {
 
     #[test]
     fn load_config_file_nonexistent_returns_default() {
-        let fc = load_config_file(Path::new("/nonexistent/config.toml")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fc = load_config_file(&dir.path().join("config.toml")).unwrap();
         assert_eq!(fc, FileConfig::default());
     }
 
