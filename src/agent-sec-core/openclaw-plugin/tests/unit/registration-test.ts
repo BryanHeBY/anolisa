@@ -6,6 +6,8 @@ import { isCapabilityEnabled } from "../../src/registration.js";
 import type { SecurityCapability } from "../../src/types.js";
 import { skillLedger } from "../../src/capabilities/skill-ledger.js";
 
+const OPENCLAW_COMPAT_FLOOR = ">=2026.4.14";
+
 function capability(id: string): SecurityCapability {
   return {
     id,
@@ -13,6 +15,10 @@ function capability(id: string): SecurityCapability {
     hooks: [],
     register: () => {},
   };
+}
+
+function readJson(path: string): Record<string, any> {
+  return JSON.parse(readFileSync(resolve(path), "utf8")) as Record<string, any>;
 }
 
 describe("capability registration defaults", () => {
@@ -34,9 +40,7 @@ describe("capability registration defaults", () => {
   });
 
   it("does not give deprecated skill-ledger enableBlock a schema default", () => {
-    const manifest = JSON.parse(
-      readFileSync(resolve("openclaw.plugin.json"), "utf8"),
-    );
+    const manifest = readJson("openclaw.plugin.json");
     const enableBlock =
       manifest.configSchema.properties.capabilities.properties[
         "skill-ledger"
@@ -46,14 +50,40 @@ describe("capability registration defaults", () => {
   });
 
   it("defaults skill-ledger policy to ask", () => {
-    const manifest = JSON.parse(
-      readFileSync(resolve("openclaw.plugin.json"), "utf8"),
-    );
+    const manifest = readJson("openclaw.plugin.json");
     const policy =
       manifest.configSchema.properties.capabilities.properties[
         "skill-ledger"
       ].properties.policy;
 
     assert.equal(policy.default, "ask");
+  });
+
+  it("declares the OpenClaw install and plugin API compatibility floor", () => {
+    const packageManifest = readJson("package.json");
+
+    assert.equal(
+      packageManifest.openclaw.install.minHostVersion,
+      OPENCLAW_COMPAT_FLOOR,
+    );
+    assert.equal(
+      packageManifest.openclaw.compat.pluginApi,
+      OPENCLAW_COMPAT_FLOOR,
+    );
+    assert.equal(
+      packageManifest.peerDependencies.openclaw,
+      OPENCLAW_COMPAT_FLOOR,
+    );
+  });
+
+  it("declares source and built runtime plugin entry points", () => {
+    const packageManifest = readJson("package.json");
+    const manifest = readJson("openclaw.plugin.json");
+
+    assert.deepEqual(packageManifest.openclaw.extensions, ["./src/index.ts"]);
+    assert.deepEqual(packageManifest.openclaw.runtimeExtensions, [
+      "./dist/index.js",
+    ]);
+    assert.deepEqual(manifest.extensions, ["./dist/index.js"]);
   });
 });

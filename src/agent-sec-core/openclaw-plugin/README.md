@@ -10,11 +10,21 @@ OpenClaw security plugin that hooks into the agent lifecycle via `agent-sec-cli`
 |----------------|-----------|------------------------------|
 | Node.js        | >= 20     | `node --version`             |
 | npm            | >= 10     | `npm --version`              |
-| OpenClaw       | Typed plugin runtime | `openclaw --version`       |
+| OpenClaw       | >= 2026.4.14 | `openclaw --version`       |
 | agent-sec-cli  | (latest)  | `agent-sec-cli --help`       |
 | jq             | >= 1.6    | `jq --version`               |
 
-Development and test builds use the `openclaw` dev dependency pinned in `package.json` so TypeScript can compile against the newest typed hook definitions. The OpenClaw runtime does not need to match that dev dependency. Runtime compatibility is capability-based: older runtimes that do not know a typed hook ignore that hook registration with a diagnostic instead of crashing the gateway.
+Development and test builds use the `openclaw` dev dependency pinned in `package.json` so TypeScript can compile against the newest typed hook definitions. The OpenClaw runtime does not need to match that dev dependency. Runtime compatibility is capability-based: `2026.4.14` and `2026.4.23` are supported legacy baselines for core security hooks, while `model_call_started` and `model_call_ended` telemetry may degrade cleanly on those versions.
+
+## Compatibility Contract
+
+The installable package declares the OpenClaw compatibility boundary in `package.json`:
+
+- `openclaw.install.minHostVersion: ">=2026.4.14"` makes older OpenClaw hosts fail clearly during plugin install or non-bundled manifest loading.
+- `openclaw.compat.pluginApi: ">=2026.4.14"` declares the plugin SDK/runtime API floor used by OpenClaw install compatibility checks.
+- `peerDependencies.openclaw: ">=2026.4.14"` keeps npm peer metadata aligned with the OpenClaw installer contract.
+
+Package entrypoints follow the current OpenClaw plugin contract: `openclaw.extensions` points at the TypeScript source entry for checkout development, and `openclaw.runtimeExtensions` points at the built JavaScript entry used by installed packages. `openclaw.plugin.json` keeps its legacy `extensions` declaration pointed at the same built runtime entry for older manifest readers.
 
 ---
 

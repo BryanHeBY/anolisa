@@ -10,8 +10,17 @@
   ],
   "openclaw": {
     "extensions": [
+      "./src/index.ts"
+    ],
+    "runtimeExtensions": [
       "./dist/index.js"
-    ]
+    ],
+    "install": {
+      "minHostVersion": ">=2026.4.14"
+    },
+    "compat": {
+      "pluginApi": ">=2026.4.14"
+    }
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
@@ -22,7 +31,7 @@
     "test:coverage": "npx c8 --reporter=cobertura --reporter=text --reports-dir=coverage tsx --test tests/unit/*test.ts"
   },
   "peerDependencies": {
-    "openclaw": "*"
+    "openclaw": ">=2026.4.14"
   },
   "devDependencies": {
     "@types/node": ">=22",
