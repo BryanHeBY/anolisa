@@ -20,7 +20,7 @@ function shellQuote(s: string): string {
 
 function buildCronLine(workspace: string, schedule: string): string {
   return (
-    `${schedule} ws-ckpt checkpoint -w ${shellQuote(workspace)}` +
+    `${schedule} /usr/local/bin/ws-ckpt checkpoint -w ${shellQuote(workspace)}` +
     ` -s "cron-$(date +\\%s)"` +
     ` -m "scheduled snapshot"` +
     ` --metadata '{"auto":true,"type":"cron"}'` +
