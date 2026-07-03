@@ -64,7 +64,6 @@ insecure = true
 gpgcheck = true
 
 # npm -- Node-ecosystem components.
-#
-# [backends.npm]
-# base_url = "https://registry.npmjs.org"
-# scope = "@anolisa"
+[backends.npm]
+base_url = "https://registry.npmjs.org"
+scope = "@anolisa"

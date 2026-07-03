@@ -39,7 +39,8 @@
     "check:lockfile": "node scripts/check-lockfile.js",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js",
-    "package:rpm": "node scripts/package-rpm.js"
+    "package:rpm": "node scripts/package-rpm.js",
+    "package:npm": "node scripts/package-npm.js"
   },
   "bin": {
     "co": "dist/cli.js",
