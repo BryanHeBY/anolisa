@@ -10,7 +10,7 @@
   ],
   "openclaw": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ],
     "runtimeExtensions": [
       "./dist/index.js"
@@ -32,6 +32,11 @@
   },
   "peerDependencies": {
     "openclaw": ">=2026.4.14"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": ">=22",

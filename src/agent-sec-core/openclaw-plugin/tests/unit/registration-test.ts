@@ -76,11 +76,11 @@ describe("capability registration defaults", () => {
     );
   });
 
-  it("declares source and built runtime plugin entry points", () => {
+  it("declares packaged runtime plugin entry points", () => {
     const packageManifest = readJson("package.json");
     const manifest = readJson("openclaw.plugin.json");
 
-    assert.deepEqual(packageManifest.openclaw.extensions, ["./src/index.ts"]);
+    assert.deepEqual(packageManifest.openclaw.extensions, ["./dist/index.js"]);
     assert.deepEqual(packageManifest.openclaw.runtimeExtensions, [
       "./dist/index.js",
     ]);
