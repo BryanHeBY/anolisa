@@ -53,6 +53,7 @@ openclaw-plugin/
 │           ├── helpers.ts      #     generic parsing helpers
 │           └── types.ts        #     shared observability types
 ├── tests/                      # Test utilities (not compiled into dist/)
+│   ├── e2e/                    # OpenClaw plugin E2E pilot runner
 │   ├── test-harness.ts         # Mock OpenClaw API for local testing
 │   ├── smoke-test.ts           # Smoke test for all capabilities
 │   └── unit/                   # Unit tests
@@ -229,6 +230,78 @@ Runs against the real `agent-sec-cli` binary:
 ```bash
 AGENT_SEC_LIVE=1 npm run smoke
 ```
+
+### OpenClaw Plugin E2E Pilot
+
+`npm run e2e:openclaw` is the reusable pilot entry for
+`OPENCLAW-PLUGIN-E2E-PILOT`. It uses isolated state directories, builds and
+packs this plugin, starts `agent-sec-daemon`, installs the plugin into the
+selected OpenClaw runtime, starts a local Gateway, verifies runtime plugin
+loading, and writes structured evidence to `pilot-result.json`.
+
+```bash
+npm run e2e:openclaw -- \
+  --openclaw-bin /path/to/openclaw \
+  --agent-sec-cli /path/to/agent-sec-cli \
+  --agent-sec-daemon /path/to/agent-sec-daemon
+```
+
+If the binaries are already on `PATH` or in the repository root `.venv/bin/`,
+the explicit `--agent-sec-*` arguments can be omitted. From the repository root,
+`source .venv/bin/activate` also works for manual runs, but the pilot runner
+does not require the shell to be activated because it detects `.venv/bin`
+directly. The same values can be provided with
+`AGENT_SEC_OPENCLAW_PILOT_AGENT_SEC_CLI` and
+`AGENT_SEC_OPENCLAW_PILOT_AGENT_SEC_DAEMON`. Use `--workdir <dir>` to keep
+logs and artifacts in a stable directory.
+
+Optional pilot arguments:
+
+| Option | Purpose |
+|--------|---------|
+| `--workdir <dir>` | Store isolated OpenClaw state, daemon data, logs, and `pilot-result.json` under a stable directory. |
+| `--openclaw-bin <path>` | Use a specific OpenClaw executable or `openclaw.mjs`. |
+| `--agent-sec-cli <path>` | Use a specific installed `agent-sec-cli` binary. |
+| `--agent-sec-daemon <path>` | Use a specific installed `agent-sec-daemon` binary. |
+| `--port <port>` | Bind Gateway to an explicit port. Without this, the runner picks a local port and retries initial startup if that port is claimed before Gateway binds. |
+| `--gateway-timeout-ms <ms>` | Override the Gateway health wait budget. |
+| `--gateway-token <token>` | Override the generated local Gateway token. |
+| `--skip-gateway` | Stop after install/runtime inspection and skip Gateway traffic plus policy matrix probes. |
+| `--skip-failure-probes` | Skip direct hook fail-open probes for missing, broken, invalid, and slow CLI behavior. |
+
+The pilot runner does not control unsafe-install behavior. It calls `deploy.sh`
+directly and records the actual install command path through the deploy
+stdout/stderr logs.
+
+The runner starts the local Gateway with token auth and redacts the token in
+recorded command arguments. Override the generated local token with
+`--gateway-token` or `AGENT_SEC_OPENCLAW_PILOT_GATEWAY_TOKEN` only when needed.
+The default Gateway health wait is 180 seconds because first startup from an
+OpenClaw source checkout may build Control UI assets before binding the port.
+
+The runner records:
+
+- `openclaw --version`, `agent-sec-cli --version`, and package tarball path
+- isolated `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`, daemon socket, and
+  Gateway URL
+- `agent-sec-daemon` health over the Unix socket
+- `deploy.sh` stdout/stderr and whether the unsafe install flag was used
+- `openclaw plugins inspect agent-sec --runtime --json` summary
+- Gateway-driven `sessions.create` / `sessions.send` / `agent.wait` evidence
+  against a local OpenAI-compatible mock model, including a model-issued `exec`
+  tool call and tool-result follow-up request
+- Gateway log evidence that `prompt-scan` and `scan-code` ran on that real turn
+- `AGENT_SEC_DATA_DIR/observability.jsonl` records for the same Gateway run ID
+- hook-level capability probes for `prompt-scan`, `scan-code`,
+  `pii-scan-user-input`, `skill-ledger`, and `observability`
+- negative fail-open probes for missing CLI, nonzero exit, invalid JSON, and
+  timeout
+
+The Gateway traffic probe proves the installed plugin participates in a real
+OpenClaw chat/tool turn. The direct hook probes remain as supplemental capability
+and fail-open coverage for edge cases that are hard to force through a single
+model turn. The matrix task should keep this pilot as the bootstrap lane and
+run the same acceptance checks per supported host version.
 
 ---
 
