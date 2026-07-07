@@ -26,6 +26,8 @@ The installable package declares the OpenClaw compatibility boundary in `package
 
 Package entrypoints follow the current OpenClaw plugin contract: `openclaw.extensions` points at the TypeScript source entry for checkout development, and `openclaw.runtimeExtensions` points at the built JavaScript entry used by installed packages. `openclaw.plugin.json` keeps its legacy `extensions` declaration pointed at the same built runtime entry for older manifest readers.
 
+中文部署与升级指南：[docs/guide/OPENCLAW_COMPAT_DEPLOY_UPGRADE_CN.md](../docs/guide/OPENCLAW_COMPAT_DEPLOY_UPGRADE_CN.md)。
+
 ---
 
 ## Project Structure
@@ -135,17 +137,20 @@ cd src/agent-sec-core
 # Build the plugin
 make build-openclaw-plugin
 
-# Install files to /opt/agent-sec/openclaw-plugin/
+# Install files to the default source-build path:
+# /usr/local/lib/anolisa/sec-core/openclaw-plugin/
 sudo make install-openclaw-plugin
 
 # Register the plugin with OpenClaw
-sudo /opt/agent-sec/openclaw-plugin/scripts/deploy.sh /opt/agent-sec/openclaw-plugin
+sudo /usr/local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh \
+    /usr/local/lib/anolisa/sec-core/openclaw-plugin
 
 # Restart gateway to load the plugin
 openclaw gateway restart
 ```
 
 > **Note:** `make install-openclaw-plugin` only copies files. You must run `deploy.sh` separately to register the plugin.
+> To install into `/opt/agent-sec/openclaw-plugin`, pass `OPENCLAW_PLUGIN_DIR=/opt/agent-sec/openclaw-plugin` to `make install-openclaw-plugin`.
 
 ---
 
@@ -395,7 +400,8 @@ make build-openclaw-plugin
 sudo make install-openclaw-plugin
 
 # Re-register plugin
-sudo /opt/agent-sec/openclaw-plugin/scripts/deploy.sh /opt/agent-sec/openclaw-plugin
+sudo /usr/local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh \
+    /usr/local/lib/anolisa/sec-core/openclaw-plugin
 
 # Restart gateway
 openclaw gateway restart
