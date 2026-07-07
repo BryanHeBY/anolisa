@@ -158,12 +158,16 @@ openclaw gateway restart
 
 The deployment script performs these steps:
 
-1. **Pre-checks** — Verifies `openclaw` and `agent-sec-cli` are in PATH; validates `openclaw.plugin.json` and `dist/` exist
-2. **Plugin installation** — Runs `openclaw plugins install <path> --force --dangerously-force-unsafe-install` to register the plugin
-3. **Conversation access policy** — Sets `plugins.entries.agent-sec.hooks.allowConversationAccess=true` so conversation observability hooks can register
-4. **User guidance** — Displays instructions to restart the OpenClaw gateway (does NOT restart automatically)
+1. **Pre-checks** — Verifies `agent-sec-cli` and `jq` are in PATH; validates `openclaw.plugin.json`, `dist/`, and `dist/index.js` exist
+2. **OpenClaw version check** — Reads `openclaw --version` and requires OpenClaw `>=2026.4.14`
+3. **Installer capability check** — Reads `openclaw plugins install --help`, requires `--force`, and detects whether `--dangerously-force-unsafe-install` is available
+4. **Inspect capability check** — Reads `openclaw plugins inspect --help`, requires `--json`, and detects whether `--runtime` is available
+5. **Plugin installation** — Runs `openclaw plugins install <path> --force`, adding `--dangerously-force-unsafe-install` only when the current installer advertises that compatibility flag
+6. **Conversation access policy** — Sets `plugins.entries.agent-sec.hooks.allowConversationAccess=true` on OpenClaw `>=2026.4.24`; older supported hosts skip it and degrade conversation observability hooks
+7. **Runtime verification** — Uses `openclaw plugins inspect agent-sec --runtime --json` when supported, otherwise `openclaw plugins inspect agent-sec --json`, and fails unless the plugin status is `loaded`
+8. **User guidance** — Displays instructions to restart the OpenClaw gateway and optional policy commands (does NOT restart automatically)
 
-> **Important:** `deploy.sh` installs the plugin and applies required OpenClaw config. It does **NOT** start/stop/restart the gateway service.
+> **Important:** `deploy.sh` installs the plugin, applies supported OpenClaw config, and verifies the plugin load status. It does **NOT** start/stop/restart the gateway service.
 > 
 > To restart the gateway:
 > ```bash
@@ -172,55 +176,40 @@ The deployment script performs these steps:
 > systemctl --user restart openclaw-gateway-dev.service  # If using systemd user service
 > ```
 
-### Custom Config Path
+### Custom State Directory
 
 ```bash
-OPENCLAW_CONFIG=~/.openclaw-dev/openclaw.json ./scripts/deploy.sh "$(pwd)"
+OPENCLAW_STATE_DIR=~/.openclaw-dev ./scripts/deploy.sh "$(pwd)"
 ```
 
 ---
 
 ## Verify Installation
 
-After deployment, verify the plugin is loaded:
+First verify the OpenClaw install record:
 
 ```bash
-openclaw plugins inspect agent-sec
+openclaw plugins inspect agent-sec --json | jq -e '.plugin.id == "agent-sec"'
 ```
 
-Expected output:
+If the current OpenClaw supports runtime inspect, verify the runtime load state:
 
-```
-Agent Security
-id: agent-sec
-Security hooks powered by agent-sec-cli
-
-Status: loaded
-Version: 0.x.y
-Source: ~/path/to/openclaw-plugin/dist/index.js
-
-Typed hooks:
-before_dispatch (priority 200)
-before_dispatch (priority 190)
-llm_input (priority 1000)
-model_call_started (priority 1000)
-model_call_ended (priority 1000)
-llm_output (priority 1000)
-agent_end (priority 1000)
-before_tool_call (priority 80)
-before_tool_call (priority 0)
-before_tool_call (priority -10000)
-after_tool_call (priority 1000)
+```bash
+openclaw plugins inspect agent-sec --runtime --json | jq -e '.plugin.status == "loaded"'
 ```
 
-Also check the plugin is activated by gateway after openclaw **v2026.4.25**
+Older supported OpenClaw versions that do not support `--runtime` use the ordinary inspect status:
+
+```bash
+openclaw plugins inspect agent-sec --json | jq -e '.plugin.status == "loaded"'
 ```
-openclaw gateway call health --params '{"probe":true}' --json | jq -e '(.plugins.loaded // []) | index("agent-sec") != null'
+
+OpenClaw `>=2026.4.24` should also have conversation access enabled:
+
+```bash
+openclaw config get plugins.entries.agent-sec.hooks.allowConversationAccess
 ```
-Expected output:
-```
-true
-```
+
 ---
 
 ## Testing

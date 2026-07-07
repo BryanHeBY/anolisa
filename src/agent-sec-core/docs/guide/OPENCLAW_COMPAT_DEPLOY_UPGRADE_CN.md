@@ -81,6 +81,12 @@ npm run build
 ./scripts/deploy.sh "$(pwd)"
 ```
 
+如果 OpenClaw 使用非默认 state directory，部署时传入 `OPENCLAW_STATE_DIR`：
+
+```bash
+OPENCLAW_STATE_DIR=~/.openclaw-dev ./scripts/deploy.sh "$(pwd)"
+```
+
 ## deploy.sh 做了什么
 
 `deploy.sh` 负责安装期兼容处理：
