@@ -2,8 +2,29 @@ name: OpenClaw Plugin E2E
 
 on:
   pull_request:
+    branches:
+      - main
+      - 'release/agent-sec-core/**'
     paths:
       - ".github/workflows/openclaw-plugin-e2e.yml"
+      - "src/agent-sec-core/openclaw-plugin/src/**"
+      - "src/agent-sec-core/openclaw-plugin/scripts/**"
+      - "src/agent-sec-core/openclaw-plugin/tests/e2e/**"
+      - "src/agent-sec-core/openclaw-plugin/package.json"
+      - "src/agent-sec-core/openclaw-plugin/package-lock.json"
+      - "src/agent-sec-core/openclaw-plugin/tsconfig.json"
+  push:
+    branches:
+      - main
+      - 'release/agent-sec-core/**'
+    paths:
+      - ".github/workflows/openclaw-plugin-e2e.yml"
+      - "src/agent-sec-core/openclaw-plugin/src/**"
+      - "src/agent-sec-core/openclaw-plugin/scripts/**"
+      - "src/agent-sec-core/openclaw-plugin/tests/e2e/**"
+      - "src/agent-sec-core/openclaw-plugin/package.json"
+      - "src/agent-sec-core/openclaw-plugin/package-lock.json"
+      - "src/agent-sec-core/openclaw-plugin/tsconfig.json"
   workflow_dispatch:
 
 permissions:
@@ -12,7 +33,7 @@ permissions:
 jobs:
   build-agent-sec-cli:
     name: Build one agent-sec-cli wheel
-    runs-on: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["ubuntu-22.04"]' || '["self-hosted", "ubuntu"]') }}
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     defaults:
       run:
         working-directory: src/agent-sec-core
@@ -44,7 +65,7 @@ jobs:
   openclaw-plugin-e2e:
     name: OpenClaw ${{ matrix.openclaw.label }} E2E
     needs: build-agent-sec-cli
-    runs-on: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["ubuntu-22.04"]' || '["self-hosted", "ubuntu"]') }}
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
