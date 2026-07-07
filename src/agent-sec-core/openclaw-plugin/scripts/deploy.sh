@@ -162,7 +162,7 @@ version_ge() {
 detect_openclaw_version() {
     local raw_version
 
-    raw_version="$(openclaw_cli --version 2>/dev/null || true)"
+    raw_version="$(openclaw_cli --version 2>/dev/null)" || die "openclaw 不在 PATH 中或无法执行"
     extract_openclaw_version "$raw_version"
 }
 
@@ -324,7 +324,6 @@ print_inspect_debug() {
 }
 
 # 1. 前置检查
-command -v openclaw >/dev/null 2>&1 || die "openclaw 不在 PATH 中"
 command -v agent-sec-cli >/dev/null 2>&1 || die "agent-sec-cli 不在 PATH 中"
 command -v jq >/dev/null 2>&1 || die "jq 不在 PATH 中"
 [[ -f "$PLUGIN_DIR/openclaw.plugin.json" ]] || die "清单文件不存在: $PLUGIN_DIR/openclaw.plugin.json"
@@ -350,12 +349,9 @@ echo "  ✓ 插件已安装/更新"
 configure_conversation_access
 
 echo ""
-echo "校验插件安装记录..."
-openclaw_cli plugins inspect "$PLUGIN_ID" --json >/dev/null
-echo "  ✓ OpenClaw 已记录插件 ${PLUGIN_ID}"
-
-echo "校验插件运行时加载..."
+echo "校验插件安装和运行时加载..."
 verify_runtime_loaded
+echo "  ✓ OpenClaw 已记录插件 ${PLUGIN_ID}"
 if [[ "$OPENCLAW_INSPECT_SUPPORTS_RUNTIME" == "1" ]]; then
     echo "  ✓ openclaw plugins inspect ${PLUGIN_ID} --runtime --json 已证明插件可加载"
 else

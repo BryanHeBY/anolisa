@@ -282,8 +282,8 @@ describe("deploy.sh", () => {
       result.log,
       /config set plugins\.entries\.agent-sec\.hooks\.allowConversationAccess true/,
     );
-    assert.match(result.log, /plugins inspect agent-sec --json/);
     assert.match(result.log, /plugins inspect agent-sec --runtime --json/);
+    assert.doesNotMatch(result.log, /plugins inspect agent-sec --json/);
     assert.match(result.log, /plugins install .* --force --dangerously-force-unsafe-install/);
   });
 
