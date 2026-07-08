@@ -380,7 +380,7 @@ async function runPilot() {
       await stopStartedProcess(gatewayProcess);
       gatewayProcess = undefined;
     }
-    const maxAttempts = !explicitGatewayPort && reason === "initial" ? 5 : 1;
+    const maxAttempts = !explicitGatewayPort ? 5 : 1;
     let lastError;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       if (attempt > 1) {
@@ -404,7 +404,7 @@ async function runPilot() {
           reason,
           status: "started",
         });
-        return gatewayProcess;
+        return { gatewayPort, gatewayUrl, process: gatewayProcess };
       } catch (error) {
         lastError = error;
         const portBindFailure = await isGatewayPortBindFailure(error);
@@ -481,6 +481,7 @@ async function runPilot() {
       env: baseEnv,
       gatewayToken,
       gatewayUrl,
+      getGatewayUrl: () => gatewayUrl,
       logsDir,
       mockModel,
       openclawVersion: result.versions.openclaw,

@@ -136,6 +136,7 @@ export async function runGatewayPolicyMatrix({
   env,
   gatewayToken,
   gatewayUrl,
+  getGatewayUrl = () => gatewayUrl,
   logsDir,
   mockModel,
   openclawVersion,
@@ -167,7 +168,7 @@ export async function runGatewayPolicyMatrix({
       cliLogPath,
       env,
       gatewayToken,
-      gatewayUrl,
+      getGatewayUrl,
       mockModel,
       policyConfigApplication,
       pluginRoot,
@@ -183,7 +184,7 @@ export async function runGatewayPolicyMatrix({
       cliLogPath,
       env,
       gatewayToken,
-      gatewayUrl,
+      getGatewayUrl,
       mockModel,
       policyConfigApplication,
       pluginRoot,
@@ -200,7 +201,7 @@ export async function runGatewayPolicyMatrix({
       codeScanRequireApproval: false,
       env,
       gatewayToken,
-      gatewayUrl,
+      getGatewayUrl,
       mockModel,
       policyConfigApplication,
       policyDebugLog,
@@ -217,7 +218,7 @@ export async function runGatewayPolicyMatrix({
       codeScanRequireApproval: true,
       env,
       gatewayToken,
-      gatewayUrl,
+      getGatewayUrl,
       mockModel,
       policyConfigApplication,
       policyDebugLog,
@@ -347,7 +348,7 @@ async function runPromptPolicyCase({
   cliLogPath,
   env,
   gatewayToken,
-  gatewayUrl,
+  getGatewayUrl,
   mockModel,
   policyConfigApplication,
   pluginRoot,
@@ -363,7 +364,8 @@ async function runPromptPolicyCase({
     codeScanRequireApproval: true,
     env,
     gatewayToken,
-    gatewayUrl,
+    gatewayUrl: getGatewayUrl(),
+    getGatewayUrl,
     policyConfigApplication,
     pluginRoot,
     promptScanBlock,
@@ -377,7 +379,7 @@ async function runPromptPolicyCase({
     callGatewayRpc,
     caseName,
     gatewayToken,
-    gatewayUrl,
+    gatewayUrl: getGatewayUrl(),
     message: POLICY_PROMPT_DENY_TEXT,
   });
   turn.wait = unwrapGatewayPayload(
@@ -385,7 +387,11 @@ async function runPromptPolicyCase({
       `${caseName}-wait`,
       "agent.wait",
       { runId: turn.runId, timeoutMs: DEFAULT_GATEWAY_TURN_TIMEOUT_MS },
-      { gatewayToken, gatewayUrl, timeoutMs: DEFAULT_GATEWAY_TURN_TIMEOUT_MS + 30_000 },
+      {
+        gatewayToken,
+        gatewayUrl: getGatewayUrl(),
+        timeoutMs: DEFAULT_GATEWAY_TURN_TIMEOUT_MS + 30_000,
+      },
     ),
   );
   const records = await waitForSessionRecords(turn.sessionFile, 15_000);
@@ -453,7 +459,7 @@ async function runCodeApprovalPolicyCase({
   codeScanRequireApproval,
   env,
   gatewayToken,
-  gatewayUrl,
+  getGatewayUrl,
   mockModel,
   policyConfigApplication,
   policyDebugLog,
@@ -471,7 +477,8 @@ async function runCodeApprovalPolicyCase({
     codeScanRequireApproval,
     env,
     gatewayToken,
-    gatewayUrl,
+    gatewayUrl: getGatewayUrl(),
+    getGatewayUrl,
     policyConfigApplication,
     pluginRoot,
     promptScanBlock: true,
@@ -483,11 +490,12 @@ async function runCodeApprovalPolicyCase({
     const approvalPolls = [];
     const cliCallStart = await countJsonLines(cliLogPath);
     const modelRequestStart = mockModel.requests.length;
+    const activeGatewayUrl = getGatewayUrl();
     const turn = await runGatewayPolicyTurn({
       callGatewayRpc,
       caseName,
       gatewayToken,
-      gatewayUrl,
+      gatewayUrl: activeGatewayUrl,
       message:
         `[${POLICY_CODE_DENY_MARKER}] Call the exec tool with exactly \`${POLICY_CODE_DENY_COMMAND}\`, then summarize the result.`,
     });
@@ -500,7 +508,7 @@ async function runCodeApprovalPolicyCase({
         callGatewayRpc,
         descriptionIncludes: POLICY_CODE_DENY_COMMAND,
         gatewayToken,
-        gatewayUrl,
+        gatewayUrl: activeGatewayUrl,
         observations: approvalPolls,
         timeoutMs: 5_000,
       });
@@ -515,7 +523,7 @@ async function runCodeApprovalPolicyCase({
             `${caseName}-approval-deny`,
             "plugin.approval.resolve",
             { id: approval.id, decision: "deny" },
-            { gatewayToken, gatewayUrl },
+            { gatewayToken, gatewayUrl: activeGatewayUrl },
           ),
         );
       }
@@ -526,7 +534,11 @@ async function runCodeApprovalPolicyCase({
         `${caseName}-wait`,
         "agent.wait",
         { runId: turn.runId, timeoutMs: DEFAULT_GATEWAY_TURN_TIMEOUT_MS },
-        { gatewayToken, gatewayUrl, timeoutMs: DEFAULT_GATEWAY_TURN_TIMEOUT_MS + 30_000 },
+        {
+          gatewayToken,
+          gatewayUrl: activeGatewayUrl,
+          timeoutMs: DEFAULT_GATEWAY_TURN_TIMEOUT_MS + 30_000,
+        },
       ),
     );
 
@@ -551,7 +563,7 @@ async function runCodeApprovalPolicyCase({
       callGatewayRpc,
       descriptionIncludes: POLICY_CODE_DENY_COMMAND,
       gatewayToken,
-      gatewayUrl,
+      gatewayUrl: activeGatewayUrl,
     });
     const pendingApprovalsAfterWait = pendingApprovalSnapshot.matching;
 
@@ -654,6 +666,7 @@ async function applyAgentSecPolicyConfig({
   env,
   gatewayToken,
   gatewayUrl,
+  getGatewayUrl = () => gatewayUrl,
   policyConfigApplication,
   pluginRoot,
   promptScanBlock,
@@ -706,6 +719,7 @@ async function applyAgentSecPolicyConfig({
   if (changedPaths.length === 0) {
     return {
       changedPaths,
+      gatewayUrl: getGatewayUrl(),
       mode: policyConfigApplication.mode,
       skipped: true,
       reason: "policy config already matched requested values",
@@ -719,8 +733,10 @@ async function applyAgentSecPolicyConfig({
     }
     const startedAtMs = Date.now();
     await restartGateway(`policy-${slugify(caseName)}`);
+    const activeGatewayUrl = getGatewayUrl();
     return {
       changedPaths,
+      gatewayUrl: activeGatewayUrl,
       mode: policyConfigApplication.mode,
       reason: policyConfigApplication.reason,
       restartMs: Date.now() - startedAtMs,
@@ -728,19 +744,21 @@ async function applyAgentSecPolicyConfig({
         callGatewayRpc,
         caseName,
         gatewayToken,
-        gatewayUrl,
+        gatewayUrl: activeGatewayUrl,
       }),
     };
   }
   const settle = await waitForGatewayConfigSettle({ changedPaths });
+  const activeGatewayUrl = getGatewayUrl();
   return {
     ...settle,
+    gatewayUrl: activeGatewayUrl,
     mode: policyConfigApplication.mode,
     gatewayReady: await waitForGatewayReadyAfterConfig({
       callGatewayRpc,
       caseName,
       gatewayToken,
-      gatewayUrl,
+      gatewayUrl: activeGatewayUrl,
     }),
   };
 }

@@ -300,10 +300,10 @@ write_summary() {
     jq \
         --arg requested "$OPENCLAW_REQUESTED_VERSION" \
         --arg expected "$OPENCLAW_EXPECTED_VERSION" \
-        --arg label "$OPENCLAW_MATRIX_LABEL" \
+        --arg matrix_label "$OPENCLAW_MATRIX_LABEL" \
         --arg resultFile "$artifact_result_file" \
         '{
-          matrixLabel: $label,
+          matrixLabel: $matrix_label,
           requestedOpenClawVersion: $requested,
           expectedOpenClawVersion: $expected,
           detectedOpenClawVersion: .versions.openclaw,
