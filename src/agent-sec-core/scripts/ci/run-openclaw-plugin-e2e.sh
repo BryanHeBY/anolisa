@@ -16,6 +16,7 @@ OPENCLAW_EXPECTED_VERSION="${OPENCLAW_EXPECTED_VERSION:-}"
 OPENCLAW_MATRIX_LABEL="${OPENCLAW_MATRIX_LABEL:-$OPENCLAW_REQUESTED_VERSION}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
 OPENCLAW_E2E_DRY_RUN="${OPENCLAW_E2E_DRY_RUN:-0}"
+OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE="${OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE:-minimal}"
 OPENCLAW_E2E_SKIP_NPM_CI="${OPENCLAW_E2E_SKIP_NPM_CI:-0}"
 EXPECT_UNSAFE_INSTALL_FLAG="${EXPECT_UNSAFE_INSTALL_FLAG:-}"
 AGENT_SEC_CLI_BIN="${AGENT_SEC_CLI_BIN:-}"
@@ -40,6 +41,9 @@ Environment:
   AGENT_SEC_CLI_BIN             Existing agent-sec-cli binary.
   AGENT_SEC_DAEMON_BIN          Existing agent-sec-daemon binary.
   AGENT_SEC_CLI_WHEEL           Wheel artifact to install into .venv.
+  OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE
+                                minimal (default) installs E2E runtime deps
+                                without ML packages; full installs wheel deps.
   EXPECT_UNSAFE_INSTALL_FLAG    Optional true/false assertion for deploy.sh.
   OPENCLAW_E2E_RESULT_ROOT      Result root; defaults to target/openclaw-e2e/results.
   OPENCLAW_E2E_SKIP_NPM_CI      Set to 1 to skip npm ci.
@@ -110,6 +114,14 @@ tools_root="${OPENCLAW_E2E_TOOLS_ROOT:-$repo_root/target/openclaw-e2e/tools}"
 npm_cache="${NPM_CONFIG_CACHE:-$result_dir/npm-cache}"
 export NPM_CONFIG_CACHE="$npm_cache"
 export npm_config_cache="$npm_cache"
+agent_sec_cli_e2e_runtime_deps=(
+    "cryptography>=42.0"
+    "pydantic>=2.0"
+    "pyyaml>=6.0"
+    "sqlalchemy>=2.0"
+    "textual>=0.80"
+    "typer>=0.9.0"
+)
 
 sync_pilot_workdir() {
     if [[ "$OPENCLAW_E2E_DRY_RUN" == "1" || ! -d "$pilot_workdir" ]]; then
@@ -180,6 +192,23 @@ resolve_wheel_spec() {
     die "agent-sec-cli wheel not found from spec: $spec"
 }
 
+install_agent_sec_cli_wheel() {
+    local wheel="$1"
+
+    case "$OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE" in
+        minimal)
+            run uv pip install --python "$venv_dir/bin/python" "${agent_sec_cli_e2e_runtime_deps[@]}"
+            run uv pip install --python "$venv_dir/bin/python" --no-deps "$wheel"
+            ;;
+        full)
+            run uv pip install --python "$venv_dir/bin/python" "$wheel"
+            ;;
+        *)
+            die "unsupported OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE: $OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE"
+            ;;
+    esac
+}
+
 ensure_agent_sec_cli() {
     if [[ "$OPENCLAW_E2E_DRY_RUN" == "1" ]]; then
         AGENT_SEC_CLI_BIN="${AGENT_SEC_CLI_BIN:-$venv_dir/bin/agent-sec-cli}"
@@ -204,7 +233,7 @@ ensure_agent_sec_cli() {
             AGENT_SEC_CLI_WHEEL="$(resolve_wheel_spec "$AGENT_SEC_CLI_WHEEL")"
         fi
         [[ -n "$AGENT_SEC_CLI_WHEEL" ]] || die "agent-sec-cli wheel not found"
-        run uv pip install --python "$venv_dir/bin/python" "$AGENT_SEC_CLI_WHEEL"
+        install_agent_sec_cli_wheel "$AGENT_SEC_CLI_WHEEL"
         AGENT_SEC_CLI_BIN="$venv_dir/bin/agent-sec-cli"
         AGENT_SEC_DAEMON_BIN="$venv_dir/bin/agent-sec-daemon"
     fi
