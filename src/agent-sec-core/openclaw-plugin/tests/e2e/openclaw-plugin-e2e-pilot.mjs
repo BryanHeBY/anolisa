@@ -91,6 +91,11 @@ const {
   startedProcesses,
   startedServers,
 });
+let cleanupPromise;
+let handlingTerminationSignal = false;
+
+registerTerminationHandler("SIGTERM");
+registerTerminationHandler("SIGINT");
 
 try {
   await runPilot();
@@ -101,9 +106,51 @@ try {
   console.error(formatError(error));
   process.exitCode = 1;
 } finally {
-  await stopAllProcesses();
-  result.finishedAt = new Date().toISOString();
-  await writeResultFile();
+  await finishPilot();
+}
+
+async function finishPilot() {
+  if (!cleanupPromise) {
+    cleanupPromise = (async () => {
+      await stopAllProcesses();
+      result.finishedAt = new Date().toISOString();
+      await writeResultFile();
+    })();
+  }
+  return cleanupPromise;
+}
+
+function registerTerminationHandler(signal) {
+  process.once(signal, () => {
+    void handleTerminationSignal(signal);
+  });
+}
+
+async function handleTerminationSignal(signal) {
+  if (handlingTerminationSignal) return;
+  handlingTerminationSignal = true;
+
+  let exitCode = signalExitCode(signal);
+  result.status = "failed";
+  result.errors.push(serializeError(new Error(`received ${signal}`)));
+  process.exitCode = exitCode;
+  console.error(`[pilot] received ${signal}; stopping child processes`);
+
+  try {
+    await finishPilot();
+  } catch (error) {
+    exitCode = 1;
+    process.exitCode = exitCode;
+    console.error(formatError(error));
+  } finally {
+    process.exit(exitCode);
+  }
+}
+
+function signalExitCode(signal) {
+  if (signal === "SIGINT") return 130;
+  if (signal === "SIGTERM") return 143;
+  return 1;
 }
 
 async function runPilot() {

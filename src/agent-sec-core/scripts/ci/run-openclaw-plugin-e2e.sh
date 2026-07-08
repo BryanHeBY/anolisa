@@ -279,14 +279,20 @@ write_summary() {
 
     local result_file="$pilot_workdir/pilot-result.json"
     local artifact_result_file="$artifact_workdir/pilot-result.json"
+    local pilot_passed="false"
+    local unsafe_flag_matches="true"
+    local actual_unsafe
 
     [[ -f "$result_file" ]] || die "pilot result not found: $result_file"
-    jq -e '.status == "passed" and (.errors | length == 0)' "$result_file" >/dev/null
+    if jq -e '.status == "passed" and (.errors | length == 0)' "$result_file" >/dev/null; then
+        pilot_passed="true"
+    fi
 
     if [[ -n "$EXPECT_UNSAFE_INSTALL_FLAG" ]]; then
-        local actual_unsafe
         actual_unsafe="$(jq -r '.install.usedUnsafeInstallFlag' "$result_file")"
-        [[ "$actual_unsafe" == "$EXPECT_UNSAFE_INSTALL_FLAG" ]] || die "unsafe install flag mismatch: expected $EXPECT_UNSAFE_INSTALL_FLAG, got $actual_unsafe"
+        if [[ "$actual_unsafe" != "$EXPECT_UNSAFE_INSTALL_FLAG" ]]; then
+            unsafe_flag_matches="false"
+        fi
     fi
 
     local summary_json="$result_dir/summary.json"
@@ -332,6 +338,13 @@ write_summary() {
         printf '\n```\n'
     } > "$summary_md"
     log "summary: $summary_json"
+
+    if [[ "$pilot_passed" != "true" ]]; then
+        die "OpenClaw plugin E2E pilot failed; see $summary_json and $result_file"
+    fi
+    if [[ "$unsafe_flag_matches" != "true" ]]; then
+        die "unsafe install flag mismatch: expected $EXPECT_UNSAFE_INSTALL_FLAG, got $actual_unsafe"
+    fi
 }
 
 log "matrix label: $OPENCLAW_MATRIX_LABEL"
