@@ -604,6 +604,95 @@ impl std::fmt::Display for ActivationMode {
 // Startup bootstrap
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Enumerate Hermes nested skill leaves under `source_root`.
+///
+/// Walks the source root physically: first-level dirs are categories
+/// (skipping management paths), second-level dirs with `SKILL.md` are
+/// skill leaves. Returns skill ids as `"category/skill"`.
+pub fn enumerate_hermes_skill_leaves(source_root: &Path) -> Vec<String> {
+    use crate::path::is_hermes_management_path;
+
+    let mut leaves = Vec::new();
+    let entries = match std::fs::read_dir(source_root) {
+        Ok(e) => e,
+        Err(_) => return leaves,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_hermes_management_path(&name) || name.starts_with('.') {
+            continue;
+        }
+        if !entry.path().is_dir() {
+            continue;
+        }
+        // A first-level directory that carries its own SKILL.md is a
+        // top-level skill, not a category. The mount serves it (and its
+        // whole subtree) as a flat skill, so descending into it here would
+        // register `skill/subdir` as a phantom nested skill and diverge
+        // from mount discovery.
+        if entry.path().join("SKILL.md").exists() {
+            continue;
+        }
+        let cat_entries = match std::fs::read_dir(entry.path()) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for child in cat_entries.flatten() {
+            let child_name = child.file_name().to_string_lossy().to_string();
+            if !child.path().is_dir() {
+                continue;
+            }
+            if child.path().join("SKILL.md").exists() {
+                leaves.push(format!("{}/{}", name, child_name));
+            }
+        }
+    }
+    leaves
+}
+
+/// Enumerate top-level Hermes skills under `source_root`.
+///
+/// A top-level skill is a non-management directory directly under the
+/// source root that contains its own `SKILL.md`. Real Hermes workspaces
+/// mix these flat skills with categorized nested skills, so activation
+/// discovery must cover both.
+pub fn enumerate_hermes_top_level_skills(source_root: &Path) -> Vec<String> {
+    use crate::path::is_hermes_management_path;
+
+    let mut skills = Vec::new();
+    let entries = match std::fs::read_dir(source_root) {
+        Ok(e) => e,
+        Err(_) => return skills,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_hermes_management_path(&name) || name.starts_with('.') {
+            continue;
+        }
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if entry.path().join("SKILL.md").exists() {
+            skills.push(name);
+        }
+    }
+    skills
+}
+
+/// Enumerate every activatable Hermes skill id under `source_root`:
+/// top-level skills (`skill`) and categorized nested skills
+/// (`category/skill`).
+///
+/// This mirrors exactly what the FUSE mount treats as a skill — top-level
+/// directories with `SKILL.md` become flat skills, and second-level
+/// directories with `SKILL.md` become nested skills — so activation
+/// bootstrap consumes the same set the mount exposes and cannot diverge.
+pub fn enumerate_hermes_skill_ids(source_root: &Path) -> Vec<String> {
+    let mut ids = enumerate_hermes_top_level_skills(source_root);
+    ids.extend(enumerate_hermes_skill_leaves(source_root));
+    ids
+}
+
 /// Load activation state for every skill in `skill_names` and install
 /// into the given resolver. Errors are non-fatal: each failing skill is
 /// mapped to hidden with a diagnostic log line.
@@ -961,6 +1050,95 @@ mod tests {
             resolver.get("gamma"),
             Some(ActiveTarget::Hidden { .. })
         ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // enumerate_hermes_skill_leaves + bootstrap_activation with nested ids
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn enumerate_hermes_skill_leaves_finds_nested_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Management paths — should be skipped.
+        std::fs::create_dir_all(root.join(".hub")).unwrap();
+        std::fs::write(root.join(".bundled_manifest"), "").unwrap();
+
+        // Category with two skill leaves.
+        let notes = root.join("apple/apple-notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join("SKILL.md"), "---\nname: n\n---\n").unwrap();
+
+        let music = root.join("apple/apple-music");
+        std::fs::create_dir_all(&music).unwrap();
+        std::fs::write(music.join("SKILL.md"), "---\nname: m\n---\n").unwrap();
+
+        // Non-skill subdir (no SKILL.md) — should be skipped.
+        std::fs::create_dir_all(root.join("apple/docs")).unwrap();
+
+        // Dot-prefixed dir — should be skipped.
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+
+        let mut leaves = enumerate_hermes_skill_leaves(root);
+        leaves.sort();
+        assert_eq!(
+            leaves,
+            vec!["apple/apple-music", "apple/apple-notes"],
+            "must enumerate only dirs with SKILL.md, got: {:?}",
+            leaves
+        );
+    }
+
+    #[test]
+    fn bootstrap_activation_with_hermes_nested_id() {
+        use super::super::active::ActiveSkillResolver;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create a nested skill with a valid activation file.
+        let skill = root.join("apple/apple-notes");
+        std::fs::create_dir_all(skill.join(".skill-meta/versions/v000001.snapshot")).unwrap();
+        std::fs::write(
+            skill.join(".skill-meta/activation.json"),
+            r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+        )
+        .unwrap();
+
+        // Create another nested skill with hidden activation.
+        let hidden = root.join("apple/apple-music");
+        std::fs::create_dir_all(hidden.join(".skill-meta")).unwrap();
+        std::fs::write(
+            hidden.join(".skill-meta/activation.json"),
+            r#"{"schemaVersion": 1, "target": null}"#,
+        )
+        .unwrap();
+
+        let resolver = ActiveSkillResolver::new(root);
+        let names = vec![
+            "apple/apple-notes".to_string(),
+            "apple/apple-music".to_string(),
+        ];
+        let results = bootstrap_activation(root, &names, &resolver);
+
+        assert!(results[0].1.is_ok(), "apple/apple-notes must load");
+        assert!(results[1].1.is_ok(), "apple/apple-music must load");
+
+        assert!(
+            matches!(
+                resolver.get("apple/apple-notes"),
+                Some(ActiveTarget::Snapshot { .. })
+            ),
+            "apple/apple-notes must be snapshot"
+        );
+        assert!(
+            matches!(
+                resolver.get("apple/apple-music"),
+                Some(ActiveTarget::Hidden { .. })
+            ),
+            "apple/apple-music must be hidden"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────

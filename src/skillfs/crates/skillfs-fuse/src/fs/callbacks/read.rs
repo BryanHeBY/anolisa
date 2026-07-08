@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 use super::super::SkillFs;
 use super::super::read_resolution::ReadResolution;
 use crate::handles::open_options_from_flags;
-use crate::path::{PathType, is_skill_discover_path, parse_path};
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, openat_leaf};
@@ -56,7 +56,7 @@ impl SkillFs {
             }
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         // Read events are high-volume so we emit only on failure to keep the
         // audit stream useful without flooding it with per-syscall successes.
@@ -115,7 +115,69 @@ impl SkillFs {
                     }
                 }
             }
-            PathType::Passthrough { .. } | PathType::InboxPassthrough { .. } => {
+            PathType::NestedSkillMd {
+                ref category,
+                ref skill_name,
+            } if self.is_staging_skill_root(&Self::hermes_skill_id(category, skill_name))
+                || self.is_pending_install(&Self::hermes_skill_id(category, skill_name)) =>
+            {
+                // Staging / pending nested SKILL.md is served raw from the
+                // physical handle, mirroring the flat SkillMd behavior.
+                let result = self.handles.with_handle(fh, |entry| {
+                    if let Some(ref file) = entry.file {
+                        let mut buf = vec![0u8; size as usize];
+                        match file.read_at(&mut buf, offset as u64) {
+                            Ok(n) => Ok(buf[..n].to_vec()),
+                            Err(e) => Err(errno(&e)),
+                        }
+                    } else {
+                        Err(libc::EBADF)
+                    }
+                });
+                match result {
+                    Some(Ok(data)) => {
+                        reply.data(&data);
+                        return;
+                    }
+                    Some(Err(e)) => {
+                        reply.error(e);
+                        return;
+                    }
+                    None => {
+                        reply.error(libc::EBADF);
+                        return;
+                    }
+                }
+            }
+            PathType::NestedSkillMd {
+                ref category,
+                ref skill_name,
+            } => {
+                // Nested SKILL.md is compiled just like the flat SkillMd:
+                // frontmatter is stripped and env placeholders resolved, so
+                // the agent-visible content matches the flat contract.
+                match self.compiled_hermes_nested_skill_md(category, skill_name) {
+                    Some(c) => c,
+                    None => {
+                        self.emit_op_event(
+                            req,
+                            &path_type,
+                            SkillEventKind::Read,
+                            SkillEventAction::Failed,
+                            Some(libc::ENOENT),
+                            None,
+                        );
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                }
+            }
+            PathType::Passthrough { .. }
+            | PathType::InboxPassthrough { .. }
+            | PathType::HermesMeta { .. }
+            | PathType::HermesMetaChild { .. }
+            | PathType::CategoryPassthrough { .. }
+            | PathType::NestedPassthrough { .. } => {
                 // Use fd-backed read via handle
                 let result = self.handles.with_handle(fh, |entry| {
                     if let Some(ref file) = entry.file {
@@ -202,7 +264,7 @@ impl SkillFs {
             }
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
         let access_mode = flags & libc::O_ACCMODE;
         let is_write = access_mode == libc::O_WRONLY || access_mode == libc::O_RDWR;
 
@@ -232,6 +294,31 @@ impl SkillFs {
             PathType::InboxPassthrough { skill_name, .. } => {
                 if !Self::is_inbox_skill_name_allowed(skill_name) {
                     reply.error(libc::ENOENT);
+                    return;
+                }
+            }
+            PathType::CategoryDir { .. } => {
+                reply.error(libc::EISDIR);
+                return;
+            }
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => {
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                reply.error(libc::EISDIR);
+                return;
+            }
+            PathType::HermesMeta { name } => {
+                let physical = self.source_base().join(name);
+                if physical.is_dir() {
+                    reply.error(libc::EISDIR);
                     return;
                 }
             }
@@ -272,6 +359,14 @@ impl SkillFs {
                         ref skill_name,
                         ref relative_path,
                     } => Some(self.inbox_skill_dir(skill_name).join(relative_path)),
+                    PathType::NestedPassthrough {
+                        ref category,
+                        ref skill_name,
+                        ref relative_path,
+                    } => Some(
+                        self.hermes_skill_physical_dir(category, skill_name)
+                            .join(relative_path),
+                    ),
                     _ => None,
                 };
                 if let Some(physical) = physical {
@@ -434,6 +529,50 @@ impl SkillFs {
                     }
                 }
             }
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            }
+            | PathType::NestedPassthrough {
+                category,
+                skill_name,
+                ..
+            } => {
+                // H3: staging and pending install bypass for nested skills.
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nested_id) && !self.is_pending_install(&nested_id) {
+                    let grace_rel = match &path_type {
+                        PathType::NestedPassthrough { relative_path, .. } => {
+                            Some(relative_path.as_path())
+                        }
+                        PathType::NestedSkillMd { .. } => Some(Path::new("SKILL.md")),
+                        _ => None,
+                    };
+                    match self.resolve_hermes_nested_read(category, skill_name) {
+                        ReadResolution::Hidden
+                            if !self.is_post_publish_grace_allowed(&nested_id, grace_rel) =>
+                        {
+                            reply.error(libc::ENOENT);
+                            return;
+                        }
+                        ReadResolution::Hidden => {
+                            // H3: grace bypass — let the open proceed against source.
+                        }
+                        ReadResolution::Snapshot { dir, .. } if !is_mutating_open => {
+                            match &path_type {
+                                PathType::NestedSkillMd { .. } => {
+                                    physical = dir.join("SKILL.md");
+                                }
+                                PathType::NestedPassthrough { relative_path, .. } => {
+                                    physical = dir.join(relative_path);
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -568,6 +707,88 @@ impl SkillFs {
                 let fh = self
                     .handles
                     .allocate(ino, flags, None, pinned_target.clone());
+                self.emit_op_event(
+                    req,
+                    &path_type,
+                    SkillEventKind::Open,
+                    SkillEventAction::Allowed,
+                    None,
+                    None,
+                );
+                reply.opened(fh, 0);
+            }
+            return;
+        }
+
+        // Nested SKILL.md: virtual compiled read, physical write. Mirrors
+        // the flat SkillMd handling so nested skills strip frontmatter on
+        // read while writes still target the live source file.
+        if let PathType::NestedSkillMd {
+            ref category,
+            ref skill_name,
+        } = path_type
+        {
+            let nested_id = Self::hermes_skill_id(category, skill_name);
+            let is_trunc = (flags & libc::O_TRUNC) != 0;
+
+            if is_trunc {
+                if let Err(e) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&physical)
+                {
+                    warn!(op = "open", ?physical, error = %e, "nested SKILL.md O_TRUNC failed");
+                    reply.error(errno(&e));
+                    return;
+                }
+                self.observe_mutation(
+                    &nested_id,
+                    Some(Path::new("SKILL.md")),
+                    crate::security::MutationKind::SetattrTruncate,
+                );
+            }
+
+            if is_write {
+                match open_options_from_flags(flags).open(&physical) {
+                    Ok(file) => {
+                        let fh = self.handles.allocate(ino, flags, Some(file), None);
+                        self.emit_op_event(
+                            req,
+                            &path_type,
+                            SkillEventKind::Open,
+                            SkillEventAction::Allowed,
+                            None,
+                            None,
+                        );
+                        reply.opened(fh, 0);
+                    }
+                    Err(e) => {
+                        warn!(op = "open", ?physical, error = %e, "open failed");
+                        let err = errno(&e);
+                        self.emit_op_event(
+                            req,
+                            &path_type,
+                            SkillEventKind::Open,
+                            SkillEventAction::Failed,
+                            Some(err),
+                            None,
+                        );
+                        reply.error(err);
+                    }
+                }
+            } else if self.is_staging_skill_root(&nested_id) || self.is_pending_install(&nested_id)
+            {
+                // Staging / pending nested SKILL.md is served raw.
+                match open_options_from_flags(flags).open(&physical) {
+                    Ok(file) => {
+                        let fh = self.handles.allocate(ino, flags, Some(file), None);
+                        reply.opened(fh, 0);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            } else {
+                // Read-only: compiled content served virtually, no fd.
+                let fh = self.handles.allocate(ino, flags, None, None);
                 self.emit_op_event(
                     req,
                     &path_type,

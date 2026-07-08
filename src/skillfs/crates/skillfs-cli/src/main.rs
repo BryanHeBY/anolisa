@@ -252,6 +252,22 @@ enum Commands {
         /// `SO_PEERCRED`) must match this value.
         #[arg(long, value_name = "GID", help_heading = help_text::HEADING_TRUSTED_PEER)]
         trusted_peer_gid: Option<u32>,
+
+        /// Skill directory layout mode.
+        ///
+        /// `auto` (default): detect Hermes from source-root markers
+        /// (`.bundled_manifest` or `.hub/`), otherwise flat. `flat`: each
+        /// top-level directory under SOURCE is a skill containing
+        /// SKILL.md. `hermes`: SOURCE is a Hermes hub workspace —
+        /// management paths (.hub, .bundled_manifest, .no-bundled-skills)
+        /// are passthrough; skills live at category/skill/SKILL.md (and
+        /// top-level skill/SKILL.md).
+        ///
+        /// Hermes mode supports --security --activation-mode file
+        /// for nested skill activation and notify. Incompatible with
+        /// --decision-command and --control-socket.
+        #[arg(long, value_name = "MODE", help_heading = help_text::HEADING_MOUNT)]
+        skill_layout: Option<String>,
     },
 
     /// Generate or update skillfs-views.toml from a skill directory
@@ -417,6 +433,7 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
             trusted_peer_exe,
             trusted_peer_uid,
             trusted_peer_gid,
+            skill_layout,
         } => {
             if managed {
                 // Managed mode: spawn a detached supervisor and return once
@@ -457,6 +474,7 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 trusted_peer_exe,
                 trusted_peer_uid,
                 trusted_peer_gid,
+                skill_layout,
             )
             .await;
             sls_ops::log_command("mount", start, err_reason(&result));
@@ -607,6 +625,7 @@ async fn cmd_mount(
     trusted_peer_exe: Option<PathBuf>,
     trusted_peer_uid: Option<u32>,
     trusted_peer_gid: Option<u32>,
+    skill_layout_raw: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source.display(), mountpoint = %mountpoint.display(), security_mode, "mounting SkillFS");
 
@@ -629,6 +648,24 @@ async fn cmd_mount(
             .as_ref()
             .map(|c| c.activation_mode())
             .unwrap_or_default(),
+    };
+
+    // Parse skill layout: CLI flag overrides config file; the default is
+    // `auto`, which conservatively detects Hermes from source-root markers
+    // (`.bundled_manifest` / `.hub/`) and otherwise falls back to flat.
+    // Explicit `flat` / `hermes` always win over detection.
+    let layout_intent = skill_layout_raw
+        .as_deref()
+        .or_else(|| file_config.as_ref().and_then(|c| c.skills_layout()));
+    let skill_layout = match layout_intent {
+        Some("flat") => Some(skillfs_fuse::SkillLayout::Flat),
+        Some("hermes") => Some(skillfs_fuse::SkillLayout::Hermes),
+        Some("auto") | None => Some(skillfs_fuse::detect_skill_layout(&source)),
+        Some(other) => {
+            return Err(
+                format!("invalid --skill-layout '{other}'; allowed: auto, flat, hermes").into(),
+            );
+        }
     };
 
     // Parse reload mode: CLI flag (if present) overrides config file.
@@ -692,6 +729,19 @@ async fn cmd_mount(
         }
         None => None,
     };
+
+    // Hermes + decision-command gate (post config merge).
+    //
+    // The external decision protocol does not accept slash-containing
+    // skill ids, so hermes nested skills cannot use --decision-command.
+    // This gate runs after both CLI and config-file values are merged.
+    if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) && parsed_decision_command.is_some()
+    {
+        return Err("--skill-layout hermes is incompatible with \
+                 --decision-command (the external decision protocol \
+                 does not accept slash-containing skill ids)"
+            .into());
+    }
 
     // Activation source validation:
     //   --security + --decision-command           => scan -> resolve path
@@ -1238,103 +1288,109 @@ async fn cmd_mount(
     // transport, or `check`/`certify`. Skill-discover is exempt from
     // the gate inside SkillFS itself, so we deliberately do not
     // run scan/resolve on it.
-    let active_resolver: Option<Arc<ActiveSkillResolver>> =
-        if security && activation_mode == ActivationMode::File {
-            // A1: Activation File Consumer bootstrap.
-            //
-            // When `--activation-mode file` is set, SkillFS reads
-            // `<skill_dir>/.skill-meta/activation.json` for every loaded
-            // skill at startup and populates the resolver. Invalid or
-            // missing activation files map to hidden (fail-safe).
-            let resolver = ActiveSkillResolver::new(source.clone());
-            let skill_names: Vec<String> = shared_store
+    let active_resolver: Option<Arc<ActiveSkillResolver>> = if security
+        && activation_mode == ActivationMode::File
+    {
+        // A1: Activation File Consumer bootstrap.
+        //
+        // When `--activation-mode file` is set, SkillFS reads
+        // `<skill_dir>/.skill-meta/activation.json` for every loaded
+        // skill at startup and populates the resolver. Invalid or
+        // missing activation files map to hidden (fail-safe).
+        let resolver = ActiveSkillResolver::new(source.clone());
+        let skill_names: Vec<String> = if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
+            skillfs_fuse::security::enumerate_hermes_skill_ids(&daemon_root)
+        } else {
+            shared_store
                 .read()
                 .list()
                 .iter()
                 .filter(|n| **n != "skill-discover")
                 .map(|s| s.to_string())
-                .collect();
-            info!(
-                count = skill_names.len(),
-                activation_mode = %activation_mode,
-                "activation: loading activation files for skill mapping"
-            );
-            let results = bootstrap_activation(daemon_root.as_path(), &skill_names, &resolver);
-            for (name, outcome) in &results {
-                match outcome {
+                .collect()
+        };
+        info!(
+            count = skill_names.len(),
+            activation_mode = %activation_mode,
+            layout = ?skill_layout,
+            "activation: loading activation files for skill mapping"
+        );
+        let results = bootstrap_activation(daemon_root.as_path(), &skill_names, &resolver);
+        for (name, outcome) in &results {
+            match outcome {
+                Ok(target) => {
+                    info!(
+                        skill = %name,
+                        target = %target.as_label(),
+                        "activation file loaded"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        skill = %name,
+                        error = %e,
+                        "activation file invalid or missing; skill hidden (fail-safe)"
+                    );
+                }
+            }
+        }
+        Some(Arc::new(resolver))
+    } else if security && parsed_decision_command.is_some() {
+        // D1.3.1 active-mapping bootstrap (decision-command path).
+        let cmd = parsed_decision_command
+            .as_ref()
+            .expect("decision_command presence checked above")
+            .clone();
+        let adapter: Arc<dyn LedgerAdapter> = Arc::new(CliLedgerAdapter::new(cmd.clone()));
+        let resolver = ActiveSkillResolver::new(source.clone());
+        let skill_names: Vec<String> = shared_store
+            .read()
+            .list()
+            .iter()
+            .filter(|n| **n != "skill-discover")
+            .map(|s| s.to_string())
+            .collect();
+        info!(
+            count = skill_names.len(),
+            program = %cmd.program().display(),
+            "security: resolving active skill mapping via scan -> resolve"
+        );
+        for name in &skill_names {
+            let skill_dir = source.join(name);
+            if let Err(e) = adapter.scan(&skill_dir) {
+                warn!(
+                    skill = %name,
+                    error = %e,
+                    "decision-command scan failed; skill will be hidden (no activation)"
+                );
+                continue;
+            }
+            match adapter.resolve(&skill_dir) {
+                Ok(result) => match resolver.set_from_resolve_for_expected(name, &result) {
                     Ok(target) => {
                         info!(
                             skill = %name,
                             target = %target.as_label(),
-                            "activation file loaded"
+                            "decision-command resolve installed"
                         );
                     }
-                    Err(e) => {
-                        warn!(
-                            skill = %name,
-                            error = %e,
-                            "activation file invalid or missing; skill hidden (fail-safe)"
-                        );
-                    }
-                }
-            }
-            Some(Arc::new(resolver))
-        } else if security && parsed_decision_command.is_some() {
-            // D1.3.1 active-mapping bootstrap (decision-command path).
-            let cmd = parsed_decision_command
-                .as_ref()
-                .expect("decision_command presence checked above")
-                .clone();
-            let adapter: Arc<dyn LedgerAdapter> = Arc::new(CliLedgerAdapter::new(cmd.clone()));
-            let resolver = ActiveSkillResolver::new(source.clone());
-            let skill_names: Vec<String> = shared_store
-                .read()
-                .list()
-                .iter()
-                .filter(|n| **n != "skill-discover")
-                .map(|s| s.to_string())
-                .collect();
-            info!(
-                count = skill_names.len(),
-                program = %cmd.program().display(),
-                "security: resolving active skill mapping via scan -> resolve"
-            );
-            for name in &skill_names {
-                let skill_dir = source.join(name);
-                if let Err(e) = adapter.scan(&skill_dir) {
-                    warn!(
-                        skill = %name,
-                        error = %e,
-                        "decision-command scan failed; skill will be hidden (no activation)"
-                    );
-                    continue;
-                }
-                match adapter.resolve(&skill_dir) {
-                    Ok(result) => match resolver.set_from_resolve_for_expected(name, &result) {
-                        Ok(target) => {
-                            info!(
-                                skill = %name,
-                                target = %target.as_label(),
-                                "decision-command resolve installed"
-                            );
-                        }
-                        Err(e) => warn!(
-                            skill = %name,
-                            error = %e,
-                            "could not install resolve target; skill will be hidden (no activation)"
-                        ),
-                    },
                     Err(e) => warn!(
                         skill = %name,
                         error = %e,
-                        "decision-command resolve failed; skill will be hidden (no activation)"
+                        "could not install resolve target; skill will be hidden (no activation)"
                     ),
-                }
+                },
+                Err(e) => warn!(
+                    skill = %name,
+                    error = %e,
+                    "decision-command resolve failed; skill will be hidden (no activation)"
+                ),
             }
-            Some(Arc::new(resolver))
-        } else {
-            None
-        };
+        }
+        Some(Arc::new(resolver))
+    } else {
+        None
+    };
 
     // D1.3.1 refresh controller bootstrap.
     //
@@ -1626,6 +1682,17 @@ async fn cmd_mount(
         _ => {}
     }
 
+    // Hermes + control-socket gate (post config merge).
+    //
+    // Control socket skill-name validation does not accept nested ids.
+    // This gate runs after both CLI and config-file values are merged.
+    if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) && control_socket.is_some() {
+        return Err("--skill-layout hermes is incompatible with \
+                 --control-socket (control socket skill-name validation \
+                 does not accept nested ids)"
+            .into());
+    }
+
     // Build ControlSocketConfig when both are set.
     let control_socket_config: Option<ControlSocketConfig> =
         match (&control_socket, &trusted_peer_exe) {
@@ -1843,13 +1910,17 @@ async fn cmd_mount(
     let reconcile_notify = notify_controller.clone();
     let reconcile_skill_names: Option<Vec<String>> =
         if activation_mode == ActivationMode::File && notify_controller.is_some() {
-            let names: Vec<String> = shared_store
-                .read()
-                .list()
-                .iter()
-                .filter(|n| **n != "skill-discover")
-                .map(|s| s.to_string())
-                .collect();
+            let names: Vec<String> = if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
+                skillfs_fuse::security::enumerate_hermes_skill_ids(&daemon_root)
+            } else {
+                shared_store
+                    .read()
+                    .list()
+                    .iter()
+                    .filter(|n| **n != "skill-discover")
+                    .map(|s| s.to_string())
+                    .collect()
+            };
             Some(names)
         } else {
             None
@@ -2118,6 +2189,7 @@ async fn cmd_mount(
                 pending_install_controller,
                 post_publish_controller,
                 runtime_metrics: Some(mount_runtime_metrics),
+                skill_layout,
             },
         )
     });

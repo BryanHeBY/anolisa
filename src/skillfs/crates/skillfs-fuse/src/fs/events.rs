@@ -31,10 +31,16 @@ impl SkillFs {
         relative_path: Option<&Path>,
         kind: MutationKind,
     ) {
-        // I2: staging roots bypass normal refresh/notify.
+        // I2/H3: staging roots bypass normal refresh/notify.
         if let Some(ref matcher) = self.staging_matcher {
             if matcher.is_staging_root(skill_name) {
                 return;
+            }
+            // H3: Hermes nested ID — check the leaf component.
+            if let Some(leaf) = skill_name.split('/').next_back() {
+                if leaf != skill_name && matcher.is_staging_root(leaf) {
+                    return;
+                }
             }
         }
         // Pending install: if a pending_install_controller is attached,
@@ -131,6 +137,25 @@ impl SkillFs {
             PathType::SkillDir { skill_name } | PathType::InboxSkillDir { skill_name } => {
                 (Some(skill_name.clone()), None)
             }
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => (Some(Self::hermes_skill_id(category, skill_name)), None),
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => (
+                Some(Self::hermes_skill_id(category, skill_name)),
+                Some(PathBuf::from("SKILL.md")),
+            ),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Some(Self::hermes_skill_id(category, skill_name)),
+                Some(relative_path.clone()),
+            ),
             _ => (None, None),
         };
         let mut event = SkillEvent::new(kind)
@@ -175,6 +200,25 @@ impl SkillFs {
                 (Some(skill_name.clone()), Some(PathBuf::from("SKILL.md")))
             }
             PathType::SkillDir { skill_name } => (Some(skill_name.clone()), None),
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => (Some(Self::hermes_skill_id(category, skill_name)), None),
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => (
+                Some(Self::hermes_skill_id(category, skill_name)),
+                Some(PathBuf::from("SKILL.md")),
+            ),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Some(Self::hermes_skill_id(category, skill_name)),
+                Some(relative_path.clone()),
+            ),
             _ => (None, None),
         };
         let display_name = name.to_string_lossy();

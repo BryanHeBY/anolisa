@@ -9,7 +9,7 @@ use skillfs_core::parser;
 use tracing::{debug, info, warn};
 
 use super::super::SkillFs;
-use crate::path::{PathType, parse_path};
+use crate::path::PathType;
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, mkdirat_leaf, rename_noreplace, renameat2_leaf, unlinkat_leaf};
@@ -31,7 +31,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
 
         // L1: the inbox virtual root is always present — refuse to
         // shadow it with a real directory. The inbox-skill case lands
@@ -71,15 +71,28 @@ impl SkillFs {
             return;
         }
 
-        // I4: reject mkdir on hidden skills unless the path matches
-        // the post-publish grace whitelist. SkillDir mkdir is not gated
-        // — creating a new skill directory is the start of an install.
-        if let PathType::Passthrough {
-            ref skill_name,
-            ref relative_path,
-        } = path_type
+        // I4/H3: reject mkdir on hidden skills unless the path
+        // matches the post-publish grace whitelist. SkillDir /
+        // NestedSkillDir mkdir is not gated — creating a new skill
+        // directory is the start of an install.
         {
-            if self.should_reject_hidden_write(skill_name, Some(relative_path)) {
+            let reject = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                _ => false,
+            };
+            if reject {
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -207,6 +220,25 @@ impl SkillFs {
                             MutationKind::Mkdir,
                         );
                     }
+                    PathType::NestedSkillDir {
+                        category,
+                        skill_name,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(&nested_id, None, MutationKind::Mkdir);
+                    }
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(relative_path.as_path()),
+                            MutationKind::Mkdir,
+                        );
+                    }
                     _ => {}
                 }
 
@@ -232,7 +264,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
         let (skill_name_for_event, relative_for_event) = match &path_type {
             PathType::Passthrough {
                 skill_name,
@@ -260,13 +292,33 @@ impl SkillFs {
             return;
         }
 
-        // I4: reject unlink on hidden skills unless grace-allowed.
-        if let PathType::Passthrough {
-            ref skill_name,
-            ref relative_path,
-        } = path_type
+        // I4/H3: reject unlink on hidden skills unless grace-allowed.
         {
-            if self.should_reject_hidden_write(skill_name, Some(relative_path)) {
+            let reject = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(Path::new("SKILL.md")),
+                ),
+                _ => false,
+            };
+            if reject {
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -343,6 +395,29 @@ impl SkillFs {
                         relative_path.as_path(),
                         MutationKind::Unlink,
                     ),
+                    PathType::NestedSkillMd {
+                        category,
+                        skill_name,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(Path::new("SKILL.md")),
+                            MutationKind::Unlink,
+                        );
+                    }
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(relative_path.as_path()),
+                            MutationKind::Unlink,
+                        );
+                    }
                     _ => {}
                 }
                 self.emit_event(
@@ -383,7 +458,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
 
         // S3: refuse to rmdir a reserved lifecycle namespace or any
         // directory beneath one. The gate fires before any physical
@@ -402,13 +477,25 @@ impl SkillFs {
             return;
         }
 
-        // I4: reject rmdir on hidden skills unless grace-allowed.
-        if let PathType::Passthrough {
-            ref skill_name,
-            ref relative_path,
-        } = path_type
+        // I4/H3: reject rmdir on hidden skills unless grace-allowed.
         {
-            if self.should_reject_hidden_write(skill_name, Some(relative_path)) {
+            let reject = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                _ => false,
+            };
+            if reject {
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -486,6 +573,25 @@ impl SkillFs {
                         relative_path.as_path(),
                         MutationKind::Rmdir,
                     ),
+                    PathType::NestedSkillDir {
+                        category,
+                        skill_name,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(&nested_id, None, MutationKind::Rmdir);
+                    }
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(relative_path.as_path()),
+                            MutationKind::Rmdir,
+                        );
+                    }
                     _ => {}
                 }
                 reply.ok();
@@ -543,8 +649,8 @@ impl SkillFs {
                 return;
             }
         };
-        let old_path_type = parse_path(Path::new(&old_path), self.in_place);
-        let new_path_type = parse_path(Path::new(&new_path), self.in_place);
+        let old_path_type = self.parse_fuse_path(Path::new(&old_path));
+        let new_path_type = self.parse_fuse_path(Path::new(&new_path));
         let (event_skill, event_relative) = match &old_path_type {
             PathType::Passthrough {
                 skill_name,
@@ -666,26 +772,47 @@ impl SkillFs {
             return;
         }
 
-        // I4: reject renames on hidden skills unless both sides match
-        // the post-publish grace whitelist.
+        // I4/H3: reject renames on hidden skills unless both sides
+        // match the post-publish grace whitelist.
         for pt in [&old_path_type, &new_path_type] {
-            let (skill_name, rel) = match pt {
+            let reject = match pt {
                 PathType::Passthrough {
                     skill_name,
                     relative_path,
-                } => (skill_name.as_str(), relative_path.as_path()),
-                PathType::SkillMd { skill_name } => (skill_name.as_str(), Path::new("SKILL.md")),
-                _ => continue,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(Path::new("SKILL.md")),
+                ),
+                _ => false,
             };
-            if self.should_reject_hidden_write(skill_name, Some(rel)) {
+            if reject {
                 reply.error(libc::ENOENT);
                 return;
             }
         }
 
-        // I2: staging-to-skill rename validation. When a staging root is
-        // renamed to a top-level skill directory, validate the target name
+        // I2/H3: staging-to-skill rename validation. When a staging root
+        // is renamed to a skill directory, validate the target name
         // against sensitive namespaces and invalid skill name shapes.
+        // Flat layout: SkillDir → SkillDir.
+        // Hermes layout: NestedSkillDir → NestedSkillDir (same category).
         let is_staging_rename = if let Some(ref matcher) = self.staging_matcher {
             match (&old_path_type, &new_path_type) {
                 (
@@ -702,6 +829,41 @@ impl SkillFs {
                             old = %old_path,
                             new = %new_path,
                             "rename: rejecting staging rename to invalid target"
+                        );
+                        self.emit_event(
+                            SkillEvent::new(SkillEventKind::Rename)
+                                .with_optional_skill_name(event_skill.clone())
+                                .with_optional_relative_path(event_relative.clone())
+                                .with_action(SkillEventAction::Rejected)
+                                .with_errno(libc::EACCES)
+                                .with_caller(req.uid(), req.gid())
+                                .with_detail(format!(
+                                    "class=invalid_staging_rename_target old={} new={}",
+                                    old_path, new_path
+                                )),
+                        );
+                        reply.error(libc::EACCES);
+                        return;
+                    }
+                    true
+                }
+                // H3: Hermes intra-category staging rename.
+                (
+                    PathType::NestedSkillDir {
+                        category: old_cat,
+                        skill_name: old_skill,
+                    },
+                    PathType::NestedSkillDir {
+                        category: new_cat,
+                        skill_name: new_skill,
+                    },
+                ) if old_cat == new_cat && matcher.is_staging_root(old_skill) => {
+                    if !crate::security::install::is_valid_staging_rename_target(new_skill, matcher)
+                    {
+                        warn!(
+                            old = %old_path,
+                            new = %new_path,
+                            "rename: rejecting Hermes staging rename to invalid target"
                         );
                         self.emit_event(
                             SkillEvent::new(SkillEventKind::Rename)
@@ -865,22 +1027,30 @@ impl SkillFs {
                     }
                 }
 
-                // I2: staging-to-skill rename triggers exactly one
+                // I2/H3: staging-to-skill rename triggers exactly one
                 // rename mutation notify (non-blocking enqueue).
                 // The generic old/new observe pair below is skipped for
                 // staging renames.
                 if is_staging_rename {
-                    if let PathType::SkillDir {
-                        skill_name: new_name,
-                    } = &new_type
-                    {
+                    let notify_id = match &new_type {
+                        PathType::SkillDir {
+                            skill_name: new_name,
+                        } => Some(new_name.clone()),
+                        // H3: Hermes intra-category staging rename.
+                        PathType::NestedSkillDir {
+                            category,
+                            skill_name,
+                        } => Some(Self::hermes_skill_id(category, skill_name)),
+                        _ => None,
+                    };
+                    if let Some(ref id) = notify_id {
                         if let Some(ref staging_ctrl) = self.staging_controller {
-                            staging_ctrl.emit_staging_rename_notify(new_name);
+                            staging_ctrl.emit_staging_rename_notify(id);
                         }
                         // I4: start post-publish grace session after staging rename.
                         if let Some(ref pp_ctrl) = self.post_publish_controller {
                             pp_ctrl.start_session(
-                                new_name,
+                                id,
                                 crate::security::PostPublishSessionKind::StagingRename,
                             );
                         }
@@ -915,6 +1085,28 @@ impl SkillFs {
                     PathType::InboxSkillDir { skill_name } => {
                         Some((skill_name.clone(), None, true))
                     }
+                    // H3: Hermes nested paths.
+                    PathType::NestedSkillMd {
+                        category,
+                        skill_name,
+                    } => Some((
+                        Self::hermes_skill_id(category, skill_name),
+                        Some(PathBuf::from("SKILL.md")),
+                        false,
+                    )),
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => Some((
+                        Self::hermes_skill_id(category, skill_name),
+                        Some(relative_path.clone()),
+                        false,
+                    )),
+                    PathType::NestedSkillDir {
+                        category,
+                        skill_name,
+                    } => Some((Self::hermes_skill_id(category, skill_name), None, false)),
                     _ => None,
                 };
                 let new_skill_path = match &new_type {
@@ -933,6 +1125,27 @@ impl SkillFs {
                     PathType::InboxSkillDir { skill_name } => {
                         Some((skill_name.clone(), None, true))
                     }
+                    PathType::NestedSkillMd {
+                        category,
+                        skill_name,
+                    } => Some((
+                        Self::hermes_skill_id(category, skill_name),
+                        Some(PathBuf::from("SKILL.md")),
+                        false,
+                    )),
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => Some((
+                        Self::hermes_skill_id(category, skill_name),
+                        Some(relative_path.clone()),
+                        false,
+                    )),
+                    PathType::NestedSkillDir {
+                        category,
+                        skill_name,
+                    } => Some((Self::hermes_skill_id(category, skill_name), None, false)),
                     _ => None,
                 };
                 let observe_pair = |fs: &Self, skill: &str, rel: Option<&Path>, is_inbox: bool| {

@@ -13,6 +13,7 @@ use std::time::Duration;
 use skillfs_core::SharedSkillStore;
 use tracing::{error, info, warn};
 
+use crate::path::SkillLayout;
 use crate::security::{
     ActiveSkillResolver, InstallerStagingController, NotifyController, PendingInstallController,
     PostPublishGraceController, QuietTimeoutController, RefreshController, RuntimeMetricsSink,
@@ -37,6 +38,7 @@ pub struct MountConfig {
     /// Best-effort runtime metric delta sink. When `Some`, agent-visible skill
     /// opens and security/policy decisions emit `runtime_metric` JSONL records.
     pub runtime_metrics: Option<Arc<RuntimeMetricsSink>>,
+    pub skill_layout: Option<SkillLayout>,
 }
 
 /// Mount the SkillFS FUSE filesystem (blocking) with a unified
@@ -67,6 +69,7 @@ pub fn mount_configured(
         config.pending_install_controller,
         config.post_publish_controller,
         config.runtime_metrics,
+        config.skill_layout,
     )
 }
 
@@ -104,6 +107,7 @@ pub fn mount_background_configured(
             config.pending_install_controller,
             config.post_publish_controller,
             config.runtime_metrics,
+            config.skill_layout,
         ) {
             error!(error = %e, "background mount failed");
         }
@@ -140,6 +144,7 @@ fn mount_inner(
     pending_install_controller: Option<Arc<PendingInstallController>>,
     post_publish_controller: Option<Arc<PostPublishGraceController>>,
     runtime_metrics: Option<Arc<RuntimeMetricsSink>>,
+    skill_layout: Option<SkillLayout>,
 ) -> Result<(), FuseError> {
     info!(mountpoint = %mountpoint.display(), source = %source.display(), in_place, "mounting SkillFS");
 
@@ -239,6 +244,9 @@ fn mount_inner(
     if let Some(s) = runtime_metrics {
         fs = fs.with_runtime_metrics(s);
     }
+    if let Some(layout) = skill_layout {
+        fs = fs.with_skill_layout(layout);
+    }
     info!("starting FUSE filesystem");
 
     // Neutralize the daemon process's file-creation mask. The FUSE protocol
@@ -281,7 +289,7 @@ pub fn mount(
 ) -> Result<(), FuseError> {
     mount_inner(
         mountpoint, source, store, options, in_place, None, None, None, None, None, None, None,
-        None, None, None, None, None,
+        None, None, None, None, None, None,
     )
 }
 
@@ -311,7 +319,7 @@ pub fn mount_with_security(
 ) -> Result<(), FuseError> {
     mount_inner(
         mountpoint, source, store, options, in_place, event_sink, policy, None, None, None, None,
-        None, None, None, None, None, None,
+        None, None, None, None, None, None, None,
     )
 }
 
@@ -346,6 +354,7 @@ pub fn mount_with_security_and_active_resolver(
         event_sink,
         policy,
         active_resolver,
+        None,
         None,
         None,
         None,
@@ -398,6 +407,7 @@ pub fn mount_with_security_active_resolver_and_demo_refresh(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -440,6 +450,7 @@ pub fn mount_with_security_active_resolver_demo_refresh_and_trusted_writer(
         refresh_controller,
         None,
         trusted_writer,
+        None,
         None,
         None,
         None,
@@ -605,6 +616,7 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
             refresh_controller,
             None,
             trusted_writer,
+            None,
             None,
             None,
             None,

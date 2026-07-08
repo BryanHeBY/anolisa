@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use super::super::SkillFs;
 use crate::attr::{file_attr_from_metadata, file_attr_from_stat};
 use crate::handles::open_options_from_flags;
-use crate::path::{PathType, is_skill_discover_path, parse_path};
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, fstatat_leaf, openat_leaf};
@@ -69,7 +69,7 @@ impl SkillFs {
             }
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         // skill-discover namespace is always read-only
         match &path_type {
@@ -181,6 +181,29 @@ impl SkillFs {
                         relative_path.as_path(),
                         MutationKind::Write,
                     ),
+                    PathType::NestedSkillMd {
+                        category,
+                        skill_name,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(Path::new("SKILL.md")),
+                            MutationKind::Write,
+                        );
+                    }
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(relative_path.as_path()),
+                            MutationKind::Write,
+                        );
+                    }
                     _ => {}
                 }
                 self.emit_op_event(
@@ -234,7 +257,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
 
         // L1: the inbox virtual root is a directory; refuse to shadow it
         // with a regular file (e.g. a stray `touch /.skillfs-inbox` from
@@ -316,14 +339,34 @@ impl SkillFs {
             return;
         }
 
-        // I4: reject create on hidden skills unless the path matches
-        // the post-publish grace whitelist.
-        if let PathType::Passthrough {
-            ref skill_name,
-            ref relative_path,
-        } = path_type
+        // I4/H3: reject create on hidden skills unless the path
+        // matches the post-publish grace whitelist.
         {
-            if self.should_reject_hidden_write(skill_name, Some(relative_path)) {
+            let reject = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(Path::new("SKILL.md")),
+                ),
+                _ => false,
+            };
+            if reject {
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -474,6 +517,29 @@ impl SkillFs {
                         relative_path.as_path(),
                         MutationKind::Create,
                     ),
+                    PathType::NestedSkillMd {
+                        category,
+                        skill_name,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(Path::new("SKILL.md")),
+                            MutationKind::Create,
+                        );
+                    }
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(relative_path.as_path()),
+                            MutationKind::Create,
+                        );
+                    }
                     _ => {}
                 }
 
@@ -519,7 +585,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
 
         // T2 mknod policy: FIFO is the only special file SkillFS creates.
         // Sockets, block/char devices, and any other S_IFMT bit are
@@ -648,16 +714,30 @@ impl SkillFs {
                 a
             }
         };
-        if let PathType::Passthrough {
-            skill_name,
-            relative_path,
-        } = &path_type
-        {
-            self.observe_mutation(
+        match &path_type {
+            PathType::Passthrough {
                 skill_name,
-                Some(relative_path.as_path()),
-                MutationKind::Create,
-            );
+                relative_path,
+            } => {
+                self.observe_mutation(
+                    skill_name,
+                    Some(relative_path.as_path()),
+                    MutationKind::Create,
+                );
+            }
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                self.observe_mutation(
+                    &nested_id,
+                    Some(relative_path.as_path()),
+                    MutationKind::Create,
+                );
+            }
+            _ => {}
         }
         self.emit_op_event(
             req,
@@ -704,7 +784,7 @@ impl SkillFs {
             }
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         // Determine whether any mutation is requested.
         let has_mutation = size.is_some()
@@ -818,6 +898,15 @@ impl SkillFs {
                 // Fall through to physical mutation; lifecycle and
                 // `.skill-meta` gates run below.
             }
+            PathType::HermesMeta { .. }
+            | PathType::HermesMetaChild { .. }
+            | PathType::CategoryPassthrough { .. }
+            | PathType::CategoryDir { .. }
+            | PathType::NestedSkillDir { .. }
+            | PathType::NestedSkillMd { .. }
+            | PathType::NestedPassthrough { .. } => {
+                // Hermes paths fall through to physical mutation.
+            }
             PathType::Invalid => {
                 reply.error(libc::ENOENT);
                 return;
@@ -849,18 +938,37 @@ impl SkillFs {
             }
         }
 
-        // I4: reject setattr mutations on hidden skills unless
+        // I4/H3: reject setattr mutations on hidden skills unless
         // the path matches the post-publish grace whitelist.
         if has_mutation {
-            let (skill_name, rel) = match &path_type {
+            let reject = match &path_type {
                 PathType::Passthrough {
                     skill_name,
                     relative_path,
-                } => (skill_name.as_str(), relative_path.as_path()),
-                PathType::SkillMd { skill_name } => (skill_name.as_str(), Path::new("SKILL.md")),
-                _ => ("", Path::new("")),
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(Path::new("SKILL.md")),
+                ),
+                _ => false,
             };
-            if !skill_name.is_empty() && self.should_reject_hidden_write(skill_name, Some(rel)) {
+            if reject {
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -931,6 +1039,29 @@ impl SkillFs {
                             relative_path.as_path(),
                             MutationKind::SetattrTruncate,
                         ),
+                        PathType::NestedSkillMd {
+                            category,
+                            skill_name,
+                        } => {
+                            let nested_id = Self::hermes_skill_id(category, skill_name);
+                            self.observe_mutation(
+                                &nested_id,
+                                Some(Path::new("SKILL.md")),
+                                MutationKind::SetattrTruncate,
+                            );
+                        }
+                        PathType::NestedPassthrough {
+                            category,
+                            skill_name,
+                            relative_path,
+                        } => {
+                            let nested_id = Self::hermes_skill_id(category, skill_name);
+                            self.observe_mutation(
+                                &nested_id,
+                                Some(relative_path.as_path()),
+                                MutationKind::SetattrTruncate,
+                            );
+                        }
                         _ => {}
                     }
                 }

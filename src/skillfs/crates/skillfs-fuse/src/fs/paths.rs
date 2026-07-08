@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use fuser::FUSE_ROOT_ID;
 
 use super::SkillFs;
-use crate::path::{PathType, is_skill_discover_path, parse_path};
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{
     inbox::{is_inbox_dir_name, is_valid_inbox_skill_name},
     lifecycle::is_reserved_lifecycle_name,
@@ -157,7 +157,7 @@ impl SkillFs {
     /// Uses `source_base()` (which goes through `/proc/self/fd/{n}` in
     /// in-place mode) so that all I/O bypasses the FUSE layer.
     pub(super) fn resolve_physical_path(&self, fuse_path: &str) -> Option<PathBuf> {
-        match parse_path(Path::new(fuse_path), self.in_place) {
+        match self.parse_fuse_path(Path::new(fuse_path)) {
             PathType::SkillDir { skill_name } => Some(self.source_base().join(&skill_name)),
             PathType::SkillMd { skill_name } => {
                 Some(self.source_base().join(&skill_name).join("SKILL.md"))
@@ -175,6 +175,39 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => Some(self.source_base().join(&skill_name).join(&relative_path)),
+            PathType::HermesMeta { name } => Some(self.source_base().join(&name)),
+            PathType::HermesMetaChild {
+                name,
+                relative_path,
+            }
+            | PathType::CategoryPassthrough {
+                name,
+                relative_path,
+            } => Some(self.source_base().join(&name).join(&relative_path)),
+            PathType::CategoryDir { category } => Some(self.source_base().join(&category)),
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => Some(self.source_base().join(&category).join(&skill_name)),
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => Some(
+                self.source_base()
+                    .join(&category)
+                    .join(&skill_name)
+                    .join("SKILL.md"),
+            ),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => Some(
+                self.source_base()
+                    .join(&category)
+                    .join(&skill_name)
+                    .join(&relative_path),
+            ),
             _ => None,
         }
     }
@@ -203,7 +236,11 @@ impl SkillFs {
             Some(s) => s.to_string(),
             None => return Err(libc::EINVAL),
         };
-        let parent_physical = match parse_path(parent_fuse, self.in_place) {
+        let parent_physical = match crate::path::parse_path_with_layout(
+            parent_fuse,
+            self.in_place,
+            self.skill_layout,
+        ) {
             PathType::SkillDir { skill_name } | PathType::InboxSkillDir { skill_name } => {
                 self.source_base().join(&skill_name)
             }
@@ -218,6 +255,37 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => self.source_base().join(&skill_name).join(&relative_path),
+            PathType::HermesMeta { name } => self.source_base().join(&name),
+            PathType::HermesMetaChild {
+                name,
+                relative_path,
+            }
+            | PathType::CategoryPassthrough {
+                name,
+                relative_path,
+            } => self.source_base().join(&name).join(&relative_path),
+            PathType::CategoryDir { category } => self.source_base().join(&category),
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => self.source_base().join(&category).join(&skill_name),
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => self
+                .source_base()
+                .join(&category)
+                .join(&skill_name)
+                .join("SKILL.md"),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => self
+                .source_base()
+                .join(&category)
+                .join(&skill_name)
+                .join(&relative_path),
             PathType::SkillsDir | PathType::Root | PathType::InboxDir => self.source_base(),
             PathType::Invalid => return Err(libc::ENOTDIR),
         };
@@ -228,9 +296,18 @@ impl SkillFs {
     }
 
     pub(super) fn is_staging_skill_root(&self, skill_name: &str) -> bool {
-        self.staging_matcher
-            .as_ref()
-            .is_some_and(|m| m.is_staging_root(skill_name))
+        self.staging_matcher.as_ref().is_some_and(|m| {
+            if m.is_staging_root(skill_name) {
+                return true;
+            }
+            // H3: Hermes nested ID — check the leaf component.
+            if let Some(leaf) = skill_name.split('/').next_back() {
+                if leaf != skill_name {
+                    return m.is_staging_root(leaf);
+                }
+            }
+            false
+        })
     }
 
     pub(super) fn is_pending_install(&self, skill_name: &str) -> bool {
@@ -265,6 +342,38 @@ impl SkillFs {
         !self.is_post_publish_grace_allowed(skill_name, relative_path)
     }
 
+    /// Hidden-write gate for a Hermes nested path (`category/skill/...`).
+    ///
+    /// Mirrors [`Self::should_reject_hidden_write`] but resolves through
+    /// [`Self::resolve_hermes_nested_read`] so it honors nested-skill
+    /// activation. Crucially, non-skill category children (a directory
+    /// without `SKILL.md`, e.g. `apple/docs`) are plain passthrough and are
+    /// never rejected — otherwise the flat resolver would treat the synthetic
+    /// id `apple/docs` as an unknown (hidden) skill and block creating new
+    /// files like `apple/docs/new.txt` while still allowing reads/appends.
+    pub(super) fn should_reject_hermes_nested_hidden_write(
+        &self,
+        category: &str,
+        skill_name: &str,
+        relative_path: Option<&std::path::Path>,
+    ) -> bool {
+        use crate::fs::read_resolution::ReadResolution;
+        if !self.hermes_nested_is_skill(category, skill_name) {
+            return false;
+        }
+        if !matches!(
+            self.resolve_hermes_nested_read(category, skill_name),
+            ReadResolution::Hidden
+        ) {
+            return false;
+        }
+        let nid = Self::hermes_skill_id(category, skill_name);
+        if self.is_staging_skill_root(&nid) || self.is_pending_install(&nid) {
+            return false;
+        }
+        !self.is_post_publish_grace_allowed(&nid, relative_path)
+    }
+
     pub(super) fn is_post_publish_grace_allowed(
         &self,
         skill_name: &str,
@@ -278,5 +387,56 @@ impl SkillFs {
             Some(rel) => ctrl.is_grace_allowed(skill_name, rel),
             None => ctrl.has_active_session(skill_name),
         }
+    }
+
+    /// Canonical Hermes skill id: `"category/skill"`.
+    pub(super) fn hermes_skill_id(category: &str, skill_name: &str) -> String {
+        format!("{}/{}", category, skill_name)
+    }
+
+    /// Physical source dir for a Hermes nested skill leaf.
+    pub(super) fn hermes_skill_physical_dir(&self, category: &str, skill_name: &str) -> PathBuf {
+        self.source_base().join(category).join(skill_name)
+    }
+
+    /// Whether `<category>/<skill_name>` is a real Hermes nested skill
+    /// leaf — i.e. a directory that physically contains `SKILL.md`.
+    ///
+    /// The Hermes parser is purely lexical and classifies *every*
+    /// second-level entry as a nested skill, but only directories with a
+    /// `SKILL.md` are actual skills. Plain files/dirs under a category
+    /// (e.g. `apple/docs/readme.txt`) are category passthrough and must
+    /// never enter activation gating. The probe hits the physical source
+    /// via `source_base()` so it bypasses the FUSE over-mount in in-place
+    /// mode.
+    pub(super) fn hermes_nested_is_skill(&self, category: &str, skill_name: &str) -> bool {
+        self.hermes_skill_physical_dir(category, skill_name)
+            .join("SKILL.md")
+            .exists()
+    }
+
+    /// Whether the direct category child `<category>/<name>` physically
+    /// exists and is NOT a directory (a plain file or symlink).
+    ///
+    /// A skill is always a directory, so a non-directory child under a
+    /// category (e.g. `apple/README.md`) can never be a nested skill and
+    /// must be served as ordinary passthrough. A missing child returns
+    /// `false` so it stays on the nested-skill path (surfacing `ENOENT`
+    /// via the normal directory checks rather than being mis-served).
+    pub(super) fn hermes_category_child_is_file(&self, category: &str, name: &str) -> bool {
+        std::fs::symlink_metadata(self.source_base().join(category).join(name))
+            .map(|m| !m.is_dir())
+            .unwrap_or(false)
+    }
+
+    /// Whether `<name>` is a real top-level Hermes skill — i.e. a
+    /// directory directly under the source root that physically contains
+    /// `SKILL.md`. Real Hermes workspaces mix top-level skills
+    /// (`skill/SKILL.md`) with categorized nested skills
+    /// (`category/skill/SKILL.md`); the lexical parser classifies every
+    /// top-level entry as a category container, so callers reclassify a
+    /// top-level skill back into the flat skill path types.
+    pub(super) fn hermes_is_top_level_skill(&self, name: &str) -> bool {
+        self.source_base().join(name).join("SKILL.md").exists()
     }
 }

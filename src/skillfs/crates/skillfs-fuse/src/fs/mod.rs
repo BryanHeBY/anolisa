@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 use crate::handles::HandleManager;
 use crate::inode::InodeManager;
+use crate::path::SkillLayout;
 use crate::security::{
     ActiveSkillResolver, InstallerStagingController, NoopEventSink, NotifyController,
     PendingInstallController, PostPublishGraceController, ProcessIdentityResolver,
@@ -55,6 +56,8 @@ pub struct SkillFs {
     source_dirfd: Option<std::fs::File>,
     /// Whether we are mounted in-place (source == mountpoint).
     in_place: bool,
+    /// Skill directory layout mode (flat or hermes).
+    skill_layout: SkillLayout,
     /// Channel to send sync events to the background sync worker.
     sync_tx: Option<std::sync::mpsc::Sender<SyncEvent>>,
     /// Skill Security policy. The S1 default is
@@ -180,6 +183,7 @@ impl SkillFs {
             views_config,
             source_dirfd,
             in_place,
+            skill_layout: SkillLayout::Flat,
             sync_tx: Some(sync_tx),
             policy: Arc::new(SkillMetaProtectionPolicy),
             event_sink: Arc::new(NoopEventSink),
@@ -394,6 +398,88 @@ impl SkillFs {
     pub(super) fn metric_policy_denied(&self) {
         if let Some(s) = &self.runtime_metrics {
             s.record_policy_denied();
+        }
+    }
+
+    pub fn with_skill_layout(mut self, layout: SkillLayout) -> Self {
+        self.skill_layout = layout;
+        self
+    }
+
+    /// Parse a FUSE path using this filesystem's layout and in-place mode.
+    ///
+    /// For [`SkillLayout::Hermes`] the lexical parser cannot tell a
+    /// top-level skill (`skill/SKILL.md`) from a category container
+    /// (`category/skill/SKILL.md`) — it classifies every top-level entry
+    /// as a category. Real Hermes workspaces mix both, so this wrapper
+    /// probes the physical source and rewrites a top-level skill and its
+    /// descendants back into the flat [`PathType`] variants
+    /// (`SkillDir` / `SkillMd` / `Passthrough`) that the flat code paths
+    /// already handle. Categorized nested skills are left untouched.
+    pub(super) fn parse_fuse_path(&self, path: &std::path::Path) -> crate::path::PathType {
+        use crate::path::PathType;
+        let parsed = crate::path::parse_path_with_layout(path, self.in_place, self.skill_layout);
+        if self.skill_layout != SkillLayout::Hermes {
+            return parsed;
+        }
+        match parsed {
+            PathType::CategoryDir { category } if self.hermes_is_top_level_skill(&category) => {
+                PathType::SkillDir {
+                    skill_name: category,
+                }
+            }
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } if self.hermes_is_top_level_skill(&category) => {
+                if skill_name == "SKILL.md" {
+                    PathType::SkillMd {
+                        skill_name: category,
+                    }
+                } else {
+                    PathType::Passthrough {
+                        skill_name: category,
+                        relative_path: std::path::PathBuf::from(skill_name),
+                    }
+                }
+            }
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } if self.hermes_is_top_level_skill(&category) => PathType::Passthrough {
+                skill_name: category,
+                relative_path: std::path::Path::new(&skill_name).join("SKILL.md"),
+            },
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } if self.hermes_is_top_level_skill(&category) => PathType::Passthrough {
+                skill_name: category,
+                relative_path: std::path::Path::new(&skill_name).join(relative_path),
+            },
+            // A plain *file* directly under a category (e.g.
+            // `apple/README.md`) is lexically labelled `NestedSkillDir`
+            // even though it is not a directory. Rewrite it to
+            // `CategoryPassthrough` so `lookup`/`open`/`read` treat it as an
+            // ordinary passthrough file instead of a (broken) skill dir.
+            //
+            // Non-skill *directories* (`apple/docs`) and their descendants
+            // are intentionally NOT reclassified: they stay
+            // `NestedSkillDir` / `NestedPassthrough` and are ungated via
+            // `resolve_hermes_nested_read`. This keeps brand-new install /
+            // staging directories (which have no `SKILL.md` yet) on the
+            // nested-skill code path the installer machinery depends on.
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } if self.hermes_category_child_is_file(&category, &skill_name) => {
+                PathType::CategoryPassthrough {
+                    name: category,
+                    relative_path: std::path::PathBuf::from(skill_name),
+                }
+            }
+            other => other,
         }
     }
 
