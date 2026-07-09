@@ -491,6 +491,16 @@ async function runCodeApprovalPolicyCase({
     const cliCallStart = await countJsonLines(cliLogPath);
     const modelRequestStart = mockModel.requests.length;
     const activeGatewayUrl = getGatewayUrl();
+    const gatewayLogName =
+      configReload.mode === "gateway-restart" && configReload.skipped !== true
+        ? `openclaw-gateway-policy-${slugify(caseName)}`
+        : "openclaw-gateway";
+    const gatewayLogPaths = policyDebugLog
+      ? [
+          path.join(path.dirname(policyDebugLog), `${slugify(gatewayLogName)}.stdout.log`),
+          path.join(path.dirname(policyDebugLog), `${slugify(gatewayLogName)}.stderr.log`),
+        ]
+      : [];
     const turn = await runGatewayPolicyTurn({
       callGatewayRpc,
       caseName,
@@ -500,6 +510,17 @@ async function runCodeApprovalPolicyCase({
         `[${POLICY_CODE_DENY_MARKER}] Call the exec tool with exactly \`${POLICY_CODE_DENY_COMMAND}\`, then summarize the result.`,
     });
 
+    let codeScanLog;
+    if (codeScanRequireApproval) {
+      codeScanLog = (
+        await waitForGatewayLogSignals(gatewayLogPaths, 45_000, {
+          scanCodeDeny: {
+            command: POLICY_CODE_DENY_COMMAND,
+            requireApproval: codeScanRequireApproval,
+          },
+        })
+      ).scanCodeDeny;
+    }
     let approval;
     let approvalResolve;
     let preResolveToolExecuted = false;
@@ -548,6 +569,16 @@ async function runCodeApprovalPolicyCase({
       subcommand: "scan-code",
       inputIncludes: POLICY_CODE_DENY_COMMAND,
     });
+    if (!codeScanLog) {
+      codeScanLog = (
+        await waitForGatewayLogSignals(gatewayLogPaths, 15_000, {
+          scanCodeDeny: {
+            command: POLICY_CODE_DENY_COMMAND,
+            requireApproval: codeScanRequireApproval,
+          },
+        })
+      ).scanCodeDeny;
+    }
     const modelRequests = mockModel.requests.slice(modelRequestStart);
     const matchedPolicyModelRequests = modelRequests.filter((request) =>
       mockModelRequestContainsText(request, POLICY_CODE_DENY_MARKER),
@@ -579,6 +610,7 @@ async function runCodeApprovalPolicyCase({
       },
       allModelRequestDelta: modelRequests.length,
       matchedPolicyRequestDelta: matchedPolicyModelRequests.length,
+      gatewayCodeScan: codeScanLog,
       approval: approval
         ? {
             id: approval.id,
@@ -606,7 +638,8 @@ async function runCodeApprovalPolicyCase({
         toolResultErrors: summarizeToolResultErrors(records),
       },
       assertions: {
-        scanCodeDeny: codeCall?.stdoutJson?.verdict === "deny",
+        scanCodeDeny: codeScanLog?.verdict === "deny",
+        cliScanCodeDeny: codeCall?.stdoutJson?.verdict === "deny",
         approvalFound: Boolean(approval),
         approvalRequiredErrorFound,
         approvalTimedOutFound,
@@ -624,8 +657,8 @@ async function runCodeApprovalPolicyCase({
       policyCase,
     });
 
-    if (codeCall?.stdoutJson?.verdict !== "deny") {
-      throw new Error(`${caseName}: expected scan-code deny call`);
+    if (codeScanLog?.verdict !== "deny") {
+      throw new Error(`${caseName}: expected gateway scan-code deny log`);
     }
     assertGatewayWaitDidNotTimeout(caseName, turn);
     if (codeScanRequireApproval) {
@@ -913,15 +946,26 @@ async function waitForPluginApprovalOrUndefined({
 }) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const snapshot = await listPluginApprovalSnapshot({
-      callGatewayRpc,
-      descriptionIncludes,
-      gatewayToken,
-      gatewayUrl,
-    });
-    observations?.push(summarizeApprovalSnapshot(snapshot));
-    if (snapshot.matching.length > 0) {
-      return snapshot.matching[0];
+    try {
+      const snapshot = await listPluginApprovalSnapshot({
+        callGatewayRpc,
+        descriptionIncludes,
+        gatewayToken,
+        gatewayUrl,
+        timeoutMs: 2_000,
+      });
+      observations?.push(summarizeApprovalSnapshot(snapshot));
+      if (snapshot.matching.length > 0) {
+        return snapshot.matching[0];
+      }
+    } catch (error) {
+      observations?.push({
+        observedAt: new Date().toISOString(),
+        error: {
+          name: error?.name,
+          message: String(error?.message ?? error),
+        },
+      });
     }
     await sleep(500);
   }
@@ -948,13 +992,14 @@ async function listPluginApprovalSnapshot({
   descriptionIncludes,
   gatewayToken,
   gatewayUrl,
+  timeoutMs = 10_000,
 }) {
   const approvals = unwrapGatewayPayload(
     await callGatewayRpc(
       `plugin-approval-list-${Date.now()}`,
       "plugin.approval.list",
       {},
-      { gatewayToken, gatewayUrl, timeoutMs: 10_000 },
+      { gatewayToken, gatewayUrl, timeoutMs },
     ),
   );
   const approvalList = Array.isArray(approvals) ? approvals : [];
@@ -1107,22 +1152,47 @@ function unwrapGatewayPayload(value) {
   return value;
 }
 
-async function waitForGatewayLogSignals(logPaths, timeoutMs) {
+async function waitForGatewayLogSignals(logPaths, timeoutMs, expected = {}) {
   // Logs are supplemental here: they prove the installed plugin emitted pass
   // diagnostics in the happy-path traffic probe, while policy cases use RPC/session evidence.
   const deadline = Date.now() + timeoutMs;
+  let text = "";
   while (Date.now() < deadline) {
-    const text = (await Promise.all(logPaths.map((file) => readTextIfExists(file)))).join("\n");
+    text = (await Promise.all(logPaths.map((file) => readTextIfExists(file)))).join("\n");
     const signals = {
       promptScanPass: /\[prompt-scan\] pass/u.test(text),
       codeScanPass: /\[scan-code\].*pass/u.test(text),
     };
-    if (signals.promptScanPass && signals.codeScanPass) {
+    if (expected.scanCodeDeny) {
+      const { command, requireApproval } = expected.scanCodeDeny;
+      if (
+        text.includes(`[scan-code] DENY (requireApproval=${requireApproval ? "true" : "false"})`) &&
+        text.includes(`Command: ${command}`)
+      ) {
+        return {
+          ...signals,
+          scanCodeDeny: {
+            observedAt: new Date().toISOString(),
+            verdict: "deny",
+            requireApproval,
+            command,
+            logFiles: logPaths,
+          },
+        };
+      }
+    }
+    if (!expected.scanCodeDeny && signals.promptScanPass && signals.codeScanPass) {
       return signals;
     }
     await sleep(500);
   }
-  const text = (await Promise.all(logPaths.map((file) => readTextIfExists(file)))).join("\n");
+  text = (await Promise.all(logPaths.map((file) => readTextIfExists(file)))).join("\n");
+  if (expected.scanCodeDeny) {
+    const { command, requireApproval } = expected.scanCodeDeny;
+    throw new Error(
+      `gateway logs did not contain scan-code DENY requireApproval=${requireApproval} command=${JSON.stringify(command)}; files=${logPaths.join(", ")} tail=${text.slice(-2000)}`,
+    );
+  }
   throw new Error(
     `gateway logs did not contain prompt-scan/code-scan pass signals; tail=${text.slice(-2000)}`,
   );
