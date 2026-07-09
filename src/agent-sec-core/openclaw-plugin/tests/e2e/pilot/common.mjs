@@ -4,7 +4,7 @@ import net from "node:net";
 export const PLUGIN_ID = "agent-sec";
 export const MOCK_MODEL_PROVIDER_ID = "agentsec-pilot";
 export const MOCK_MODEL_ID = "pilot-tool-model";
-export const DEFAULT_GATEWAY_TURN_TIMEOUT_MS = 180_000;
+export const DEFAULT_GATEWAY_TURN_TIMEOUT_MS = 300_000;
 
 // These markers drive deterministic CLI-wrapper overrides and mock-model
 // scenarios. The prompt/command still travel through the real Gateway path; the

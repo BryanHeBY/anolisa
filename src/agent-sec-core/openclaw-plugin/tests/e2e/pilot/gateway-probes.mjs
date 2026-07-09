@@ -513,7 +513,7 @@ async function runCodeApprovalPolicyCase({
     let codeScanLog;
     if (codeScanRequireApproval) {
       codeScanLog = (
-        await waitForGatewayLogSignals(gatewayLogPaths, 45_000, {
+        await waitForGatewayLogSignals(gatewayLogPaths, DEFAULT_GATEWAY_TURN_TIMEOUT_MS, {
           scanCodeDeny: {
             command: POLICY_CODE_DENY_COMMAND,
             requireApproval: codeScanRequireApproval,
