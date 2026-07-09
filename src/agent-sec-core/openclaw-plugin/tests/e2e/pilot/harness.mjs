@@ -220,6 +220,8 @@ export function createPilotHarness({
       }
       throw error;
     }
+    await sleep(1_000);
+    assertProcessStillRunning(processRef);
     return { process: processRef, health };
   }
 

@@ -384,7 +384,7 @@ async function runPilot() {
     const maxAttempts = !explicitGatewayPort ? 5 : 1;
     let lastError;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      if (attempt > 1) {
+      if (attempt > 1 || reason !== "initial") {
         setGatewayPort(await findFreePort());
       }
       try {
