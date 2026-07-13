@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3
+
+- fix(memory): normalize OpenClaw content blocks from array of content blocks `[{type:"text", text:"..."}]` to string before trigger matching and hashing, so auto-capture actually fires instead of coercing to `"[object Object]"`
+- fix(memory): add BM25 OR fallback — when implicit-AND FTS5 query returns 0 rows and there are multiple tokens, retry with `'\"token1\" OR \"token2\" OR ...'` so partial matches still surface instead of silent failures
+- fix(memory): sanitize audit_log by replacing `format!("{:.120}", query)` with `format!("bm25:len={}", query.len())` to prevent user query content from leaking into log paths
+
+
 ## 0.2.2
 
 - fix memory_observe hint sanitization so YAML-escaped hints round-trip through the hand-rolled frontmatter reader (which does not interpret YAML escapes): replace `yaml_escape_hint()` with `sanitize_hint()` that only substitutes newlines and ASCII control chars with spaces; add 8 unit tests plus a real-parser round-trip test covering Windows paths with backslashes

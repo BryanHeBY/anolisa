@@ -203,6 +203,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.3-1
+- fix(memory): normalize OpenClaw content blocks to string before trigger matching (auto-capture was coercing array to "[object Object]")
+- fix(memory): add BM25 OR fallback when AND returns 0 rows (natural-language queries with unknown words now return partial matches)
+- fix(memory): sanitize audit_log to prevent user query content leakage (replace raw query prefix with len= format)
+
 * Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.2-1
 - fix(memory): sanitize memory_observe hints with newline/control-char replacement so they round-trip through the frontmatter reader (Windows paths with backslashes)
 - feat(memory): add `max_hint_bytes` (default 512) with `MEMORY_MAX_HINT_BYTES` env override; propagate `&MemoryConfig` through memory_observe and the MCP server
