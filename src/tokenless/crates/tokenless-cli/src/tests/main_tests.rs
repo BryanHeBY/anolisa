@@ -230,9 +230,11 @@ fn ensure_db_dir_creates_parent() {
 
 #[test]
 fn record_compression_stats_skips_when_both_disabled() {
-    let mut config = TokenlessConfig::default();
-    config.stats_enabled = false;
-    config.sls_enabled = false;
+    let config = TokenlessConfig {
+        stats_enabled: false,
+        sls_enabled: false,
+        ..TokenlessConfig::default()
+    };
     // Should return immediately without touching DB
     record_compression_stats(
         &config,

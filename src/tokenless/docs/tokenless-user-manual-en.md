@@ -602,5 +602,5 @@ All hooks receive `TOKENLESS_AGENT_ID=copilot-shell`. Auxiliary files: `hook_uti
 ---
 
 **License**: MIT (tokenless core) + Apache-2.0 (vendored rtk)
-**Version**: 0.6.1
-**Document version**: 2.2 (add reversible compression/Stash, retrieve and mcp subcommands; aligned with 0.6.1 implementation)
+**Version**: 0.7.0
+**Document version**: 2.2 (add reversible compression/Stash, retrieve and mcp subcommands; aligned with 0.7.0 implementation)

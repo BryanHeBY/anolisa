@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0
+
+- add MCP `tokenless_retrieve` stdio server (`tokenless mcp serve`) so MCP-connected agents can recover truncated payloads on demand — the MCP analogue of the `tokenless retrieve` CLI, closing the stash MCP gap vs Headroom CCR's `headroom_retrieve`
+- complete reversible-compression (stash / CCR) coverage across the remaining lossy paths: `ResponseCompressor` string truncation, `ResponseCompressor` depth truncation, and `SchemaCompressor` description truncation are now stash-backed with `<<tokenless:KEY>>` markers; fit-check before stash prevents orphan entries; shared `stash_suffix()` helpers keep marker budget consistent
+- add `--no-stash` / `--stash-db` flags to `compress-schema` (mirroring `compress-response`); dry-run (`compression_on=false`) skips the stash so markers never reach the LLM without a retrievable entry
+- add lazy TTL purge to `SqliteStore`: expired rows are physically deleted before retrieve lookups so the stash db does not grow unbounded
+- add actual-savings-rate display: `StatsSummary::actual_savings_percent(session_total_tokens)`; `format_summary()` / `format_summary_json()` accept optional session total and emit an "Overall Savings vs Total Consumption" section plus new JSON fields (`session_total_tokens`, `actual_savings_tokens`, `actual_savings_percent`) — backward-compatible when absent
+- add stash write/size counters to compression stats (`record_compression_stats` extended); retrieve-side hits/misses deferred pending a stats use case
+- add qoder framework driver (qodercli install + settings.json merge/prune, `AdapterOps::read_file`, symlink-safe atomic `write_file`); gate qoder to `adapter_type=plugin`; fail closed on forged receipts and require all managed hooks
+- raise test coverage from 59% to 75%: 100+ new unit tests plus 18 CLI integration tests across all four crates, test code moved to `src/tests/` via `include!()` for cleaner separation
+- add reversible-compression user manual (`docs/stash-reversible-compression.md`) plus README updates: architecture tree entry for `tokenless-ccr`, retrieve subsection documenting hash/marker input and `--no-stash`/`--stash-db`, scenario-mapping rewrite of the "Applicable Scenarios & Expected Effects" chapter
+- rename tokenless docs `*_CN.md` to `*_zh.md`, add bidirectional bilingual links, create `README.md` + `README_zh.md`
+- address adapter review findings: trust packaged datadir roots for Codex symlink targets, scope Claude Code marketplaces per component and fail closed, reject framework/adapter type mismatches before enable
+- silence clippy warnings surfaced by rustc 1.94 stable in existing tests (`field_reassign_with_default` in tokenless-cli, `bool_assert_comparison` and `default_constructed_unit_structs` in tokenless-stats)
+
 ## 0.6.1
 
 - bundle tool_categories.json into dist for npm installs

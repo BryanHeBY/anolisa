@@ -448,6 +448,15 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.7.0-1
+- feat(tokenless): add MCP `tokenless_retrieve` stdio server (`tokenless mcp serve`); closes the stash MCP gap vs Headroom CCR's `headroom_retrieve`
+- feat(tokenless): complete reversible-compression (stash) coverage across string, depth, and SchemaCompressor description truncation paths; add `--no-stash`/`--stash-db` to `compress-schema`; SqliteStore lazy TTL purge
+- feat(tokenless): add actual-savings-rate display and JSON fields (session_total_tokens / actual_savings_tokens / actual_savings_percent); record stash writes/size in compression stats
+- feat(anolisa): built-in qoder framework driver (qodercli install + settings.json merge/prune, symlink-safe atomic write_file); gate qoder to adapter_type=plugin; fail closed on forged receipts
+- test(tokenless): raise coverage from 59% to 75% via 100+ unit and 18 CLI integration tests
+- docs(tokenless): add `docs/stash-reversible-compression.md`, README architecture-tree/retrieve subsections, rename `*_CN.md` to `*_zh.md`, add missing `README.md` + `README_zh.md`
+- fix(anolisa): address adapter review — trust packaged datadir roots for Codex symlinks; scope Claude Code marketplaces per component; reject framework/adapter type mismatches before enable
+
 * Sat Jul 04 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.6.1-2
 - fix(tokenless): sync stale version stamps to 0.6.1 (component.toml, cosh-extension.json, user-manual footers); bump anolis_release to 2
 
