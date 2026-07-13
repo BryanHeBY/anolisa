@@ -203,6 +203,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.2-1
+- fix(memory): sanitize memory_observe hints with newline/control-char replacement so they round-trip through the frontmatter reader (Windows paths with backslashes)
+- feat(memory): add `max_hint_bytes` (default 512) with `MEMORY_MAX_HINT_BYTES` env override; propagate `&MemoryConfig` through memory_observe and the MCP server
+- fix(memory): honor `INSTALL_PROFILE` in Makefile so `make install INSTALL_PROFILE=user PREFIX=$HOME/.local` no longer needs root (adapter resources under `$(PREFIX)/share/anolisa`)
+- test(memory): add safe_fs security-boundary unit tests; fix cargo fmt drift on `tests/safe_fs_tests.rs`
+
 * Fri Jul 04 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.1-1
 - fix(memory): unblock vector/hybrid search on tokio runtime (thread runtime handle into index worker, block_in_place in search)
 - fix(memory): stop leaking .git internals via memory_get_context (reserved-path filter covers .git/)
