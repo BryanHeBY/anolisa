@@ -16,8 +16,15 @@ extension manifest、变量替换和安装行为同时依据
 - 当前目录已被 Qwen Code 信任；Qwen Code 会拒绝从不受信任的工作区安装扩展。
 
 当前实现与真实安装测试以 Qwen Code `0.19.9` 源码为基线；该版本声明需要
-Node.js `>=22`。部署脚本会先校验可见的 Node 主版本并执行 `qwen --version`，
-在 Node/Qwen 运行时不可用时于修改 extension 状态前失败。
+Node.js `>=22`。部署脚本会在修改 extension 状态前校验可见的 Node 主版本、
+Qwen Code 语义化版本及 extension 管理接口，并校验 `agent-sec-cli` 的版本前缀、
+Observability schema、`observability record` 和 `scan-pii` 接口。
+
+这些行为检查用于尽早发现 PATH 误配或不兼容版本，不能证明二进制来源，也不能防止
+恶意程序伪造相同输出。部署前应通过系统包管理、制品签名或校验和确认 `qwen`、
+`python3`、`node` 和 `agent-sec-cli` 来自受信源，并检查 `command -v` 返回的路径；
+自动化部署建议用绝对路径设置 `QWEN_BIN`。运行中的 hook 仍会从 Qwen Code 进程的
+`PATH` 查找 `python3` 和 `agent-sec-cli`，因此该运行时 PATH 也必须只包含受信目录。
 
 ## 部署
 

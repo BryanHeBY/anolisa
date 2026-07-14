@@ -353,6 +353,27 @@ def test_redaction_failure_drops_sensitive_fields_but_keeps_hash(monkeypatch):
     assert redacted["metrics"]["pii_scan_input_sha256"]
 
 
+def test_unexpected_processing_error_is_diagnosed_and_fail_open(monkeypatch, capsys):
+    def fail_record(_record):
+        raise RuntimeError("writer exploded")
+
+    monkeypatch.setattr(observability_hook, "_record_observability", fail_record)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps(_base("UserPromptSubmit", prompt="hello"))),
+    )
+
+    observability_hook.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == (
+        "qwen-observability-hook: unexpected error while processing "
+        "UserPromptSubmit: RuntimeError: writer exploded\n"
+    )
+
+
 def test_invalid_json_returns_noop_without_cli(monkeypatch, capsys):
     def fail_run(*_args, **_kwargs):
         raise AssertionError("subprocess.run should not be called")

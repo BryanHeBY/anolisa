@@ -1,4 +1,4 @@
-"""E2E checks for Qwen Code extension command-hook execution."""
+"""E2E checks for Qwen Code command-hook execution."""
 
 import json
 import os

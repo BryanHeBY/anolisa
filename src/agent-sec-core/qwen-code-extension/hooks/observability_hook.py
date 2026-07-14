@@ -405,8 +405,14 @@ def main() -> None:
         record = _build_record(input_data)
         if record is not None:
             _record_observability(record)
-    except Exception:
-        pass
+    except Exception as exc:
+        event_name = input_data.get("hook_event_name")
+        if not isinstance(event_name, str) or not event_name:
+            event_name = "unknown"
+        _diagnostic(
+            f"unexpected error while processing {event_name}: "
+            f"{type(exc).__name__}: {exc}"
+        )
     print(_noop())
 
 
