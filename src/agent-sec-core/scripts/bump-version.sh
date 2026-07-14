@@ -21,7 +21,8 @@
 #   9. adapters/component.toml              (component.version)
 #  10. codex-plugin/hooks-plugin/.codex-plugin/plugin.json ("version" field)
 #  11. qoder-plugin/.qoder-plugin/plugin.json ("version" field)
-#  12. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
+#  12. qwen-code-extension/qwen-extension.json ("version" field)
+#  13. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
 #
 # Manual update required (not automated):
 #   - agent-sec-core.spec.in  (%changelog entry)
@@ -208,7 +209,15 @@ bump_file "$PROJECT_ROOT/qoder-plugin/.qoder-plugin/plugin.json" \
     "qoder-plugin/.qoder-plugin/plugin.json"
 
 # -----------------------------------------------------------------------------
-# 12. Regenerate lock files
+# 12. qwen-code-extension/qwen-extension.json
+# -----------------------------------------------------------------------------
+bump_file "$PROJECT_ROOT/qwen-code-extension/qwen-extension.json" \
+    "\"version\": \"$OLD_VERSION\"" \
+    "\"version\": \"$NEW_VERSION\"" \
+    "qwen-code-extension/qwen-extension.json"
+
+# -----------------------------------------------------------------------------
+# 13. Regenerate lock files
 # -----------------------------------------------------------------------------
 log "Regenerating lock files..."
 

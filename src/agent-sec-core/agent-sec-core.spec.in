@@ -57,6 +57,7 @@ Requires:       agent-sec-codex-hook = %{version}-%{release}
 Requires:       agent-sec-qoder-hook = %{version}-%{release}
 Requires:       agent-sec-openclaw-hook = %{version}-%{release}
 Requires:       agent-sec-hermes-hook = %{version}-%{release}
+Requires:       agent-sec-qwen-code-hook = %{version}-%{release}
 Requires:       agent-sec-skills = %{version}-%{release}
 
 %description
@@ -159,7 +160,27 @@ Provides OS-level security guardrails for Hermes Agent via agent-sec-cli.
 %license LICENSE
 
 # =============================================================================
-# Subpackage 5: agent-sec-skills
+# Subpackage 5: agent-sec-qwen-code-hook
+# =============================================================================
+%package -n agent-sec-qwen-code-hook
+Summary:        Qwen Code extension for agent security
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-qwen-code-hook
+Qwen Code security extension powered by agent-sec-core.
+Provides lifecycle observability through Qwen Code command hooks.
+
+%files -n agent-sec-qwen-code-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/scripts/deploy.sh
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/observability_hook.py
+/opt/agent-sec/qwen-code-extension/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 6: agent-sec-skills
 # =============================================================================
 %package -n agent-sec-skills
 Summary:        Agent security skill definitions for copilot-shell
@@ -175,7 +196,7 @@ Includes skill-ledger, code-scanner, prompt-scanner and related skill definition
 %license LICENSE
 
 # =============================================================================
-# Subpackage 6: agent-sec-codex-hook
+# Subpackage 7: agent-sec-codex-hook
 # =============================================================================
 %package -n agent-sec-codex-hook
 Summary:        Codex plugin security hooks
@@ -194,7 +215,7 @@ and skill ledger verification for Codex agent.
 %license LICENSE
 
 # =============================================================================
-# Subpackage 7: agent-sec-qoder-hook
+# Subpackage 8: agent-sec-qoder-hook
 # =============================================================================
 %package -n agent-sec-qoder-hook
 Summary:        Qoder plugin security hooks

@@ -195,6 +195,11 @@ build-hermes-plugin: ## Stage hermes-plugin Python sources to BUILD_DIR
 	cp -rp hermes-plugin/src/. $(BUILD_DIR)/hermes-plugin/src/
 	cp -rp hermes-plugin/scripts/. $(BUILD_DIR)/hermes-plugin/scripts/
 
+.PHONY: build-qwen-code-extension
+build-qwen-code-extension: ## Stage Qwen Code extension files (no compilation)
+	install -d -m 0755 $(BUILD_DIR)/qwen-code-extension
+	cp -rp qwen-code-extension/. $(BUILD_DIR)/qwen-code-extension/
+
 .PHONY: stage-codex-plugin
 stage-codex-plugin: ## Stage codex-plugin hooks and install script to BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/codex-plugin
@@ -229,7 +234,7 @@ stage-component-manifest: ## Stage component.toml into BUILD_DIR
 		$(BUILD_DIR)/share/anolisa/components/sec-core/component.toml
 
 .PHONY: build-all
-build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-codex-plugin stage-qoder-plugin stage-cosh-extension stage-skills stage-component-manifest ## Build all components
+build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin build-qwen-code-extension stage-codex-plugin stage-qoder-plugin stage-cosh-extension stage-skills stage-component-manifest ## Build all components
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: export-requirements
@@ -268,6 +273,7 @@ ifeq ($(INSTALL_PROFILE),user)
   SKILLDIR        ?= $(HOME)/.copilot-shell/skills
   OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
   HERMES_PLUGIN_DIR   ?= $(LIBDIR)/hermes-plugin
+  QWEN_CODE_EXTENSION_DIR ?= $(LIBDIR)/qwen-code-extension
   CODEX_PLUGIN_DIR    ?= $(LIBDIR)/codex-plugin
   QODER_PLUGIN_DIR    ?= $(LIBDIR)/qoder-plugin
 else
@@ -277,6 +283,7 @@ else
   SKILLDIR        ?= $(ANOLISA_DATADIR)/skills
   OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
   HERMES_PLUGIN_DIR   ?= $(LIBDIR)/hermes-plugin
+  QWEN_CODE_EXTENSION_DIR ?= $(LIBDIR)/qwen-code-extension
   CODEX_PLUGIN_DIR    ?= $(LIBDIR)/codex-plugin
   QODER_PLUGIN_DIR    ?= $(LIBDIR)/qoder-plugin
 endif
@@ -295,6 +302,7 @@ RPM_OPENCLAW_PLUGIN_DIR ?= /opt/agent-sec/openclaw-plugin
 RPM_CODEX_PLUGIN_DIR  ?= /opt/agent-sec/codex-plugin
 RPM_HERMES_PLUGIN_DIR ?= /opt/agent-sec/hermes-plugin
 RPM_QODER_PLUGIN_DIR  ?= /opt/agent-sec/qoder-plugin
+RPM_QWEN_CODE_EXTENSION_DIR ?= /opt/agent-sec/qwen-code-extension
 SYSTEMD_USER_UNIT_DIR ?= /usr/lib/systemd/user
 SYSTEMD_USER_UNIT_SOURCE ?= agent-sec-cli/config/systemd/agent-sec-core.service
 
@@ -374,6 +382,13 @@ install-hermes-plugin: ## Install hermes-plugin to target directory
 	cp -rp $(BUILD_DIR)/hermes-plugin/scripts/. $(DESTDIR)$(HERMES_PLUGIN_DIR)/scripts/
 	chmod 0755 $(DESTDIR)$(HERMES_PLUGIN_DIR)/scripts/*.sh
 
+.PHONY: install-qwen-code-extension
+install-qwen-code-extension: ## Install Qwen Code extension to target directory
+	install -d -m 0755 $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)
+	cp -rp $(BUILD_DIR)/qwen-code-extension/. $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/
+	chmod 0755 $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/scripts/*.sh
+	chmod 0755 $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/hooks/observability_hook.py
+
 .PHONY: install-codex-plugin
 install-codex-plugin: ## Install codex-plugin hooks and install script
 	install -d -m 0755 $(DESTDIR)$(CODEX_PLUGIN_DIR)
@@ -406,14 +421,15 @@ install-systemd-user: ## Install agent-sec-core systemd user service
 	install -p -m 0644 $(SYSTEMD_USER_UNIT_SOURCE) $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
 
 .PHONY: install-all
-install-all: install-cli-venv install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-skills ## Install all (user source build)
+install-all: install-cli-venv install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills ## Install all (user source build)
 
 .PHONY: install-all-for-rpmbuild
 install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
+install-all-for-rpmbuild: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-skills install-component-manifest install-systemd-user ## Install all (RPM build)
+install-all-for-rpmbuild: install-cli-site install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills install-component-manifest install-systemd-user ## Install all (RPM build)
 
 # =============================================================================
 # UNINSTALL
@@ -449,6 +465,10 @@ uninstall-openclaw-plugin: ## Remove openclaw plugin
 uninstall-hermes-plugin: ## Remove hermes plugin
 	rm -rf $(DESTDIR)$(HERMES_PLUGIN_DIR)
 
+.PHONY: uninstall-qwen-code-extension
+uninstall-qwen-code-extension: ## Remove Qwen Code extension
+	rm -rf $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)
+
 .PHONY: uninstall-codex-plugin
 uninstall-codex-plugin: ## Remove codex plugin
 	rm -rf $(DESTDIR)$(CODEX_PLUGIN_DIR)
@@ -470,7 +490,7 @@ uninstall-component-manifest: ## Remove component manifest
 	rm -rf $(DESTDIR)$(COMPONENT_DIR)
 
 .PHONY: uninstall
-uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-codex-plugin uninstall-qoder-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills ## Uninstall everything install-all installed
+uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-codex-plugin uninstall-qoder-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-qwen-code-extension uninstall-skills ## Uninstall everything install-all installed
 
 .PHONY: help
 help: ## Show this help message
