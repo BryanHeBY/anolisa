@@ -23,16 +23,6 @@ absolute_path() {
         "$1"
 }
 
-resolve_executable() {
-    local command_name="$1"
-    local command_path
-    command_path="$(command -v "${command_name}" 2>/dev/null)" || \
-        fail "${command_name} is not available in PATH"
-    [[ -f "${command_path}" && -x "${command_path}" ]] || \
-        fail "${command_name} does not resolve to an executable file: ${command_path}"
-    absolute_path "${command_path}"
-}
-
 json_field() {
     local json_path="$1"
     local field_name="$2"
@@ -45,58 +35,8 @@ print(value if isinstance(value, str) else "")' \
 }
 
 require_command python3
-QWEN_BIN="$(resolve_executable "${QWEN_BIN}")"
-AGENT_SEC_CLI_BIN="$(resolve_executable agent-sec-cli)"
-
-if command -v node >/dev/null 2>&1; then
-    NODE_VERSION="$(node --version 2>/dev/null || true)"
-    if [[ "${NODE_VERSION}" =~ ^v?([0-9]+) ]] && ((BASH_REMATCH[1] < 22)); then
-        fail "Qwen Code 0.19.9 requires Node.js >=22; found ${NODE_VERSION}"
-    fi
-fi
-if ! QWEN_VERSION="$("${QWEN_BIN}" --version 2>/dev/null)"; then
-    fail "qwen failed to start; verify the Qwen Code installation and its Node.js runtime"
-fi
-SEMVER_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
-[[ "${QWEN_VERSION}" =~ ${SEMVER_PATTERN} ]] || \
-    fail "unexpected qwen --version output; expected a Qwen Code semantic version"
-
-if ! QWEN_EXTENSIONS_HELP="$("${QWEN_BIN}" extensions --help 2>&1)"; then
-    fail "qwen does not provide the extension management interface"
-fi
-for REQUIRED_FRAGMENT in \
-    "Manage Qwen Code extensions." \
-    "qwen extensions install <source>" \
-    "qwen extensions update" \
-    "qwen extensions enable"; do
-    [[ "${QWEN_EXTENSIONS_HELP}" == *"${REQUIRED_FRAGMENT}"* ]] || \
-        fail "qwen extensions --help does not match the required Qwen Code interface"
-done
-
-if ! AGENT_SEC_CLI_VERSION="$("${AGENT_SEC_CLI_BIN}" --version 2>/dev/null)"; then
-    fail "agent-sec-cli failed to start"
-fi
-AGENT_SEC_CLI_VERSION_PATTERN='^agent-sec-cli[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
-[[ "${AGENT_SEC_CLI_VERSION}" =~ ${AGENT_SEC_CLI_VERSION_PATTERN} ]] || \
-    fail "unexpected agent-sec-cli --version output"
-
-if ! "${AGENT_SEC_CLI_BIN}" observability schema 2>/dev/null | python3 -c \
-    'import json, sys
-schema = json.load(sys.stdin)
-mapping = schema.get("discriminator", {}).get("mapping", {})
-required = {"before_agent_run", "before_tool_call", "after_tool_call", "after_agent_run"}
-raise SystemExit(0 if isinstance(mapping, dict) and required <= mapping.keys() else 1)'; then
-    fail "agent-sec-cli observability schema is incompatible with this extension"
-fi
-if ! "${AGENT_SEC_CLI_BIN}" observability record --help >/dev/null 2>&1; then
-    fail "agent-sec-cli does not provide observability record"
-fi
-if ! "${AGENT_SEC_CLI_BIN}" scan-pii --help >/dev/null 2>&1; then
-    fail "agent-sec-cli does not provide scan-pii"
-fi
-
-echo "Using Qwen Code ${QWEN_VERSION} from ${QWEN_BIN}"
-echo "Using ${AGENT_SEC_CLI_VERSION} from ${AGENT_SEC_CLI_BIN}"
+require_command "${QWEN_BIN}"
+require_command agent-sec-cli
 
 EXTENSION_DIR="$(absolute_path "${EXTENSION_DIR}")"
 MANIFEST_PATH="${EXTENSION_DIR}/qwen-extension.json"
