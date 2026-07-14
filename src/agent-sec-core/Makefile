@@ -202,6 +202,11 @@ stage-codex-plugin: ## Stage codex-plugin hooks and install script to BUILD_DIR
 	cp -p codex-plugin/install.sh $(BUILD_DIR)/codex-plugin/
 	cp -rp codex-plugin/.agents $(BUILD_DIR)/codex-plugin/
 
+.PHONY: stage-qoder-plugin
+stage-qoder-plugin: ## Stage qoder-plugin hooks and install script to BUILD_DIR
+	install -d -m 0755 $(BUILD_DIR)/qoder-plugin
+	cp -rp qoder-plugin/. $(BUILD_DIR)/qoder-plugin/
+
 .PHONY: stage-cosh-extension
 stage-cosh-extension: ## Stage cosh-extension hooks to BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/cosh-extension
@@ -224,7 +229,7 @@ stage-component-manifest: ## Stage component.toml into BUILD_DIR
 		$(BUILD_DIR)/share/anolisa/components/sec-core/component.toml
 
 .PHONY: build-all
-build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-codex-plugin stage-cosh-extension stage-skills stage-component-manifest ## Build all components
+build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-codex-plugin stage-qoder-plugin stage-cosh-extension stage-skills stage-component-manifest ## Build all components
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: export-requirements
@@ -264,6 +269,7 @@ ifeq ($(INSTALL_PROFILE),user)
   OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
   HERMES_PLUGIN_DIR   ?= $(LIBDIR)/hermes-plugin
   CODEX_PLUGIN_DIR    ?= $(LIBDIR)/codex-plugin
+  QODER_PLUGIN_DIR    ?= $(LIBDIR)/qoder-plugin
 else
   PREFIX          ?= /usr/local
   ANOLISA_DATADIR ?= /usr/share/anolisa
@@ -272,6 +278,7 @@ else
   OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
   HERMES_PLUGIN_DIR   ?= $(LIBDIR)/hermes-plugin
   CODEX_PLUGIN_DIR    ?= $(LIBDIR)/codex-plugin
+  QODER_PLUGIN_DIR    ?= $(LIBDIR)/qoder-plugin
 endif
 
 COMPONENT_DIR       ?= $(ANOLISA_DATADIR)/components/sec-core
@@ -287,6 +294,7 @@ CLI_PRIVATE_SITE    ?= /opt/agent-sec/lib/python3.11/site-packages
 RPM_OPENCLAW_PLUGIN_DIR ?= /opt/agent-sec/openclaw-plugin
 RPM_CODEX_PLUGIN_DIR  ?= /opt/agent-sec/codex-plugin
 RPM_HERMES_PLUGIN_DIR ?= /opt/agent-sec/hermes-plugin
+RPM_QODER_PLUGIN_DIR  ?= /opt/agent-sec/qoder-plugin
 SYSTEMD_USER_UNIT_DIR ?= /usr/lib/systemd/user
 SYSTEMD_USER_UNIT_SOURCE ?= agent-sec-cli/config/systemd/agent-sec-core.service
 
@@ -372,6 +380,13 @@ install-codex-plugin: ## Install codex-plugin hooks and install script
 	cp -rp $(BUILD_DIR)/codex-plugin/. $(DESTDIR)$(CODEX_PLUGIN_DIR)/
 	chmod 0755 $(DESTDIR)$(CODEX_PLUGIN_DIR)/install.sh
 
+.PHONY: install-qoder-plugin
+install-qoder-plugin: ## Install qoder-plugin hooks and install script
+	install -d -m 0755 $(DESTDIR)$(QODER_PLUGIN_DIR)
+	cp -rp $(BUILD_DIR)/qoder-plugin/. $(DESTDIR)$(QODER_PLUGIN_DIR)/
+	chmod 0755 $(DESTDIR)$(QODER_PLUGIN_DIR)/install.sh
+	chmod 0755 $(DESTDIR)$(QODER_PLUGIN_DIR)/hooks/*.py
+
 .PHONY: install-cosh-hook
 install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
@@ -391,13 +406,14 @@ install-systemd-user: ## Install agent-sec-core systemd user service
 	install -p -m 0644 $(SYSTEMD_USER_UNIT_SOURCE) $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
 
 .PHONY: install-all
-install-all: install-cli-venv install-cosh-hook install-codex-plugin install-openclaw-plugin install-hermes-plugin install-skills ## Install all (user source build)
+install-all: install-cli-venv install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-skills ## Install all (user source build)
 
 .PHONY: install-all-for-rpmbuild
 install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site install-cosh-hook install-codex-plugin install-openclaw-plugin install-hermes-plugin install-skills install-component-manifest install-systemd-user ## Install all (RPM build)
+install-all-for-rpmbuild: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
+install-all-for-rpmbuild: install-cli-site install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-skills install-component-manifest install-systemd-user ## Install all (RPM build)
 
 # =============================================================================
 # UNINSTALL
@@ -437,6 +453,10 @@ uninstall-hermes-plugin: ## Remove hermes plugin
 uninstall-codex-plugin: ## Remove codex plugin
 	rm -rf $(DESTDIR)$(CODEX_PLUGIN_DIR)
 
+.PHONY: uninstall-qoder-plugin
+uninstall-qoder-plugin: ## Remove qoder plugin
+	rm -rf $(DESTDIR)$(QODER_PLUGIN_DIR)
+
 .PHONY: uninstall-skills
 uninstall-skills: ## Remove sec-core's own skill subdirs from SKILLDIR
 	@for d in skills/*/; do \
@@ -450,7 +470,7 @@ uninstall-component-manifest: ## Remove component manifest
 	rm -rf $(DESTDIR)$(COMPONENT_DIR)
 
 .PHONY: uninstall
-uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-codex-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills ## Uninstall everything install-all installed
+uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-codex-plugin uninstall-qoder-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills ## Uninstall everything install-all installed
 
 .PHONY: help
 help: ## Show this help message

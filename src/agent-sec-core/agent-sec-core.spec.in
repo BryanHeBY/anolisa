@@ -54,6 +54,7 @@ BuildRequires:  systemd-rpm-macros
 Requires:       agent-sec-cli = %{version}-%{release}
 Requires:       agent-sec-cosh-hook = %{version}-%{release}
 Requires:       agent-sec-codex-hook = %{version}-%{release}
+Requires:       agent-sec-qoder-hook = %{version}-%{release}
 Requires:       agent-sec-openclaw-hook = %{version}-%{release}
 Requires:       agent-sec-hermes-hook = %{version}-%{release}
 Requires:       agent-sec-skills = %{version}-%{release}
@@ -190,6 +191,24 @@ and skill ledger verification for Codex agent.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /opt/agent-sec/codex-plugin/install.sh
 /opt/agent-sec/codex-plugin/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 7: agent-sec-qoder-hook
+# =============================================================================
+%package -n agent-sec-qoder-hook
+Summary:        Qoder plugin security hooks
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-qoder-hook
+Qoder CLI security hooks providing agent-sec-core protection for Qoder agents.
+
+%files -n agent-sec-qoder-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/qoder-plugin/install.sh
+/opt/agent-sec/qoder-plugin/
 %license LICENSE
 
 # =============================================================================
