@@ -1,3 +1,43 @@
 {
-  "hooks": {}
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Checking prompt for PII..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Checking tool input for PII..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Checking tool output for PII..."
+          }
+        ]
+      }
+    ]
+  }
 }
