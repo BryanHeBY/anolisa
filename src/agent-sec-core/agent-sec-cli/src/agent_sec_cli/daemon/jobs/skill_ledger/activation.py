@@ -1,22 +1,19 @@
-"""Skill Ledger activation daemon job and SkillFS notification handler.
-
-This module intentionally keeps top-level imports light. Skill Ledger modules
-are imported inside worker paths so daemon health/registry construction stays
-cheap and does not initialize scanner or signing machinery.
-"""
+"""Skill Ledger activation job and SkillFS notification handler."""
 
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from agent_sec_cli.daemon.errors import BadRequestError, UnavailableError
 from agent_sec_cli.daemon.jobs.base import BackgroundJob, JobStatus, utc_now
+from agent_sec_cli.daemon.jobs.skill_ledger.processor import (
+    process_skill_change,
+)
+from agent_sec_cli.daemon.jobs.skill_ledger.protocol import SkillFsChange
 from agent_sec_cli.daemon.protocol import DaemonRequest
 from agent_sec_cli.daemon.registry import HandlerResult, MethodSpec
 from agent_sec_cli.daemon.runtime import DaemonRuntime
-from agent_sec_cli.skill_ledger.errors import UnresolvedLiveRootError
 
 METHOD_SKILLFS_NOTIFY_CHANGE = "skill_ledger.skillfs_notify_change"
 SCHEMA_VERSION = 1
@@ -38,30 +35,6 @@ _ALLOWED_EVENT_KINDS = frozenset(
         "reconcile",
     }
 )
-
-
-@dataclass
-class SkillFsChange:
-    """Validated SkillFS change notification."""
-
-    skill_dir: Path
-    skill_name: str
-    event_kinds: set[str] = field(default_factory=set)
-    paths: set[str] = field(default_factory=set)
-
-    def merge(self, other: "SkillFsChange") -> None:
-        """Merge another notification for the same skill."""
-        self.event_kinds.update(other.event_kinds)
-        self.paths.update(other.paths)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable job/debug payload."""
-        return {
-            "skillDir": str(self.skill_dir),
-            "skillName": self.skill_name,
-            "eventKinds": sorted(self.event_kinds),
-            "paths": sorted(self.paths),
-        }
 
 
 class SkillLedgerActivationJob(BackgroundJob):
@@ -265,59 +238,6 @@ def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
     )
 
 
-def process_skill_change(change: SkillFsChange) -> dict[str, Any]:
-    """Run scan and activation resolution for a debounced SkillFS change."""
-    backend = _ensure_default_backend()
-    policy = _resolve_activation_policy()
-    scan_result: dict[str, Any] | None = None
-    scan_error: str | None = None
-    scan_exception: Exception | None = None
-    try:
-        scan_result = _scan_skill(str(change.skill_dir), backend)
-    except Exception as exc:
-        if _is_unresolved_live_root_error(exc):
-            return _skipped_unmanaged_result(change, str(exc))
-        scan_error = str(exc)
-        scan_exception = exc
-
-    try:
-        activation_result = _resolve_activation(str(change.skill_dir), backend, policy)
-    except Exception as exc:
-        if _is_unresolved_live_root_error(exc):
-            if scan_exception is None:
-                return _skipped_unmanaged_result(change, str(exc))
-            # A prior scanner failure is the health signal; keep it attached
-            # instead of downgrading the later live-root failure to skipped.
-            raise exc from scan_exception
-        if scan_exception is not None:
-            raise exc from scan_exception
-        raise
-    result: dict[str, Any] = {
-        "status": "processed" if scan_error is None else "error",
-        "skill": change.to_dict(),
-        "scan": scan_result,
-        "activation": activation_result,
-    }
-    if scan_error is not None:
-        result["error"] = scan_error
-    return result
-
-
-def _is_unresolved_live_root_error(exc: Exception) -> bool:
-    return isinstance(exc, UnresolvedLiveRootError)
-
-
-def _skipped_unmanaged_result(change: SkillFsChange, message: str) -> dict[str, Any]:
-    return {
-        "status": "skipped",
-        "reasonCode": "unmanaged_skill_root",
-        "message": message,
-        "skill": change.to_dict(),
-        "scan": None,
-        "activation": None,
-    }
-
-
 def _validate_skill_dir(value: Any) -> Path:
     if not isinstance(value, str) or not value:
         raise BadRequestError("params.skillDir must be a non-empty string")
@@ -351,43 +271,6 @@ def _validate_paths(value: Any) -> list[str]:
 
 def _paths_are_metadata_only(paths: set[str]) -> bool:
     return bool(paths) and all(Path(path).parts[0] == _SKILL_META for path in paths)
-
-
-def _ensure_default_backend() -> Any:
-    from agent_sec_cli.skill_ledger.signing.ed25519 import (  # noqa: PLC0415
-        NativeEd25519Backend,
-    )
-    from agent_sec_cli.skill_ledger.signing.key_manager import (  # noqa: PLC0415
-        keys_exist,
-    )
-
-    if not keys_exist():
-        NativeEd25519Backend().generate_keys(passphrase=None)
-    return NativeEd25519Backend()
-
-
-def _scan_skill(skill_dir: str, backend: Any) -> dict[str, Any]:
-    from agent_sec_cli.skill_ledger.core.certifier import (  # noqa: PLC0415
-        scan_skill,
-    )
-
-    return scan_skill(skill_dir, backend, force=False)
-
-
-def _resolve_activation(skill_dir: str, backend: Any, policy: str) -> dict[str, Any]:
-    from agent_sec_cli.skill_ledger.core.resolver import (  # noqa: PLC0415
-        resolve_activation,
-    )
-
-    return resolve_activation(skill_dir, backend, policy=policy)
-
-
-def _resolve_activation_policy() -> str:
-    from agent_sec_cli.skill_ledger.config import (  # noqa: PLC0415
-        resolve_activation_policy,
-    )
-
-    return resolve_activation_policy()
 
 
 def _resolve_managed_skill_dirs() -> list[Path]:

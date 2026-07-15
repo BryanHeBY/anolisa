@@ -37,6 +37,7 @@ from agent_sec_cli.daemon.handlers.security_query import (
 )
 from agent_sec_cli.daemon.health import register_health_methods
 from agent_sec_cli.daemon.jobs.registry import register_default_jobs
+from agent_sec_cli.daemon.jobs.skill_ledger import skillfs_notify_method_spec
 from agent_sec_cli.daemon.logging import log_daemon_event, setup_daemon_logging
 from agent_sec_cli.daemon.protocol import (
     DEFAULT_MAX_REQUEST_BYTES,
@@ -54,9 +55,6 @@ from agent_sec_cli.daemon.runtime import (
     ensure_runtime_directory,
     lock_path_for_socket,
     resolve_socket_path,
-)
-from agent_sec_cli.daemon.skill_ledger_activation import (
-    skillfs_notify_method_spec,
 )
 
 LOGGER = logging.getLogger("agent-sec-core.daemon")

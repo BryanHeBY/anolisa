@@ -7,18 +7,23 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from agent_sec_cli.daemon.errors import BadRequestError
-from agent_sec_cli.daemon.protocol import DaemonRequest
-from agent_sec_cli.daemon.runtime import DaemonRuntime
-from agent_sec_cli.daemon.skill_ledger_activation import (
+from agent_sec_cli.daemon.jobs.skill_ledger import (
     METHOD_SKILLFS_NOTIFY_CHANGE,
     SKILL_LEDGER_ACTIVATION_JOB,
-    SkillFsChange,
     SkillLedgerActivationJob,
+)
+from agent_sec_cli.daemon.jobs.skill_ledger.activation import (
     parse_skillfs_change,
-    process_skill_change,
     skillfs_notify_change_handler,
 )
+from agent_sec_cli.daemon.jobs.skill_ledger.processor import (
+    process_skill_change,
+)
+from agent_sec_cli.daemon.jobs.skill_ledger.protocol import SkillFsChange
+from agent_sec_cli.daemon.protocol import DaemonRequest
+from agent_sec_cli.daemon.runtime import DaemonRuntime
 from agent_sec_cli.skill_ledger.errors import UnresolvedLiveRootError
 
 
@@ -124,7 +129,7 @@ def test_notify_enqueues_registered_activation_job(monkeypatch, tmp_path: Path):
     job = SkillLedgerActivationJob(debounce_seconds=0)
     runtime.jobs.register(job)
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_managed_skill_dirs",
+        "agent_sec_cli.daemon.jobs.skill_ledger.activation._resolve_managed_skill_dirs",
         lambda: [],
     )
 
@@ -152,7 +157,7 @@ def test_notify_enqueues_reconcile_with_empty_paths(monkeypatch, tmp_path: Path)
     job = SkillLedgerActivationJob(debounce_seconds=0)
     runtime.jobs.register(job)
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_managed_skill_dirs",
+        "agent_sec_cli.daemon.jobs.skill_ledger.activation._resolve_managed_skill_dirs",
         lambda: [],
     )
 
@@ -183,7 +188,7 @@ def test_activation_job_debounces_same_skill(monkeypatch, tmp_path: Path):
     calls = []
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_managed_skill_dirs",
+        "agent_sec_cli.daemon.jobs.skill_ledger.activation._resolve_managed_skill_dirs",
         lambda: [],
     )
 
@@ -192,7 +197,7 @@ def test_activation_job_debounces_same_skill(monkeypatch, tmp_path: Path):
         return {"status": "processed", "skill": change.to_dict()}
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation.process_skill_change",
+        "agent_sec_cli.daemon.jobs.skill_ledger.activation.process_skill_change",
         fake_process,
     )
 
@@ -245,7 +250,7 @@ def test_activation_job_debounces_events_arriving_during_drain(
     calls: list[tuple[set[str], float]] = []
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_managed_skill_dirs",
+        "agent_sec_cli.daemon.jobs.skill_ledger.activation._resolve_managed_skill_dirs",
         lambda: [],
     )
 
@@ -353,19 +358,19 @@ def test_process_skill_change_resolves_activation_after_scan_error(
         return {"target": None}
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._ensure_default_backend",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._ensure_default_backend",
         fake_backend,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._scan_skill",
         fail_scan,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._resolve_activation",
         fake_resolve,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation_policy",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._resolve_activation_policy",
         fake_policy,
     )
 
@@ -404,11 +409,11 @@ def test_process_skill_change_skips_unresolved_live_root_from_scan(
         raise live_root_error
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._ensure_default_backend",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._ensure_default_backend",
         fake_backend,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._scan_skill",
         fail_scan,
     )
 
@@ -455,19 +460,19 @@ def test_process_skill_change_skips_unresolved_live_root_from_activation(
         raise live_root_error
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._ensure_default_backend",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._ensure_default_backend",
         fake_backend,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._scan_skill",
         fake_scan,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._resolve_activation",
         fail_resolve,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation_policy",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._resolve_activation_policy",
         lambda: "pass_only",
     )
 
@@ -515,19 +520,19 @@ def test_process_skill_change_does_not_skip_live_root_after_scan_error(
         raise live_root_error
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._ensure_default_backend",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._ensure_default_backend",
         fake_backend,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._scan_skill",
         fail_scan,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._resolve_activation",
         fail_resolve,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation_policy",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._resolve_activation_policy",
         lambda: "pass_only",
     )
 

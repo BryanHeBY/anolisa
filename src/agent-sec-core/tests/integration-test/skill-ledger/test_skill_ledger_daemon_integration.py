@@ -5,12 +5,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agent_sec_cli.daemon import skill_ledger_activation
 from agent_sec_cli.daemon.client import DaemonClient
-from agent_sec_cli.daemon.server import DaemonServer
-from agent_sec_cli.daemon.skill_ledger_activation import (
-    METHOD_SKILLFS_NOTIFY_CHANGE,
+from agent_sec_cli.daemon.jobs.skill_ledger import METHOD_SKILLFS_NOTIFY_CHANGE
+from agent_sec_cli.daemon.jobs.skill_ledger import (
+    processor as skill_ledger_processor,
 )
+from agent_sec_cli.daemon.server import DaemonServer
 from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.errors import UnresolvedLiveRootError
 
@@ -213,14 +213,14 @@ def test_daemon_reconcile_existing_clean_skill_keeps_existing_version(
     socket_path = daemon_socket_path(tmp_path)
     scan_calls = {"count": 0}
 
-    real_scan = skill_ledger_activation._scan_skill
+    real_scan = skill_ledger_processor._scan_skill
 
     def spy_scan(skill_path: str, backend: Any) -> dict[str, Any]:
         scan_calls["count"] += 1
         return real_scan(skill_path, backend)
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._scan_skill",
         spy_scan,
     )
 
@@ -593,7 +593,7 @@ def test_daemon_pass_warn_only_policy_hides_deny_snapshot(
         return certify(skill_path, backend, findings_path=str(findings_path))
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._scan_skill",
         fake_scan,
     )
 
@@ -725,14 +725,14 @@ def test_daemon_startup_reconcile_ignores_default_discovery_dirs(
     socket_path = daemon_socket_path(tmp_path)
     scanned: list[str] = []
 
-    real_scan = skill_ledger_activation._scan_skill
+    real_scan = skill_ledger_processor._scan_skill
 
     def spy_scan(skill_path: str, backend: Any) -> dict[str, Any]:
         scanned.append(skill_path)
         return real_scan(skill_path, backend)
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._scan_skill",
         spy_scan,
     )
 
@@ -772,11 +772,11 @@ def test_daemon_unresolved_live_root_keeps_job_running(monkeypatch, tmp_path: Pa
         raise live_root_error
 
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._scan_skill",
         fail_live_root,
     )
     monkeypatch.setattr(
-        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation",
+        "agent_sec_cli.daemon.jobs.skill_ledger.processor._resolve_activation",
         lambda _skill_path, _backend, _policy: {"target": None},
     )
 
