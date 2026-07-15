@@ -7,10 +7,13 @@ from typing import Any
 
 from agent_sec_cli.daemon.errors import BadRequestError, UnavailableError
 from agent_sec_cli.daemon.jobs.base import BackgroundJob, JobStatus, utc_now
-from agent_sec_cli.daemon.jobs.skill_ledger.processor import (
-    process_skill_change,
+from agent_sec_cli.daemon.jobs.skill_ledger.protocol import (
+    SKILLFS_EVENT_KINDS,
+    SkillFsChange,
 )
-from agent_sec_cli.daemon.jobs.skill_ledger.protocol import SkillFsChange
+from agent_sec_cli.daemon.jobs.skill_ledger.worker_client import (
+    SkillLedgerWorkerClient,
+)
 from agent_sec_cli.daemon.protocol import DaemonRequest
 from agent_sec_cli.daemon.registry import HandlerResult, MethodSpec
 from agent_sec_cli.daemon.runtime import DaemonRuntime
@@ -22,19 +25,7 @@ DEFAULT_DEBOUNCE_SECONDS = 0.5
 
 _SKILL_MANIFEST = "SKILL.md"
 _SKILL_META = ".skill-meta"
-_ALLOWED_EVENT_KINDS = frozenset(
-    {
-        "mkdir",
-        "create",
-        "write",
-        "rename",
-        "unlink",
-        "rmdir",
-        "setattr",
-        "truncate",
-        "reconcile",
-    }
-)
+_ALLOWED_EVENT_KINDS = SKILLFS_EVENT_KINDS
 
 
 class SkillLedgerActivationJob(BackgroundJob):
@@ -42,7 +33,11 @@ class SkillLedgerActivationJob(BackgroundJob):
 
     name = SKILL_LEDGER_ACTIVATION_JOB
 
-    def __init__(self, debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS) -> None:
+    def __init__(
+        self,
+        debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS,
+        worker_client: SkillLedgerWorkerClient | None = None,
+    ) -> None:
         if debounce_seconds < 0:
             raise ValueError("debounce_seconds must be non-negative")
         self.debounce_seconds = debounce_seconds
@@ -53,6 +48,7 @@ class SkillLedgerActivationJob(BackgroundJob):
         self._last_error: str | None = None
         self._last_tick_at: str | None = None
         self._last_processed: dict[str, Any] | None = None
+        self._worker_client = worker_client or SkillLedgerWorkerClient()
 
     async def start(self) -> None:
         """Start the activation worker and enqueue startup reconciliation."""
@@ -65,20 +61,24 @@ class SkillLedgerActivationJob(BackgroundJob):
 
     async def stop(self) -> None:
         """Stop the activation worker."""
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-        self._wake_event = None
-        self._state = "stopped"
+        try:
+            if self._task is not None:
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
+                self._task = None
+        finally:
+            await self._worker_client.stop()
+            self._wake_event = None
+            self._state = "stopped"
 
     def status(self) -> JobStatus:
         """Return current job status."""
+        last_error = self._last_error or self._worker_client.last_error
         return JobStatus(
             name=self.name,
-            state=self._state,
-            last_error=self._last_error,
+            state="error" if last_error and self._state == "running" else self._state,
+            last_error=last_error,
             last_tick_at=self._last_tick_at,
         )
 
@@ -99,6 +99,11 @@ class SkillLedgerActivationJob(BackgroundJob):
     def last_processed(self) -> dict[str, Any] | None:
         """Return the last processed result for tests and diagnostics."""
         return self._last_processed
+
+    @property
+    def worker_pid(self) -> int | None:
+        """Return the worker PID for diagnostics."""
+        return self._worker_client.pid
 
     async def _run_loop(self) -> None:
         while True:
@@ -134,7 +139,7 @@ class SkillLedgerActivationJob(BackgroundJob):
     async def _process_change(self, change: SkillFsChange) -> None:
         self._last_tick_at = utc_now()
         try:
-            result = await asyncio.to_thread(process_skill_change, change)
+            result = await self._worker_client.process_change(change)
             self._last_processed = result
             self._last_error = result.get("error")
             self._state = "error" if self._last_error else "running"

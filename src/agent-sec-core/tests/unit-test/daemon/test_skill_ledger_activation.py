@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from agent_sec_cli.daemon.errors import BadRequestError
 from agent_sec_cli.daemon.jobs.skill_ledger import (
     METHOD_SKILLFS_NOTIFY_CHANGE,
@@ -25,6 +24,24 @@ from agent_sec_cli.daemon.jobs.skill_ledger.protocol import SkillFsChange
 from agent_sec_cli.daemon.protocol import DaemonRequest
 from agent_sec_cli.daemon.runtime import DaemonRuntime
 from agent_sec_cli.skill_ledger.errors import UnresolvedLiveRootError
+
+
+class FakeWorkerClient:
+    """In-process worker client for activation scheduling tests."""
+
+    def __init__(self, process=None):
+        self._process = process or (
+            lambda change: {"status": "processed", "skill": change.to_dict()}
+        )
+        self.last_error = None
+        self.pid = None
+        self.stopped = False
+
+    async def process_change(self, change: SkillFsChange) -> dict[str, Any]:
+        return self._process(change)
+
+    async def stop(self) -> None:
+        self.stopped = True
 
 
 def make_skill(tmp_path: Path, name: str = "demo-skill") -> Path:
@@ -126,7 +143,10 @@ def test_metadata_only_notification_is_accepted_and_ignored(tmp_path: Path):
 def test_notify_enqueues_registered_activation_job(monkeypatch, tmp_path: Path):
     skill_dir = make_skill(tmp_path, "weather")
     runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
-    job = SkillLedgerActivationJob(debounce_seconds=0)
+    job = SkillLedgerActivationJob(
+        debounce_seconds=0,
+        worker_client=FakeWorkerClient(),
+    )
     runtime.jobs.register(job)
     monkeypatch.setattr(
         "agent_sec_cli.daemon.jobs.skill_ledger.activation._resolve_managed_skill_dirs",
@@ -154,7 +174,10 @@ def test_notify_enqueues_registered_activation_job(monkeypatch, tmp_path: Path):
 def test_notify_enqueues_reconcile_with_empty_paths(monkeypatch, tmp_path: Path):
     skill_dir = make_skill(tmp_path, "weather")
     runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
-    job = SkillLedgerActivationJob(debounce_seconds=0)
+    job = SkillLedgerActivationJob(
+        debounce_seconds=0,
+        worker_client=FakeWorkerClient(),
+    )
     runtime.jobs.register(job)
     monkeypatch.setattr(
         "agent_sec_cli.daemon.jobs.skill_ledger.activation._resolve_managed_skill_dirs",
@@ -196,13 +219,11 @@ def test_activation_job_debounces_same_skill(monkeypatch, tmp_path: Path):
         calls.append(change)
         return {"status": "processed", "skill": change.to_dict()}
 
-    monkeypatch.setattr(
-        "agent_sec_cli.daemon.jobs.skill_ledger.activation.process_skill_change",
-        fake_process,
-    )
-
     async def scenario():
-        job = SkillLedgerActivationJob(debounce_seconds=0.05)
+        job = SkillLedgerActivationJob(
+            debounce_seconds=0.05,
+            worker_client=FakeWorkerClient(fake_process),
+        )
         await job.start()
         try:
             job.enqueue(

@@ -1,20 +1,49 @@
 """Integration tests for Skill Ledger daemon activation refresh."""
 
+# ruff: noqa: I001
+
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+import pytest
 from agent_sec_cli.daemon.client import DaemonClient
-from agent_sec_cli.daemon.jobs.skill_ledger import METHOD_SKILLFS_NOTIFY_CHANGE
+from agent_sec_cli.daemon.jobs.skill_ledger import (
+    METHOD_SKILLFS_NOTIFY_CHANGE,
+    SKILL_LEDGER_ACTIVATION_JOB,
+    SkillLedgerActivationJob,
+)
 from agent_sec_cli.daemon.jobs.skill_ledger import (
     processor as skill_ledger_processor,
 )
+from agent_sec_cli.daemon.jobs.skill_ledger.protocol import SkillFsChange
 from agent_sec_cli.daemon.server import DaemonServer
 from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.errors import UnresolvedLiveRootError
 
 PENDING_DECISION_TARGET = ".skill-meta/versions/__pending_decision__.snapshot"
+
+
+class InProcessWorkerClient:
+    """Keep parent-process monkeypatches visible in focused integration tests."""
+
+    last_error = None
+    pid = None
+
+    async def process_change(self, change: SkillFsChange) -> dict[str, Any]:
+        return skill_ledger_processor.process_skill_change(change)
+
+    async def stop(self) -> None:
+        pass
+
+
+def install_in_process_worker(server: DaemonServer) -> None:
+    """Replace the real worker only where a test patches processor internals."""
+    job = server.runtime.jobs.get(SKILL_LEDGER_ACTIVATION_JOB)
+    assert isinstance(job, SkillLedgerActivationJob)
+    job._worker_client = InProcessWorkerClient()
 
 
 def make_skill(parent: Path, name: str, files: dict[str, str] | None = None) -> Path:
@@ -134,6 +163,25 @@ def test_daemon_notify_scans_and_writes_activation(monkeypatch, tmp_path: Path):
                     else None
                 )
             )
+            job = server.runtime.jobs.get(SKILL_LEDGER_ACTIVATION_JOB)
+            assert isinstance(job, SkillLedgerActivationJob)
+            first_result = await wait_for(lambda: job.last_processed)
+            first_pid = job.worker_pid
+            assert first_pid is not None
+            await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                notify_payload(skill_dir),
+                trace_context={},
+            )
+            await wait_for(
+                lambda: (
+                    job.last_processed
+                    if job.last_processed is not first_result
+                    else None
+                )
+            )
+            second_pid = job.worker_pid
             health = await asyncio.to_thread(
                 client.call,
                 "daemon.health",
@@ -142,9 +190,11 @@ def test_daemon_notify_scans_and_writes_activation(monkeypatch, tmp_path: Path):
             config = read_skill_ledger_config(tmp_path)
         finally:
             await server.stop()
-        return response, activation, health, config
+        return response, activation, health, config, first_pid, second_pid
 
-    response, activation, health, config = asyncio.run(scenario())
+    response, activation, health, config, first_pid, second_pid = asyncio.run(
+        scenario()
+    )
 
     assert response.ok is True
     assert response.data["accepted"] is True
@@ -155,6 +205,10 @@ def test_daemon_notify_scans_and_writes_activation(monkeypatch, tmp_path: Path):
     assert (skill_dir / activation["target"]).is_dir()
     jobs = {job["name"]: job for job in health.data["jobs"]}
     assert jobs["skill-ledger-activation"]["state"] == "running"
+    assert first_pid != os.getpid()
+    assert second_pid == first_pid
+    with pytest.raises(ProcessLookupError):
+        os.kill(first_pid, 0)
 
 
 def test_daemon_reconcile_scans_unmanaged_skill_and_remembers_it(
@@ -226,6 +280,7 @@ def test_daemon_reconcile_existing_clean_skill_keeps_existing_version(
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
+        install_in_process_worker(server)
         await server.start()
         try:
             client = DaemonClient(socket_path=socket_path, timeout_ms=3000)
@@ -599,6 +654,7 @@ def test_daemon_pass_warn_only_policy_hides_deny_snapshot(
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
+        install_in_process_worker(server)
         await server.start()
         try:
             client = DaemonClient(socket_path=socket_path, timeout_ms=3000)
@@ -738,6 +794,7 @@ def test_daemon_startup_reconcile_ignores_default_discovery_dirs(
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
+        install_in_process_worker(server)
         await server.start()
         try:
             activation = await wait_for(
@@ -782,6 +839,7 @@ def test_daemon_unresolved_live_root_keeps_job_running(monkeypatch, tmp_path: Pa
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
+        install_in_process_worker(server)
         await server.start()
         try:
             client = DaemonClient(socket_path=socket_path, timeout_ms=3000)
