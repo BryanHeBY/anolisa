@@ -35,9 +35,11 @@ from agent_sec_cli.daemon.handlers.prompt_scan import (
 from agent_sec_cli.daemon.handlers.security_query import (
     register_security_query_methods,
 )
+from agent_sec_cli.daemon.handlers.skill_ledger import (
+    register_skill_ledger_methods,
+)
 from agent_sec_cli.daemon.health import register_health_methods
 from agent_sec_cli.daemon.jobs.registry import register_default_jobs
-from agent_sec_cli.daemon.jobs.skill_ledger import skillfs_notify_method_spec
 from agent_sec_cli.daemon.logging import log_daemon_event, setup_daemon_logging
 from agent_sec_cli.daemon.protocol import (
     DEFAULT_MAX_REQUEST_BYTES,
@@ -69,7 +71,7 @@ def create_default_registry() -> MethodRegistry:
     registry = MethodRegistry()
     register_health_methods(registry)
     register_prompt_scan_methods(registry)
-    registry.register(skillfs_notify_method_spec())
+    register_skill_ledger_methods(registry)
     register_security_query_methods(registry)
     return registry
 
