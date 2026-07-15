@@ -16,6 +16,8 @@ from pii_text import json_dumps as _json_dumps
 from pii_text import text_sha256, value_to_text
 
 _CLI_TIMEOUT_SECONDS = 3
+# Read one extra byte below to distinguish an exact-limit payload from truncation.
+_MAX_PAYLOAD_SIZE = 1024 * 1024
 # Qwen Code HookInput does not currently expose one stable run identifier across
 # prompt, tool, and stop events. Use the zero GUID deliberately until reliable
 # run correlation can be implemented from the hook protocol itself.
@@ -135,6 +137,16 @@ def _base_record(
 
 def _diagnostic(message: str) -> None:
     print(f"qwen-observability-hook: {message}", file=sys.stderr)
+
+
+def _read_stdin_payload() -> str | bytes | None:
+    """Read one bounded hook payload, returning None when it exceeds the limit."""
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    payload = stream.read(_MAX_PAYLOAD_SIZE + 1)
+    if len(payload) > _MAX_PAYLOAD_SIZE:
+        _diagnostic(f"hook input exceeds {_MAX_PAYLOAD_SIZE} bytes; skipping event")
+        return None
+    return payload
 
 
 def _process_text(value: Any) -> str:
@@ -355,6 +367,13 @@ def _build_record(input_data: dict[str, Any]) -> dict[str, Any] | None:
     return builder(input_data)
 
 
+def _diagnostic_event_name(input_data: Any) -> str:
+    if not isinstance(input_data, dict):
+        return "unknown"
+    event_name = input_data.get("hook_event_name")
+    return event_name if event_name in _BUILDERS else "unknown"
+
+
 def _record_observability(record: dict[str, Any]) -> None:
     record = _redact_observability_record(record)
     if not record.get("metrics"):
@@ -396,8 +415,12 @@ def _record_observability(record: dict[str, Any]) -> None:
 
 def main() -> None:
     try:
-        input_data = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, EOFError, ValueError):
+        payload = _read_stdin_payload()
+        if payload is None:
+            print(_noop())
+            return
+        input_data = json.loads(payload)
+    except (json.JSONDecodeError, EOFError, OSError, ValueError):
         print(_noop())
         return
 
@@ -406,12 +429,9 @@ def main() -> None:
         if record is not None:
             _record_observability(record)
     except Exception as exc:
-        event_name = input_data.get("hook_event_name")
-        if not isinstance(event_name, str) or not event_name:
-            event_name = "unknown"
         _diagnostic(
-            f"unexpected error while processing {event_name}: "
-            f"{type(exc).__name__}: {exc}"
+            f"unexpected {type(exc).__name__} while processing "
+            f"{_diagnostic_event_name(input_data)}"
         )
     print(_noop())
 

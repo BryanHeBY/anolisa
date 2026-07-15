@@ -355,7 +355,7 @@ def test_redaction_failure_drops_sensitive_fields_but_keeps_hash(monkeypatch):
 
 def test_unexpected_processing_error_is_diagnosed_and_fail_open(monkeypatch, capsys):
     def fail_record(_record):
-        raise RuntimeError("writer exploded")
+        raise KeyError("alice@example.com")
 
     monkeypatch.setattr(observability_hook, "_record_observability", fail_record)
     monkeypatch.setattr(
@@ -369,9 +369,75 @@ def test_unexpected_processing_error_is_diagnosed_and_fail_open(monkeypatch, cap
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {}
     assert captured.err == (
-        "qwen-observability-hook: unexpected error while processing "
-        "UserPromptSubmit: RuntimeError: writer exploded\n"
+        "qwen-observability-hook: unexpected KeyError while processing UserPromptSubmit\n"
     )
+    assert "alice@example.com" not in captured.err
+
+
+def test_unexpected_processing_error_does_not_log_untrusted_event_name(
+    monkeypatch, capsys
+):
+    def fail_build(_input_data):
+        raise KeyError("secret-value")
+
+    monkeypatch.setattr(observability_hook, "_build_record", fail_build)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"hook_event_name": "alice@example.com"})),
+    )
+
+    observability_hook.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == (
+        "qwen-observability-hook: unexpected KeyError while processing unknown\n"
+    )
+    assert "alice@example.com" not in captured.err
+    assert "secret-value" not in captured.err
+
+
+def test_oversized_payload_is_diagnosed_and_fail_open(monkeypatch, capsys):
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("subprocess.run should not be called")
+
+    payload = b"alice@example.com" + b"x" * observability_hook._MAX_PAYLOAD_SIZE
+    monkeypatch.setattr(observability_hook.subprocess, "run", fail_run)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(payload)))
+
+    observability_hook.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == (
+        "qwen-observability-hook: hook input exceeds "
+        f"{observability_hook._MAX_PAYLOAD_SIZE} bytes; skipping event\n"
+    )
+    assert "alice@example.com" not in captured.err
+
+
+def test_payload_at_size_limit_is_processed(monkeypatch, capsys):
+    prefix = (
+        b'{"hook_event_name":"UserPromptSubmit",'
+        b'"session_id":"session-123","prompt":"'
+    )
+    suffix = b'"}'
+    prompt_size = observability_hook._MAX_PAYLOAD_SIZE - len(prefix) - len(suffix)
+    payload = prefix + b"x" * prompt_size + suffix
+    records = []
+    assert len(payload) == observability_hook._MAX_PAYLOAD_SIZE
+
+    monkeypatch.setattr(observability_hook, "_record_observability", records.append)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(payload)))
+
+    observability_hook.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == ""
+    assert len(records) == 1
+    assert len(records[0]["metrics"]["prompt"]) == prompt_size
 
 
 def test_invalid_json_returns_noop_without_cli(monkeypatch, capsys):
