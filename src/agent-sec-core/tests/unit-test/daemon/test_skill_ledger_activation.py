@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from agent_sec_cli.daemon.jobs.skill_ledger import (
     SKILL_LEDGER_ACTIVATION_JOB,
     SkillLedgerActivationJob,
@@ -16,6 +15,9 @@ from agent_sec_cli.daemon.jobs.skill_ledger.processor import (
     process_skill_change,
 )
 from agent_sec_cli.daemon.jobs.skill_ledger.protocol import SkillFsChange
+from agent_sec_cli.daemon.jobs.skill_ledger.worker_client import (
+    SkillLedgerWorkerTransportError,
+)
 from agent_sec_cli.skill_ledger.errors import UnresolvedLiveRootError
 
 
@@ -189,6 +191,36 @@ def test_drain_pending_requeues_batch_on_cancelled_process(
     pending = asyncio.run(scenario())
 
     assert set(pending) == {first.resolve(), second.resolve()}
+
+
+def test_activation_job_records_worker_transport_failure(tmp_path: Path):
+    skill_dir = make_skill(tmp_path, "weather")
+
+    def fail_process(_change: SkillFsChange) -> dict[str, Any]:
+        raise SkillLedgerWorkerTransportError("worker request timed out after 300s")
+
+    async def scenario():
+        job = SkillLedgerActivationJob(
+            debounce_seconds=0,
+            worker_client=FakeWorkerClient(fail_process),
+        )
+        job._state = "running"
+        await job._process_change(
+            SkillFsChange(
+                skill_dir=skill_dir.resolve(),
+                skill_name=skill_dir.name,
+                event_kinds={"write"},
+                paths={"SKILL.md"},
+            )
+        )
+        return job.status(), job.last_processed
+
+    status, last_processed = asyncio.run(scenario())
+
+    assert status.state == "error"
+    assert status.last_error == "worker request timed out after 300s"
+    assert last_processed is not None
+    assert last_processed["status"] == "error"
 
 
 def test_process_skill_change_resolves_activation_after_scan_error(

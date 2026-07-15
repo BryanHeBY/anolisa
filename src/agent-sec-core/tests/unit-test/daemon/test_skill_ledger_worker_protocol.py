@@ -122,6 +122,34 @@ def test_worker_error_response_round_trip():
             },
             "relative paths",
         ),
+        (
+            {
+                "schemaVersion": 1,
+                "requestId": "1",
+                "method": "process_change",
+                "change": {
+                    "skillDir": "/skills/weather\x00",
+                    "skillName": "weather",
+                    "eventKinds": ["write"],
+                    "paths": [],
+                },
+            },
+            "NUL",
+        ),
+        (
+            {
+                "schemaVersion": 1,
+                "requestId": "1",
+                "method": "process_change",
+                "change": {
+                    "skillDir": "/skills/weather",
+                    "skillName": "weather",
+                    "eventKinds": ["write"],
+                    "paths": ["scripts/run\x00.sh"],
+                },
+            },
+            "NUL",
+        ),
     ],
 )
 def test_worker_request_rejects_invalid_payload(payload, message):

@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from agent_sec_cli.daemon.client import DaemonClient
 from agent_sec_cli.daemon.handlers.skill_ledger import (
     METHOD_SKILLFS_NOTIFY_CHANGE,

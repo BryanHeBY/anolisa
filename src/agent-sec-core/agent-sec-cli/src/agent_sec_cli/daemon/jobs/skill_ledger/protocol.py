@@ -61,6 +61,8 @@ class SkillFsChange:
 
         if not isinstance(skill_dir, str) or not skill_dir:
             raise WorkerProtocolError("change.skillDir must be a non-empty string")
+        if "\x00" in skill_dir:
+            raise WorkerProtocolError("change.skillDir must not contain NUL characters")
         if not Path(skill_dir).is_absolute():
             raise WorkerProtocolError("change.skillDir must be an absolute path")
         if not isinstance(skill_name, str) or not skill_name:
@@ -266,6 +268,8 @@ def _event_kind_set(value: Any) -> set[str]:
 def _relative_path_set(value: Any) -> set[str]:
     paths = _string_set(value, "change.paths")
     for item in paths:
+        if "\x00" in item:
+            raise WorkerProtocolError("change.paths must not contain NUL characters")
         path = Path(item)
         if not path.parts or path.is_absolute() or ".." in path.parts:
             raise WorkerProtocolError(

@@ -15,6 +15,7 @@ from agent_sec_cli.daemon.jobs.skill_ledger.protocol import (
 )
 
 _WORKER_MODULE = "agent_sec_cli.daemon.jobs.skill_ledger.worker"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
 _GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 2.0
 _TERMINATE_TIMEOUT_SECONDS = 5.0
 _MAX_STDERR_BYTES = 64 * 1024
@@ -39,7 +40,13 @@ class SkillLedgerWorkerExecutionError(SkillLedgerWorkerError):
 class SkillLedgerWorkerClient:
     """Own one lazily started, serial Skill Ledger worker process."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    ) -> None:
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
+        self._request_timeout_seconds = request_timeout_seconds
         self._lock = asyncio.Lock()
         self._process: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -64,7 +71,16 @@ class SkillLedgerWorkerClient:
         async with self._lock:
             for attempt in range(2):
                 try:
-                    result = await self._process_once(change)
+                    try:
+                        result = await asyncio.wait_for(
+                            self._process_once(change),
+                            timeout=self._request_timeout_seconds,
+                        )
+                    except asyncio.TimeoutError as exc:
+                        raise SkillLedgerWorkerTransportError(
+                            "worker request timed out after "
+                            f"{self._request_timeout_seconds:g}s"
+                        ) from exc
                 except asyncio.CancelledError:
                     await self._cancel_worker()
                     raise
@@ -103,11 +119,14 @@ class SkillLedgerWorkerClient:
             ) from exc
 
         if not line:
-            returncode = await process.wait()
+            returncode = process.returncode
+            exit_status = (
+                f"exit code {returncode}"
+                if returncode is not None
+                else "closing stdout before exit"
+            )
             raise SkillLedgerWorkerTransportError(
-                self._transport_message(
-                    f"worker closed stdout with exit code {returncode}"
-                )
+                self._transport_message(f"worker closed stdout with {exit_status}")
             )
         if len(line) > MAX_WORKER_FRAME_BYTES:
             raise SkillLedgerWorkerTransportError(
@@ -179,8 +198,12 @@ class SkillLedgerWorkerClient:
         return f"{message}: {stderr}" if stderr else message
 
     async def _cancel_worker(self) -> None:
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.shield(self._terminate_worker())
+        cleanup_task = asyncio.create_task(self._terminate_worker())
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            with contextlib.suppress(asyncio.CancelledError):
+                await cleanup_task
 
     async def _shutdown_worker(self) -> None:
         process, stderr_task = self._detach_worker()
@@ -249,9 +272,14 @@ class SkillLedgerWorkerClient:
     ) -> None:
         if stderr_task is None:
             return
+        caller = asyncio.current_task()
+        cancellation_count = caller.cancelling() if caller is not None else 0
+        if not stderr_task.done():
+            stderr_task.cancel()
         try:
-            await stderr_task
+            await asyncio.shield(stderr_task)
         except asyncio.CancelledError:
-            raise
+            if caller is not None and caller.cancelling() > cancellation_count:
+                raise
         except Exception:
             return

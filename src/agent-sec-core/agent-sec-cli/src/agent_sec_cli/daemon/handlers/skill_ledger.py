@@ -103,6 +103,8 @@ def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
 def _validate_skill_dir(value: Any) -> Path:
     if not isinstance(value, str) or not value:
         raise BadRequestError("params.skillDir must be a non-empty string")
+    if "\x00" in value:
+        raise BadRequestError("params.skillDir must not contain NUL characters")
     path = Path(value)
     if not path.is_absolute():
         raise BadRequestError("params.skillDir must be an absolute path")
@@ -124,6 +126,8 @@ def _validate_paths(value: Any) -> list[str]:
     for item in value:
         if not isinstance(item, str) or not item:
             raise BadRequestError("params.paths must contain non-empty strings")
+        if "\x00" in item:
+            raise BadRequestError("params.paths must not contain NUL characters")
         path = Path(item)
         if not path.parts or path.is_absolute() or ".." in path.parts:
             raise BadRequestError("params.paths must be relative paths under skillDir")

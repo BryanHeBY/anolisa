@@ -37,6 +37,21 @@ class FakeReader:
         self._queue.put_nowait(data)
 
 
+class BlockingReader:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    async def read(self, _size: int) -> bytes:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        raise AssertionError("blocking reader must be cancelled")
+
+
 class FakeStdin:
     def __init__(self, process: "FakeProcess") -> None:
         self._process = process
@@ -73,6 +88,8 @@ class FakeStdin:
         elif self._process.behavior == "eof":
             self._process.finish(1)
             self._process.stdout.feed(b"")
+        elif self._process.behavior == "eof_alive":
+            self._process.stdout.feed(b"")
 
     async def drain(self) -> None:
         pass
@@ -94,6 +111,7 @@ class FakeProcess:
         *,
         exit_on_close: bool = True,
         exit_on_terminate: bool = True,
+        blocking_stderr: bool = False,
     ) -> None:
         self.pid = pid
         self.behavior = behavior
@@ -101,7 +119,7 @@ class FakeProcess:
         self.exit_on_terminate = exit_on_terminate
         self.returncode = None
         self.stdout = FakeReader()
-        self.stderr = FakeReader()
+        self.stderr = BlockingReader() if blocking_stderr else FakeReader()
         self.stdin = FakeStdin(self)
         self.signals: list[str] = []
         self._exited = asyncio.Event()
@@ -239,6 +257,73 @@ def test_worker_transport_retries_only_once(monkeypatch, tmp_path: Path):
     assert pid is None
 
 
+def test_worker_request_timeout_restarts_and_retries(monkeypatch, tmp_path: Path):
+    first = FakeProcess(101, "hang", exit_on_close=False)
+    second = FakeProcess(102, "success")
+    calls = install_process_factory(monkeypatch, [first, second])
+
+    async def scenario():
+        client = SkillLedgerWorkerClient(request_timeout_seconds=0.01)
+        result = await client.process_change(make_change(tmp_path))
+        await client.stop()
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert len(calls) == 2
+    assert first.signals == ["terminate"]
+    assert result["workerPid"] == 102
+
+
+def test_worker_request_timeout_retries_only_once_and_releases_lock(
+    monkeypatch,
+    tmp_path: Path,
+):
+    first = FakeProcess(101, "hang", exit_on_close=False)
+    second = FakeProcess(102, "hang", exit_on_close=False)
+    third = FakeProcess(103, "success")
+    calls = install_process_factory(monkeypatch, [first, second, third])
+
+    async def scenario():
+        client = SkillLedgerWorkerClient(request_timeout_seconds=0.01)
+        with pytest.raises(SkillLedgerWorkerTransportError, match="timed out after"):
+            await client.process_change(make_change(tmp_path))
+        result = await client.process_change(make_change(tmp_path))
+        await client.stop()
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert len(calls) == 3
+    assert first.signals == ["terminate"]
+    assert second.signals == ["terminate"]
+    assert result["workerPid"] == 103
+
+
+def test_worker_eof_before_exit_does_not_wait_for_process(
+    monkeypatch,
+    tmp_path: Path,
+):
+    first = FakeProcess(101, "eof_alive", exit_on_close=False)
+    second = FakeProcess(102, "success")
+    calls = install_process_factory(monkeypatch, [first, second])
+
+    async def scenario():
+        client = SkillLedgerWorkerClient(request_timeout_seconds=1.0)
+        result = await asyncio.wait_for(
+            client.process_change(make_change(tmp_path)),
+            timeout=0.5,
+        )
+        await client.stop()
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert len(calls) == 2
+    assert first.signals == ["terminate"]
+    assert result["workerPid"] == 102
+
+
 def test_worker_scan_error_does_not_restart(monkeypatch, tmp_path: Path):
     process = FakeProcess(101, "scan_error")
     calls = install_process_factory(monkeypatch, [process])
@@ -263,6 +348,7 @@ def test_worker_cancellation_terminates_process(monkeypatch, tmp_path: Path):
         "hang",
         exit_on_close=False,
         exit_on_terminate=True,
+        blocking_stderr=True,
     )
     install_process_factory(monkeypatch, [process])
 
@@ -270,15 +356,40 @@ def test_worker_cancellation_terminates_process(monkeypatch, tmp_path: Path):
         client = SkillLedgerWorkerClient()
         task = asyncio.create_task(client.process_change(make_change(tmp_path)))
         await process.stdin.written.wait()
+        await process.stderr.started.wait()
+        stderr_task = client._stderr_task
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        return client.pid
+        return client.pid, stderr_task
 
-    pid = asyncio.run(scenario())
+    pid, stderr_task = asyncio.run(scenario())
 
     assert process.signals == ["terminate"]
+    assert process.stderr.cancelled is True
+    assert stderr_task is not None and stderr_task.done()
     assert pid is None
+
+
+def test_cancelled_stderr_task_does_not_interrupt_stop(monkeypatch, tmp_path: Path):
+    process = FakeProcess(101, "success", blocking_stderr=True)
+    install_process_factory(monkeypatch, [process])
+
+    async def scenario():
+        client = SkillLedgerWorkerClient()
+        await client.process_change(make_change(tmp_path))
+        await process.stderr.started.wait()
+        stderr_task = client._stderr_task
+        assert stderr_task is not None
+        stderr_task.cancel()
+        await asyncio.sleep(0)
+        await client.stop()
+        return stderr_task
+
+    stderr_task = asyncio.run(scenario())
+
+    assert process.stderr.cancelled is True
+    assert stderr_task.done()
 
 
 def test_worker_stop_escalates_to_kill(monkeypatch, tmp_path: Path):

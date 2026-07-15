@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from agent_sec_cli.daemon.errors import BadRequestError
 from agent_sec_cli.daemon.handlers.skill_ledger import (
     METHOD_SKILLFS_NOTIFY_CHANGE,
@@ -106,6 +105,7 @@ def test_parse_skillfs_change_accepts_reconcile_with_empty_paths(tmp_path: Path)
         ({"paths": ["/absolute"]}, "relative paths"),
         ({"paths": ["../escape"]}, "relative paths"),
         ({"paths": ["."]}, "relative paths"),
+        ({"paths": ["scripts/run\x00.sh"]}, "NUL"),
     ],
 )
 def test_parse_skillfs_change_rejects_invalid_params(
@@ -117,6 +117,13 @@ def test_parse_skillfs_change_rejects_invalid_params(
 
     with pytest.raises(BadRequestError, match=message):
         parse_skillfs_change(request_for(skill_dir, **overrides).params)
+
+
+def test_parse_skillfs_change_rejects_nul_skill_dir(tmp_path: Path):
+    skill_dir = make_skill(tmp_path, "weather")
+
+    with pytest.raises(BadRequestError, match="NUL"):
+        parse_skillfs_change(request_for(skill_dir, skillDir=f"{skill_dir}\x00").params)
 
 
 def test_parse_skillfs_change_requires_skill_manifest(tmp_path: Path):
