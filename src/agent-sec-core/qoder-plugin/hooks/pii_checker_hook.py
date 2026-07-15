@@ -4,7 +4,6 @@
 import json
 import os
 import subprocess
-import sys
 from typing import Any
 
 from qoder_hook_common import (
@@ -19,6 +18,7 @@ from qoder_hook_common import (
 )
 
 _MODE = os.environ.get("PII_CHECKER_MODE", "observe").strip().lower()
+_VALID_MODES = {"observe", "deny"}
 try:
     _TIMEOUT = int(os.environ.get("PII_CHECKER_TIMEOUT", "5"))
 except (TypeError, ValueError):
@@ -169,6 +169,16 @@ def _warn_output(notice: str) -> str:
     return dumps_hook_output({"decision": "allow", "systemMessage": notice})
 
 
+def _invalid_mode_output() -> str:
+    """Return a visible fail-open warning for an invalid checker mode."""
+    configured_mode = _shorten(_MODE, 32) or "<empty>"
+    notice = (
+        f"[pii-checker] Invalid PII_CHECKER_MODE {configured_mode!r}; expected "
+        "'observe' or 'deny'. Falling back to observe mode; execution will continue."
+    )
+    return _warn_output(notice)
+
+
 def _format_decision(
     input_data: dict[str, Any],
     verdict: str,
@@ -235,6 +245,9 @@ def main() -> None:
     text, source, source_desc = target
 
     scan_result = _scan_pii(input_data, text, source)
+    if _MODE not in _VALID_MODES:
+        print(_invalid_mode_output())
+        return
     if scan_result is None:
         return
 

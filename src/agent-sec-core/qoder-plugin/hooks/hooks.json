@@ -2,9 +2,12 @@
   "hooks": {
     "UserPromptSubmit": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
+            "name": "agent-sec-pii-user-prompt",
+            "description": "Scans user prompts for PII and credentials",
             "command": "python3",
             "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
             "timeout": 10,
@@ -15,9 +18,12 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
+            "name": "agent-sec-pii-tool-input",
+            "description": "Scans tool input for PII and credentials before execution",
             "command": "python3",
             "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
             "timeout": 10,
@@ -28,9 +34,12 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
+            "name": "agent-sec-pii-tool-output",
+            "description": "Scans tool output for PII and credentials before model context",
             "command": "python3",
             "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
             "timeout": 10,
