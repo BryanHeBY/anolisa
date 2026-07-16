@@ -68,6 +68,7 @@ def test_backend_rejects_invalid_max_bytes():
     assert result.exit_code == 1
     assert result.data["verdict"] == "error"
     assert result.data["summary"]["error_type"] == "ValueError"
+    assert result.error_type == "ValueError"
 
 
 def test_backend_rejects_non_integer_max_bytes():
@@ -81,6 +82,7 @@ def test_backend_rejects_non_integer_max_bytes():
     assert result.success is False
     assert result.exit_code == 1
     assert result.data["summary"]["error_type"] == "ValueError"
+    assert result.error_type == "ValueError"
 
 
 def test_backend_error_preserves_error_type_without_traceback(monkeypatch):
@@ -98,6 +100,7 @@ def test_backend_error_preserves_error_type_without_traceback(monkeypatch):
     assert result.success is False
     assert result.exit_code == 1
     assert result.data["summary"]["error_type"] == "RuntimeError"
+    assert result.error_type == "RuntimeError"
     assert result.error == "pii_scan error: scanner failed"
     assert "Traceback" not in result.stdout
 

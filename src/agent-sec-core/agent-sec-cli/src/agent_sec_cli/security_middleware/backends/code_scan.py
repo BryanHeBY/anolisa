@@ -28,6 +28,7 @@ class CodeScanBackend(BaseBackend):
                 success=False,
                 error=f"scan error: {err.message}",
                 exit_code=1,
+                error_type=type(err).__name__,
             )
         result = scan(code, language, mode=mode)
         return ActionResult(
