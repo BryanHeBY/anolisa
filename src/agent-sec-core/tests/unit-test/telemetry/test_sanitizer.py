@@ -2,8 +2,8 @@
 
 from datetime import datetime
 
-from agent_sec_cli.correlation_context import MAX_CORRELATION_ID_LENGTH
 from agent_sec_cli.telemetry.sanitizer import (
+    AgentName,
     agent_name_value,
     details_dict,
     enum_value,
@@ -56,12 +56,28 @@ def test_string_value_trims_bounds_and_rejects_non_strings() -> None:
     assert string_value(42, max_length=10) is None
 
 
-def test_agent_name_is_open_ended_and_transport_bounded() -> None:
-    assert agent_name_value(" codex ") == "codex"
-    assert agent_name_value("qwencode") == "qwencode"
-    assert agent_name_value("future-agent-runtime") == "future-agent-runtime"
-    assert agent_name_value("x" * 300) == "x" * MAX_CORRELATION_ID_LENGTH
-    assert agent_name_value(False) == ""
+def test_agent_name_accepts_only_approved_products() -> None:
+    assert {agent_name.value for agent_name in AgentName} == {
+        "codex",
+        "cosh",
+        "hermes",
+        "openclaw",
+        "qoder",
+        "qwencode",
+    }
+    for agent_name in AgentName:
+        assert agent_name_value(f" {agent_name.value} ") == agent_name.value
+
+    for invalid in (
+        "future-agent-runtime",
+        "customer@example.com",
+        "customer-account",
+        "x" * 300,
+        "Codex",
+        False,
+        None,
+    ):
+        assert agent_name_value(invalid) == ""
 
 
 def test_enum_value_requires_an_approved_exact_string() -> None:

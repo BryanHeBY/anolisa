@@ -13,7 +13,7 @@ TELEMETRY_LOG_PATH_ENV = "AGENT_SEC_TELEMETRY_LOG_PATH"
 def is_l1_telemetry_allowed() -> bool:
     """Return whether the host permits L1 telemetry for this black-box test."""
     try:
-        os.stat(TELEMETRY_DISABLED_SENTINEL)
+        os.lstat(TELEMETRY_DISABLED_SENTINEL)
     except OSError as exc:
         return exc.errno == errno.ENOENT
     return False

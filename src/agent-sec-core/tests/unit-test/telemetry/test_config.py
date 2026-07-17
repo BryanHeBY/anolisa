@@ -18,7 +18,7 @@ from agent_sec_cli.telemetry.config import (
 )
 
 
-def _raising_stat(error):
+def _raising_os_call(error):
     def fail(path):
         raise error
 
@@ -63,19 +63,27 @@ def test_sentinel_paths_match_system_contract() -> None:
 
 
 def test_l1_is_disabled_when_disabled_sentinel_exists(monkeypatch) -> None:
-    monkeypatch.setattr(config.os, "stat", lambda path: object())
+    monkeypatch.setattr(config, "_lstat", lambda path: object())
 
     assert is_l1_telemetry_allowed() is False
 
 
 def test_l1_is_allowed_only_when_disabled_sentinel_is_absent(monkeypatch) -> None:
     monkeypatch.setattr(
-        config.os,
-        "stat",
-        _raising_stat(FileNotFoundError(errno.ENOENT, "absent")),
+        config,
+        "_lstat",
+        _raising_os_call(FileNotFoundError(errno.ENOENT, "absent")),
     )
 
     assert is_l1_telemetry_allowed() is True
+
+
+def test_l1_is_disabled_by_dangling_symlink(monkeypatch, tmp_path: Path) -> None:
+    sentinel = tmp_path / ".telemetry_disabled"
+    sentinel.symlink_to(tmp_path / "missing-target")
+    monkeypatch.setattr(config, "TELEMETRY_DISABLED_SENTINEL", str(sentinel))
+
+    assert is_l1_telemetry_allowed() is False
 
 
 def test_l1_treats_explicit_enoent_oserror_as_absent(monkeypatch) -> None:
@@ -83,9 +91,9 @@ def test_l1_treats_explicit_enoent_oserror_as_absent(monkeypatch) -> None:
         pass
 
     monkeypatch.setattr(
-        config.os,
-        "stat",
-        _raising_stat(ExplicitEnoent(errno.ENOENT, "absent")),
+        config,
+        "_lstat",
+        _raising_os_call(ExplicitEnoent(errno.ENOENT, "absent")),
     )
 
     assert is_l1_telemetry_allowed() is True
@@ -97,7 +105,7 @@ def test_l1_fails_closed_when_disabled_sentinel_is_unreadable(monkeypatch) -> No
         FileNotFoundError(errno.EIO, "unexpected file error"),
         OSError(errno.EIO, "io error"),
     ):
-        monkeypatch.setattr(config.os, "stat", _raising_stat(error))
+        monkeypatch.setattr(config, "_lstat", _raising_os_call(error))
         assert is_l1_telemetry_allowed() is False
 
 
@@ -108,13 +116,13 @@ def test_l1_gate_is_not_cached(monkeypatch) -> None:
         FileNotFoundError(errno.ENOENT, "absent"),
     ]
 
-    def changing_stat(path):
+    def changing_lstat(path):
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
-    monkeypatch.setattr(config.os, "stat", changing_stat)
+    monkeypatch.setattr(config, "_lstat", changing_lstat)
 
     assert is_l1_telemetry_allowed() is True
     assert is_l1_telemetry_allowed() is False
@@ -123,9 +131,17 @@ def test_l1_gate_is_not_cached(monkeypatch) -> None:
 
 
 def test_l3_is_linked_only_when_linked_sentinel_exists(monkeypatch) -> None:
-    monkeypatch.setattr(config.os, "stat", lambda path: object())
+    monkeypatch.setattr(config, "_stat", lambda path: object())
 
     assert is_l3_telemetry_linked() is True
+
+
+def test_l3_is_not_linked_by_dangling_symlink(monkeypatch, tmp_path: Path) -> None:
+    sentinel = tmp_path / ".telemetry_linked"
+    sentinel.symlink_to(tmp_path / "missing-target")
+    monkeypatch.setattr(config, "TELEMETRY_LINKED_SENTINEL", str(sentinel))
+
+    assert is_l3_telemetry_linked() is False
 
 
 def test_l3_fails_closed_when_linked_sentinel_is_absent_or_unreadable(
@@ -138,5 +154,5 @@ def test_l3_fails_closed_when_linked_sentinel_is_absent_or_unreadable(
     ]
 
     for error in errors:
-        monkeypatch.setattr(config.os, "stat", _raising_stat(error))
+        monkeypatch.setattr(config, "_stat", _raising_os_call(error))
         assert is_l3_telemetry_linked() is False

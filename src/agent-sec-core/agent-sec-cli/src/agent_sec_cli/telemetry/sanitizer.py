@@ -3,11 +3,21 @@
 import math
 import re
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Any
 
-from agent_sec_cli.correlation_context import MAX_CORRELATION_ID_LENGTH
-
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]{0,127}$")
+
+
+class AgentName(StrEnum):
+    """Approved agent product names emitted in telemetry."""
+
+    CODEX = "codex"
+    COSH = "cosh"
+    HERMES = "hermes"
+    OPENCLAW = "openclaw"
+    QODER = "qoder"
+    QWENCODE = "qwencode"
 
 
 def now_iso() -> str:
@@ -59,11 +69,13 @@ def string_value(
 
 
 def agent_name_value(value: Any) -> str:
-    """Return an open-ended, transport-bounded agent product name."""
-    return (
-        string_value(value, max_length=MAX_CORRELATION_ID_LENGTH, allow_empty=True)
-        or ""
-    )
+    """Return an approved agent product name or an empty string."""
+    if not isinstance(value, str):
+        return ""
+    try:
+        return AgentName(value.strip()).value
+    except ValueError:
+        return ""
 
 
 def enum_value(value: Any, allowed: frozenset[str]) -> str | None:

@@ -2,6 +2,8 @@
 
 import errno
 import os
+from os import lstat as _lstat
+from os import stat as _stat
 from pathlib import Path
 
 from agent_sec_cli import __version__
@@ -35,7 +37,7 @@ def is_l1_telemetry_allowed() -> bool:
     cannot accidentally enable telemetry.
     """
     try:
-        os.stat(TELEMETRY_DISABLED_SENTINEL)
+        _lstat(TELEMETRY_DISABLED_SENTINEL)
     except OSError as exc:
         return exc.errno == errno.ENOENT
     return False
@@ -44,7 +46,7 @@ def is_l1_telemetry_allowed() -> bool:
 def is_l3_telemetry_linked() -> bool:
     """Return whether the current installation is linked for approved L3 data."""
     try:
-        os.stat(TELEMETRY_LINKED_SENTINEL)
+        _stat(TELEMETRY_LINKED_SENTINEL)
     except OSError:
         return False
     return True

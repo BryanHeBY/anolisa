@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from agent_sec_cli import __version__
 from agent_sec_cli.security_events.schema import SecurityEvent
+from agent_sec_cli.telemetry.sanitizer import AgentName
 from agent_sec_cli.telemetry.schema import build_telemetry_security_event
 
 COMPONENT_FIELDS = {
@@ -180,14 +181,21 @@ def test_harden_has_exact_baseline_fields() -> None:
     assert "CUSTOMER-CANARY" not in json.dumps(record)
 
 
-def test_agent_name_is_not_restricted_to_a_product_allowlist() -> None:
-    for agent_name in ("codex", "qwencode", "future-agent-runtime"):
+def test_agent_name_only_emits_approved_product_names() -> None:
+    for agent_name in AgentName:
         record = build_telemetry_security_event(
-            _event(), _TelemetryCtx(agent_name=f" {agent_name} ")
+            _event(), _TelemetryCtx(agent_name=f" {agent_name.value} ")
         )
 
         assert record is not None
-        _assert_component_fields(record, agent_name=agent_name)
+        _assert_component_fields(record, agent_name=agent_name.value)
+
+    for invalid in ("future-agent-runtime", "customer@example.com", "customer-account"):
+        record = build_telemetry_security_event(
+            _event(), _TelemetryCtx(agent_name=invalid)
+        )
+
+        _assert_component_fields(record)
 
 
 def test_new_action_uses_common_fields_without_special_projection() -> None:

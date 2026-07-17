@@ -31,7 +31,7 @@ def test_unsupported_language_has_structured_error_type() -> None:
 
 
 @patch("agent_sec_cli.security_middleware.backends.code_scan.scan")
-def test_scanner_error_verdict_does_not_invent_error_type(mock_scan) -> None:
+def test_scanner_error_verdict_has_structured_error_type(mock_scan) -> None:
     mock_scan.return_value = _scan_result(ok=False, verdict=Verdict.ERROR)
 
     result = CodeScanBackend().execute(
@@ -40,7 +40,7 @@ def test_scanner_error_verdict_does_not_invent_error_type(mock_scan) -> None:
 
     assert result.success is False
     assert result.exit_code == 1
-    assert result.error_type == ""
+    assert result.error_type == "CodeScanError"
 
 
 @patch("agent_sec_cli.security_middleware.backends.code_scan.scan")

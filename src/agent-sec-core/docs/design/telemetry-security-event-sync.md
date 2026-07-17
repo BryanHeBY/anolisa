@@ -38,7 +38,7 @@ security_middleware.lifecycle
   -> SecurityEvent(...)
   -> security_events.log_event(event)              # 本地 JSONL / SQLite
   -> telemetry.record_security_event_telemetry(event, ctx)
-       -> stat /etc/anolisa/.telemetry_disabled
+       -> lstat /etc/anolisa/.telemetry_disabled
        -> 检查预创建的目标 JSONL
        -> build_telemetry_security_event(event, ctx)
        -> TelemetryWriter.write(record)
@@ -61,7 +61,7 @@ L1 门控规则：
 - `.telemetry_disabled` 存在：不构造、不序列化、不写入任何 Telemetry。
 - disabled 不存在（`ENOENT`）：允许构造 L1。
 - 检查 disabled 出现 `PermissionError` 或其他非 `ENOENT` 的 `OSError`：按禁用处理。
-- 每次写入前重新 `stat`，不缓存结果。
+- 每次写入前重新 `lstat`，不缓存结果。
 
 L3 门控规则：
 
@@ -100,10 +100,11 @@ L3 门控规则：
 - 必要的纯数值验证/基线计数。
 - 结构化错误类型和退出码。
 
-`component.agent_name` 是开放的产品名称字符串，不维护 Agent 枚举。`codex`、
-`qwencode` 及未来产品名无需修改 Telemetry 代码即可输出。该字段不得用于用户名、邮箱、
-账号、实例 ID 或客户自定义 Agent 昵称；接入方负责传递产品标识。Telemetry 只做字符串
-类型、首尾空白和现有 256 字符传输上限的规范化。
+`component.agent_name` 只接受 `AgentName` 枚举中的产品名称：`codex`、`cosh`、
+`hermes`、`openclaw`、`qoder`、`qwencode`。Telemetry 去除首尾空白后执行精确匹配；
+缺失或未知值统一输出空字符串。该字段不得用于用户名、邮箱、账号、实例 ID 或客户自定义
+Agent 昵称。新增 Agent 产品必须先扩展枚举并补充测试，避免把调用方传入的任意标识写入
+Telemetry。
 
 ### 4.2 L3
 
@@ -272,7 +273,7 @@ Telemetry sanitizer 不提供通用递归 JSON 转换，不调用未知对象的
 - linked 存在、缺失和 fail-close；disabled 始终优先。
 - 8 个 action 的精确 key set。
 - 新增 action 无需修改 Telemetry 即可输出公共 L1 envelope，且不会获得特殊字段。
-- `codex`、`qwencode` 和未知未来 Agent 产品名无需 allowlist 即可输出。
+- `AgentName` 枚举中的 6 个产品名可输出，未知值和客户标识统一降为空字符串。
 - PII request/summary 完全缺席。
 - 原始 Prompt、代码、命令、路径、错误消息和所有 ID 的 canary 无法进入 JSON。
 - 未知对象不会被字符串化。
