@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 MAX_RULES_FILE_BYTES = 256 * 1024
 MAX_CUSTOM_RULES = 100
 MAX_REGEX_LENGTH = 2_048
+MAX_REGEX_GROUP_DEPTH = 64
 RULE_MATCH_TIMEOUT_SECONDS = 0.020
 
 _TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -25,6 +26,15 @@ _LOGGER = logging.getLogger(__name__)
 _CACHE_LOCK = threading.Lock()
 _CACHE_KEY: tuple[Path, str] | None = None
 _CACHE_VALUE: "CustomPiiRuleSet | None" = None
+_REGEX_VALIDATION_ERRORS = (
+    regex_engine.error,
+    TimeoutError,
+    RecursionError,
+    OverflowError,
+    ValueError,
+    KeyError,
+    MemoryError,
+)
 
 
 class CustomRuleStatus(StrEnum):
@@ -78,6 +88,41 @@ def default_custom_rules_path() -> Path:
     return Path.home() / ".config" / "agent-sec" / "pii-checker" / "rules.yaml"
 
 
+def _regex_group_depth(pattern: str) -> int:
+    """Return syntactic group depth, ignoring escapes and character classes."""
+    depth = 0
+    maximum = 0
+    escaped = False
+    in_character_class = False
+    character_class_can_close = False
+
+    for character in pattern:
+        if escaped:
+            escaped = False
+            if in_character_class:
+                character_class_can_close = True
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if in_character_class:
+            if character == "]" and character_class_can_close:
+                in_character_class = False
+            elif character != "^" or character_class_can_close:
+                character_class_can_close = True
+            continue
+        if character == "[":
+            in_character_class = True
+            character_class_can_close = False
+        elif character == "(":
+            depth += 1
+            maximum = max(maximum, depth)
+        elif character == ")" and depth > 0:
+            depth -= 1
+
+    return maximum
+
+
 def _invalid_ruleset(
     *, digest: str | None, error_code: str, log_warning: bool = True
 ) -> CustomPiiRuleSet:
@@ -112,11 +157,13 @@ def _compile_rules(data: object) -> tuple[CustomPiiRule, ...]:
             raise _RuleLoadError("duplicate_rule_type")
         if config.pii_type in BUILTIN_PII_TYPES:
             raise _RuleLoadError("reserved_rule_type")
+        if _regex_group_depth(config.regex) > MAX_REGEX_GROUP_DEPTH:
+            raise _RuleLoadError("invalid_regex")
 
         try:
             pattern = regex_engine.compile(config.regex)
             empty_match = pattern.search("", timeout=RULE_MATCH_TIMEOUT_SECONDS)
-        except (regex_engine.error, TimeoutError) as exc:
+        except _REGEX_VALIDATION_ERRORS as exc:
             raise _RuleLoadError("invalid_regex") from exc
         if empty_match is not None and empty_match.start() == empty_match.end():
             raise _RuleLoadError("regex_matches_empty_text")

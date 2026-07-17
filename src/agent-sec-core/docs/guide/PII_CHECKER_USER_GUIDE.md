@@ -121,6 +121,7 @@ The complete custom ruleset is accepted or rejected as one unit.
 | Maximum file size | 256 KiB |
 | Maximum number of rules | 100 |
 | Maximum regex length | 2,048 characters |
+| Maximum regex group nesting depth | 64 |
 | Type format | `^[a-z][a-z0-9_]{0,63}$` |
 | Allowed severity | `warn` or `deny` |
 | Per-rule matching timeout | 20 ms |
@@ -177,7 +178,7 @@ The current `error_code` values are:
 | `invalid_rule_type` | A rule type does not match the required naming format |
 | `duplicate_rule_type` | The same custom type appears more than once |
 | `reserved_rule_type` | A custom type conflicts with a built-in PII type |
-| `invalid_regex` | A regex cannot be compiled or its load-time validation times out |
+| `invalid_regex` | A regex cannot be compiled, exceeds 64 nested groups, or its load-time validation times out |
 | `regex_matches_empty_text` | A regex can produce a zero-length match on an empty string |
 | `load_error` | An unexpected loader error was handled in fail-open mode |
 

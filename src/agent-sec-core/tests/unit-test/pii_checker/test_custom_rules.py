@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from agent_sec_cli.pii_checker.custom_rules import (
     MAX_CUSTOM_RULES,
+    MAX_REGEX_GROUP_DEPTH,
     MAX_REGEX_LENGTH,
     MAX_RULES_FILE_BYTES,
     CustomRuleStatus,
@@ -61,6 +62,93 @@ def test_valid_rules_are_compiled_and_cached(tmp_path: Path) -> None:
     assert first.rules[0].pii_type == "dogfood_order_no"
     assert first.rules[0].severity == "warn"
     assert first.rules[0].pattern.fullmatch("DFT-ABC12345") is not None
+
+
+def test_regex_group_depth_boundary_is_enforced(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed.yaml"
+    rejected = tmp_path / "rejected.yaml"
+    allowed_regex = "(" * MAX_REGEX_GROUP_DEPTH + "token" + ")" * MAX_REGEX_GROUP_DEPTH
+    rejected_regex = (
+        "(" * (MAX_REGEX_GROUP_DEPTH + 1) + "token" + ")" * (MAX_REGEX_GROUP_DEPTH + 1)
+    )
+    _write_rules(allowed, f"- type: allowed_token\n  regex: '{allowed_regex}'\n")
+    _write_rules(rejected, f"- type: rejected_token\n  regex: '{rejected_regex}'\n")
+
+    allowed_ruleset = load_custom_rules(allowed)
+    rejected_ruleset = load_custom_rules(rejected)
+
+    assert allowed_ruleset.status is CustomRuleStatus.LOADED
+    assert allowed_ruleset.rules[0].pattern.fullmatch("token") is not None
+    assert rejected_ruleset.status is CustomRuleStatus.INVALID
+    assert rejected_ruleset.error_code == "invalid_regex"
+
+
+def test_escaped_and_character_class_parentheses_do_not_count_as_groups(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rules.yaml"
+    regex = (r"\(\)" * (MAX_REGEX_GROUP_DEPTH + 1)) + (
+        r"[()]" * (MAX_REGEX_GROUP_DEPTH + 1)
+    )
+    _write_rules(path, f"- type: literal_parentheses\n  regex: '{regex}'\n")
+
+    ruleset = load_custom_rules(path)
+
+    assert ruleset.status is CustomRuleStatus.LOADED
+
+
+@pytest.mark.parametrize(
+    "compile_error",
+    [
+        RecursionError("nested groups"),
+        OverflowError("repeat overflow"),
+        ValueError("invalid value"),
+        KeyError("invalid flag combination"),
+        MemoryError("pattern allocation"),
+    ],
+)
+def test_compile_failures_are_invalid_and_cached(
+    monkeypatch, tmp_path: Path, compile_error: Exception
+) -> None:
+    path = tmp_path / "rules.yaml"
+    _write_rules(path, "- type: dogfood_token\n  regex: token\n")
+    compile_calls = 0
+
+    def fail_compile(pattern: str):
+        nonlocal compile_calls
+        compile_calls += 1
+        raise compile_error
+
+    monkeypatch.setattr(
+        "agent_sec_cli.pii_checker.custom_rules.regex_engine.compile", fail_compile
+    )
+
+    first = load_custom_rules(path)
+    second = load_custom_rules(path)
+
+    assert first.status is CustomRuleStatus.INVALID
+    assert first.error_code == "invalid_regex"
+    assert second is first
+    assert compile_calls == 1
+
+
+def test_regex_extensions_remain_supported(tmp_path: Path) -> None:
+    path = tmp_path / "rules.yaml"
+    _write_rules(
+        path,
+        """
+- type: fuzzy_token
+  regex: '(?:target){e<=1}'
+- type: dotall_token
+  regex: '(?V0)(?s)token.+'
+""".lstrip(),
+    )
+
+    ruleset = load_custom_rules(path)
+
+    assert ruleset.status is CustomRuleStatus.LOADED
+    assert ruleset.rules[0].pattern.fullmatch("targot") is not None
+    assert ruleset.rules[1].pattern.fullmatch("token\nvalue") is not None
 
 
 @pytest.mark.parametrize(

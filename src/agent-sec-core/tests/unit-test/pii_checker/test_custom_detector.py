@@ -1,5 +1,7 @@
 """Unit tests for custom PII regex detection."""
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from agent_sec_cli.pii_checker.custom_rules import (
@@ -245,6 +247,65 @@ def test_unexpected_loader_error_is_fail_open_and_sanitized(
     assert detector.summary()["error_code"] == "load_error"
     assert "ValueError" in caplog.text
     assert "sensitive loader detail" not in caplog.text
+
+
+def test_shared_scanner_keeps_custom_summary_thread_local(monkeypatch) -> None:
+    first_rule_started = threading.Event()
+    second_scan_finished = threading.Event()
+    scan_context = threading.local()
+
+    class BlockingPattern:
+        def finditer(self, text: str, *, timeout: float):
+            first_rule_started.set()
+            assert second_scan_finished.wait(timeout=2)
+            return iter(())
+
+    loaded_ruleset = CustomPiiRuleSet(
+        status=CustomRuleStatus.LOADED,
+        rules=(
+            CustomPiiRule(
+                pii_type="thread_local_token",
+                regex="token",
+                severity="deny",
+                pattern=BlockingPattern(),
+            ),
+        ),
+    )
+    invalid_ruleset = CustomPiiRuleSet(
+        status=CustomRuleStatus.INVALID,
+        error_code="invalid_regex",
+    )
+
+    def load_rules(path: Path | None):
+        if scan_context.name == "first":
+            return loaded_ruleset
+        assert first_rule_started.wait(timeout=2)
+        return invalid_ruleset
+
+    monkeypatch.setattr(custom_detector_module, "load_custom_rules", load_rules)
+    scanner = PiiScanner()
+
+    def scan_first():
+        scan_context.name = "first"
+        return scanner.scan("first")
+
+    def scan_second():
+        scan_context.name = "second"
+        try:
+            return scanner.scan("second")
+        finally:
+            second_scan_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(scan_first)
+        second_future = executor.submit(scan_second)
+        first_result = first_future.result(timeout=3)
+        second_result = second_future.result(timeout=3)
+
+    assert first_result.summary["custom_rules"]["status"] == "loaded"
+    assert first_result.summary["custom_rules"]["rule_count"] == 1
+    assert second_result.summary["custom_rules"]["status"] == "invalid"
+    assert second_result.summary["custom_rules"]["error_code"] == "invalid_regex"
 
 
 def test_total_budget_stops_before_running_rules(monkeypatch) -> None:

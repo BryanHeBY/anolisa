@@ -1,6 +1,7 @@
 """Detector for user-defined PII regex rules."""
 
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -26,26 +27,28 @@ class CustomPiiDetector:
     def __init__(self, rules_path: Path | None = None) -> None:
         """Create a detector using the fixed path unless tests inject one."""
         self._rules_path = rules_path
-        self._summary = self._new_summary(CustomRuleStatus.ABSENT.value, 0)
+        self._summary_state = threading.local()
 
     def detect(self, text: str) -> list[PiiCandidate]:
         """Return candidates from custom rules while enforcing runtime limits."""
         try:
             ruleset = load_custom_rules(self._rules_path)
         except Exception as exc:  # noqa: BLE001 - custom rules must fail open
-            self._summary = self._new_summary(CustomRuleStatus.INVALID.value, 0)
-            self._summary["runtime_error_count"] = 1
-            self._summary["error_code"] = "load_error"
+            summary = self._new_summary(CustomRuleStatus.INVALID.value, 0)
+            self._summary_state.value = summary
+            summary["runtime_error_count"] = 1
+            summary["error_code"] = "load_error"
             _LOGGER.warning(
                 "PII custom rules load error: %s",
                 type(exc).__name__,
             )
             return []
-        self._summary = self._new_summary(ruleset.status.value, len(ruleset.rules))
+        summary = self._new_summary(ruleset.status.value, len(ruleset.rules))
+        self._summary_state.value = summary
         if ruleset.ruleset_sha256 is not None:
-            self._summary["ruleset_sha256"] = ruleset.ruleset_sha256
+            summary["ruleset_sha256"] = ruleset.ruleset_sha256
         if ruleset.error_code is not None:
-            self._summary["error_code"] = ruleset.error_code
+            summary["error_code"] = ruleset.error_code
         if ruleset.status is not CustomRuleStatus.LOADED:
             return []
 
@@ -58,7 +61,7 @@ class CustomPiiDetector:
         for rule in ordered_rules:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
-                self._summary["budget_exhausted"] = True
+                summary["budget_exhausted"] = True
                 break
 
             timeout = min(RULE_TIMEOUT_SECONDS, remaining)
@@ -66,14 +69,14 @@ class CustomPiiDetector:
                 matches = rule.pattern.finditer(text, timeout=timeout)
                 for match in matches:
                     if time.perf_counter() >= deadline:
-                        self._summary["budget_exhausted"] = True
+                        summary["budget_exhausted"] = True
                         break
                     start, end = match.span()
                     if start == end:
-                        self._summary["runtime_error_count"] += 1
+                        summary["runtime_error_count"] += 1
                         continue
                     if len(candidates) >= MAX_CUSTOM_FINDINGS:
-                        self._summary["truncated"] = True
+                        summary["truncated"] = True
                         break
                     candidates.append(
                         PiiCandidate(
@@ -88,9 +91,9 @@ class CustomPiiDetector:
                         )
                     )
             except TimeoutError:
-                self._summary["runtime_error_count"] += 1
+                summary["runtime_error_count"] += 1
             except Exception as exc:  # noqa: BLE001 - custom rules must fail open
-                self._summary["runtime_error_count"] += 1
+                summary["runtime_error_count"] += 1
                 _LOGGER.warning(
                     "PII custom rule runtime error for type %s: %s",
                     rule.pii_type,
@@ -98,16 +101,19 @@ class CustomPiiDetector:
                 )
 
             if time.perf_counter() >= deadline:
-                self._summary["budget_exhausted"] = True
+                summary["budget_exhausted"] = True
 
-            if self._summary["budget_exhausted"]:
+            if summary["budget_exhausted"]:
                 break
 
         return candidates
 
     def summary(self) -> dict[str, object]:
         """Return sanitized configuration and runtime status for this scan."""
-        return dict(self._summary)
+        summary = getattr(self._summary_state, "value", None)
+        if summary is None:
+            return self._new_summary(CustomRuleStatus.ABSENT.value, 0)
+        return dict(summary)
 
     @staticmethod
     def _new_summary(status: str, rule_count: int) -> dict[str, object]:
