@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.1
+
+- fix RPM tarball to exclude generated `.anolisa/component.toml`, ensuring rpmbuild always regenerates the adapter contract from the authoritative `.toml.in` template — previously stale checked-in copies shipped outdated contracts missing claude-code, codex, and cosh adapter declarations (closes #1470)
+- synchronize adapter contracts: declare every shipped driver (qoder, claude-code, codex, cosh, qwencode) in `component.toml.in` and add CI check (`check-component-contract`) to keep them in sync
+- raise test coverage from 75% to 90%: ~170 new unit tests across all four crates covering compression edge cases, stash round-trip, schema migration, SLS writer, and CLI dispatch
+- harden test isolation: replace unsafe env-var mutations with RAII `TempDbGuard` / `EnvGuard` to prevent tests from touching real `~/.tokenless` state; enforce `--test-threads=1` in Makefile (Rust 2024 `set_var` is unsafe)
+
+
 ## 0.7.0
 
 - add MCP `tokenless_retrieve` stdio server (`tokenless mcp serve`) so MCP-connected agents can recover truncated payloads on demand — the MCP analogue of the `tokenless retrieve` CLI, closing the stash MCP gap vs Headroom CCR's `headroom_retrieve`
