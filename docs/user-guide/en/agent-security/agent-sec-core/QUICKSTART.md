@@ -337,6 +337,61 @@ timeout = 5
 policy = "ask"          # ask (default) | warn | block | debug
 ```
 
+### Qwen Code
+
+Deploy and enable the user-scoped extension:
+
+```bash
+# From installed path (RPM)
+/opt/agent-sec/qwen-code-extension/scripts/deploy.sh
+
+# From source
+./qwen-code-extension/scripts/deploy.sh
+```
+
+The synchronous `PreToolUse` hook protects only model-triggered Qwen Code
+`skill` Tool calls for managed project (`.qwen/skills`) and user
+(`$QWEN_HOME/skills`, defaulting to `~/.qwen/skills`) skills. Scan or certify
+each skill first; these commands best-effort add its directory to
+`managedSkillDirs`:
+
+```bash
+agent-sec-cli skill-ledger scan .qwen/skills/<skill>
+agent-sec-cli skill-ledger scan "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
+agent-sec-cli skill-ledger show .qwen/skills/<skill>
+agent-sec-cli skill-ledger show "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
+```
+
+Confirm `managed=true` in the `show` result. Unmanaged skills always fail open,
+including when blocking is enabled. The default policy is `debug`; set the
+policy in the trusted environment that starts Qwen Code:
+
+```bash
+SKILL_LEDGER_HOOK_POLICY=debug qwen  # observe only (default)
+SKILL_LEDGER_HOOK_POLICY=warn qwen   # visible warning, then continue
+SKILL_LEDGER_HOOK_POLICY=ask qwen    # ask before use
+SKILL_LEDGER_HOOK_POLICY=block qwen  # deny a non-empty exposure warning
+```
+
+The hook follows the existing Skill Ledger exposure message, including prior
+`decide` actions. Normal `pass` and `warn` states are allowed; managed `none`,
+`drifted`, `deny`, and `tampered` states can warn, ask, or block when their
+exposure message is non-empty. `ask` falls back to denial in Qwen Code contexts
+that cannot prompt, such as headless runs and background subagents.
+
+Only disk skills that Qwen Code exposes to the model enter Ledger validation.
+A disk skill hidden by `disable-model-invocation` or `skills.disabled` fails
+open so its Ledger state cannot block a same-named file command or MCP prompt.
+Unreadable or invalid Qwen settings also fail open because the public hook input
+does not identify the final dispatch source.
+
+The protection boundary intentionally excludes direct `/skill-name` and stacked
+slash-skill expansion, extension skills, `.agents/skills`, bundled skills, and
+symlinks whose targets leave the corresponding `.qwen/skills` root. Missing CLI
+or keys, initialization failure, inaccessible or ambiguous paths or settings,
+timeouts, and invalid output are diagnosed and fail open. There is no startup
+preflight, background scan, cache, or automatic configuration repair.
+
 ### Copilot Shell (cosh)
 
 The cosh extension is installed automatically during `make install` or via RPM. No manual enablement required — hooks are loaded at cosh startup.

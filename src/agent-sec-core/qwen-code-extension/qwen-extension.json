@@ -33,6 +33,19 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "^skill$",
+        "sequential": true,
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-skill-ledger",
+            "command": "python3 \"${extensionPath}${/}hooks${/}skill_ledger_hook.py\"",
+            "description": "Check managed Qwen Code skills against Skill Ledger",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
         "hooks": [
           {
             "type": "command",

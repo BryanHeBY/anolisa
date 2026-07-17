@@ -481,7 +481,7 @@ def test_non_object_json_returns_noop_without_cli(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {}
 
 
-def test_manifest_mounts_observability_and_pii_hooks_on_supported_events():
+def test_manifest_mounts_skill_ledger_before_observability_and_pii_hooks():
     manifest = json.loads((_EXTENSION_DIR / "qwen-extension.json").read_text())
     expected_events = {
         "UserPromptSubmit",
@@ -493,9 +493,21 @@ def test_manifest_mounts_observability_and_pii_hooks_on_supported_events():
     }
 
     assert set(manifest["hooks"]) == expected_events
+    pre_tool_entries = manifest["hooks"]["PreToolUse"]
+    assert len(pre_tool_entries) == 2
+    skill_group = pre_tool_entries[0]
+    assert skill_group["matcher"] == "^skill$"
+    assert skill_group["sequential"] is True
+    skill_hook = skill_group["hooks"][0]
+    assert skill_hook["name"] == "agent-sec-skill-ledger"
+    assert "async" not in skill_hook
+    assert skill_hook["command"] == (
+        'python3 "${extensionPath}${/}hooks${/}skill_ledger_hook.py"'
+    )
+
     for event_name, entries in manifest["hooks"].items():
-        assert len(entries) == 1
-        hooks = entries[0]["hooks"]
+        policy_group = entries[-1]
+        hooks = policy_group["hooks"]
         hooks_by_name = {hook["name"]: hook for hook in hooks}
         expected_names = {
             "agent-sec-observability",
@@ -522,3 +534,5 @@ def test_manifest_mounts_observability_and_pii_hooks_on_supported_events():
         assert pii_checker["command"] == (
             'python3 "${extensionPath}${/}hooks${/}pii_checker_hook.py"'
         )
+        if event_name != "PreToolUse":
+            assert len(entries) == 1

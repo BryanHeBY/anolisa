@@ -170,13 +170,15 @@ Requires:       python3 < 3.12
 
 %description -n agent-sec-qwen-code-hook
 Qwen Code security extension powered by agent-sec-core.
-Provides lifecycle observability through Qwen Code command hooks.
+Provides prompt and PII policy enforcement, lifecycle observability, and
+managed Skill Ledger validation through Qwen Code command hooks.
 
 %files -n agent-sec-qwen-code-hook
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/scripts/deploy.sh
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/observability_hook.py
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/pii_checker_hook.py
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/skill_ledger_hook.py
 /opt/agent-sec/qwen-code-extension/
 %license LICENSE
 

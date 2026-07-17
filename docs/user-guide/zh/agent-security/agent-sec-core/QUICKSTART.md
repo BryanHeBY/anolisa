@@ -334,6 +334,56 @@ timeout = 5
 policy = "ask"          # ask（默认）| warn | block | debug
 ```
 
+### Qwen Code
+
+部署并启用 user scope 扩展：
+
+```bash
+# 从已安装路径（RPM）
+/opt/agent-sec/qwen-code-extension/scripts/deploy.sh
+
+# 从源码
+./qwen-code-extension/scripts/deploy.sh
+```
+
+同步 `PreToolUse` hook 只保护由模型触发的 Qwen Code `skill` Tool 调用，且仅覆盖
+已纳管的项目 Skill（`.qwen/skills`）和个人 Skill（`$QWEN_HOME/skills`，未设置时
+默认为 `~/.qwen/skills`）。需要先扫描或认证每个 Skill；这些命令会 best-effort
+将目录加入 `managedSkillDirs`：
+
+```bash
+agent-sec-cli skill-ledger scan .qwen/skills/<skill>
+agent-sec-cli skill-ledger scan "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
+agent-sec-cli skill-ledger show .qwen/skills/<skill>
+agent-sec-cli skill-ledger show "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
+```
+
+通过 `show` 结果中的 `managed=true` 确认已纳管。未纳管 Skill 始终 fail-open，
+包括显式启用 block 的情况。默认 policy 为 `debug`；请在启动 Qwen Code 的可信环境
+中设置 policy：
+
+```bash
+SKILL_LEDGER_HOOK_POLICY=debug qwen  # 仅观察（默认）
+SKILL_LEDGER_HOOK_POLICY=warn qwen   # 显示告警后继续
+SKILL_LEDGER_HOOK_POLICY=ask qwen    # 使用前请求确认
+SKILL_LEDGER_HOOK_POLICY=block qwen  # exposure warning 非空时拒绝
+```
+
+hook 遵循现有 Skill Ledger exposure message，包括已有的 `decide` 决策。正常的
+`pass` 和 `warn` 状态会放行；已纳管的 `none`、`drifted`、`deny` 和 `tampered`
+状态在 exposure message 非空时可按 policy 告警、询问或阻断。Qwen Code 无法交互
+的场景（例如 headless 执行和后台 subagent）会将 `ask` 退化为拒绝。
+
+只有 Qwen Code 会向模型暴露的磁盘 Skill 才进入 Ledger 校验。被
+`disable-model-invocation` 或 `skills.disabled` 隐藏的磁盘 Skill 会 fail-open，
+因此其 Ledger 状态不会误拦同名 file command 或 MCP prompt。Qwen settings 不可读或
+无法解析时同样 fail-open，因为公开 HookInput 不包含最终分派来源。
+
+保护边界明确排除直接 `/skill-name` 和 stacked slash Skill 展开、extension Skill、
+`.agents/skills`、bundled Skill，以及目标离开对应 `.qwen/skills` 根目录的符号链接。
+CLI 或密钥缺失、初始化失败、路径或 settings 不可访问或歧义、超时及输出异常都会
+记录诊断并 fail-open。本集成不提供启动预检、后台扫描、缓存或配置自动修复。
+
 ### Copilot Shell（cosh）
 
 cosh 扩展在 `make install` 或 RPM 安装时自动部署，无需手动启用 — cosh 启动时自动加载 hook。

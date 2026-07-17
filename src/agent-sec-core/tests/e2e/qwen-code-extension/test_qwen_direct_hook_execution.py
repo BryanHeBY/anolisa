@@ -553,3 +553,174 @@ def test_qwen_pii_hook_blocks_deny_verdicts(tmp_path) -> None:
         "call-output",
         "call-failure",
     ]
+
+
+def test_qwen_skill_ledger_hook_uses_qwen_home_and_records_managed_show(
+    tmp_path,
+) -> None:
+    extension_dir = _extension_dir()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    qwen_home = tmp_path / "custom-qwen-home"
+    skill_dir = qwen_home / "skills" / "managed-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: managed-skill\ndescription: E2E managed skill\n---\n",
+        encoding="utf-8",
+    )
+
+    home_dir = tmp_path / "home"
+    data_dir = tmp_path / "agent-sec-data"
+    xdg_data = tmp_path / "xdg-data"
+    xdg_config = tmp_path / "xdg-config"
+    home_dir.mkdir()
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        {
+            "HOME": str(home_dir),
+            "QWEN_HOME": str(qwen_home),
+            "AGENT_SEC_DATA_DIR": str(data_dir),
+            "XDG_DATA_HOME": str(xdg_data),
+            "XDG_CONFIG_HOME": str(xdg_config),
+            "SKILL_LEDGER_HOOK_POLICY": "block",
+        }
+    )
+    _ensure_agent_sec_cli(env, tmp_path)
+    cli = shutil.which("agent-sec-cli", path=env["PATH"])
+    assert cli is not None
+
+    scan = subprocess.run(
+        [cli, "skill-ledger", "scan", str(skill_dir)],
+        capture_output=True,
+        check=False,
+        cwd=project_dir,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+    assert scan.returncode == 0, scan.stderr
+    config = json.loads(
+        (xdg_config / "agent-sec" / "skill-ledger" / "config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert str(skill_dir.resolve()) in config["managedSkillDirs"]
+
+    payload = {
+        "session_id": "qwen-skill-session",
+        "cwd": str(project_dir),
+        "hook_event_name": "PreToolUse",
+        "permission_mode": "default",
+        "tool_name": "skill",
+        "tool_input": {"skill": "managed-skill"},
+        "tool_call_id": "qwen-skill-call",
+        "tool_use_id": "qwen-skill-use",
+    }
+    hook = _run_hook(
+        extension_dir,
+        payload,
+        env=env,
+        cwd=project_dir,
+        hook_name="agent-sec-skill-ledger",
+    )
+    assert hook.returncode == 0, hook.stderr
+    assert json.loads(hook.stdout) == {}
+
+    events = [
+        json.loads(line)
+        for line in (data_dir / "security-events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    correlated = [
+        event
+        for event in events
+        if event["category"] == "skill_ledger"
+        and event["session_id"] == "qwen-skill-session"
+        and event["tool_call_id"] == "qwen-skill-call"
+    ]
+    assert len(correlated) == 1
+    assert correlated[0]["details"]["request"]["command"] == "show"
+    assert correlated[0]["details"]["result"]["latest_status"] in {"pass", "warn"}
+
+
+def test_qwen_disabled_skill_skips_ledger_show_under_block_policy(tmp_path) -> None:
+    extension_dir = _extension_dir()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    qwen_home = tmp_path / "custom-qwen-home"
+    skill_dir = qwen_home / "skills" / "disabled-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: disabled-skill\ndescription: E2E disabled skill\n---\n",
+        encoding="utf-8",
+    )
+    (qwen_home / "settings.json").write_text(
+        "{\n  // A same-named command may remain model-invocable.\n"
+        '  "skills": {"disabled": ["DISABLED-SKILL"]}\n}\n',
+        encoding="utf-8",
+    )
+
+    home_dir = tmp_path / "home"
+    data_dir = tmp_path / "agent-sec-data"
+    xdg_data = tmp_path / "xdg-data"
+    xdg_config = tmp_path / "xdg-config"
+    home_dir.mkdir()
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        {
+            "HOME": str(home_dir),
+            "QWEN_HOME": str(qwen_home),
+            "AGENT_SEC_DATA_DIR": str(data_dir),
+            "XDG_DATA_HOME": str(xdg_data),
+            "XDG_CONFIG_HOME": str(xdg_config),
+            "SKILL_LEDGER_HOOK_POLICY": "block",
+        }
+    )
+    _ensure_agent_sec_cli(env, tmp_path)
+    cli = shutil.which("agent-sec-cli", path=env["PATH"])
+    assert cli is not None
+
+    scan = subprocess.run(
+        [cli, "skill-ledger", "scan", str(skill_dir)],
+        capture_output=True,
+        check=False,
+        cwd=project_dir,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+    assert scan.returncode == 0, scan.stderr
+
+    payload = {
+        "session_id": "qwen-disabled-session",
+        "cwd": str(project_dir),
+        "hook_event_name": "PreToolUse",
+        "permission_mode": "default",
+        "tool_name": "skill",
+        "tool_input": {"skill": "disabled-skill"},
+        "tool_call_id": "qwen-disabled-call",
+        "tool_use_id": "qwen-disabled-use",
+    }
+    hook = _run_hook(
+        extension_dir,
+        payload,
+        env=env,
+        cwd=project_dir,
+        hook_name="agent-sec-skill-ledger",
+    )
+
+    assert hook.returncode == 0, hook.stderr
+    assert json.loads(hook.stdout) == {}
+    assert '"code":"skill_disabled_by_settings"' in hook.stderr
+    events = [
+        json.loads(line)
+        for line in (data_dir / "security-events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert not any(
+        event.get("session_id") == "qwen-disabled-session" for event in events
+    )

@@ -339,6 +339,7 @@ install-qwen-code-extension: ## Install Qwen Code extension to target directory
 	cp -rp $(BUILD_DIR)/qwen-code-extension/. $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/
 	chmod 0755 $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/scripts/*.sh
 	chmod 0755 $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/hooks/observability_hook.py
+	chmod 0755 $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/hooks/skill_ledger_hook.py
 
 .PHONY: install-codex-plugin
 install-codex-plugin: ## Install codex-plugin hooks and install script
