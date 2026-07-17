@@ -141,6 +141,10 @@ pub fn memory_observe(
     // notify watcher's debounce (~200 ms) creates a window where a
     // `before_prompt_build` hook firing right after `memory_observe`
     // returns empty results and silently skips injection (#1462).
+    // Resource impact: memory_observe is called once per user observation
+    // (interactive, low frequency), not in bulk import scenarios. The synchronous
+    // reindex is a one-time operation per observation; the notify watcher handles
+    // any subsequent updates asynchronously.
     if let Some(ref index) = svc.index {
         // Read the actual file mtime from the filesystem rather than
         // using Utc::now(). The watcher's flush path uses
