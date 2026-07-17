@@ -109,6 +109,19 @@ _QODER_WITHOUT_PLUGINS = textwrap.dedent("""\
 _AGENT_SEC_CLI = textwrap.dedent("""\
     #!/usr/bin/env bash
     set -euo pipefail
+    case "$*" in
+        "scan-pii --help"|"skill-ledger check --help")
+            exit 0
+            ;;
+        *)
+            exit 2
+            ;;
+    esac
+    """)
+
+_AGENT_SEC_CLI_PII_ONLY = textwrap.dedent("""\
+    #!/usr/bin/env bash
+    set -euo pipefail
     [[ "$*" == "scan-pii --help" ]]
     """)
 
@@ -132,6 +145,11 @@ def test_hooks_json_uses_qoder_plugin_wrapper() -> None:
 
     assert set(hooks) == {"hooks"}
     assert set(hooks["hooks"]) == {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
+    pre_tool = hooks["hooks"]["PreToolUse"]
+    skill_ledger = next(entry for entry in pre_tool if entry["matcher"] == "Skill")
+    hook = skill_ledger["hooks"][0]
+    assert hook["name"] == "agent-sec-skill-ledger"
+    assert hook["args"] == ["${QODER_PLUGIN_ROOT}/hooks/skill_ledger_hook.py"]
 
 
 def test_common_outputs_qoder_hook_shapes() -> None:
@@ -219,6 +237,18 @@ def test_remove_does_not_require_agent_sec_cli_or_python(tmp_path: Path) -> None
     calls = (tmp_path / "qoder-calls.txt").read_text().splitlines()
     assert "plugins --help" in calls
     assert "plugins uninstall agent-sec-core --scope user" in calls
+
+
+def test_install_rejects_cli_without_skill_ledger(tmp_path: Path) -> None:
+    proc = _run_install_script(
+        tmp_path,
+        qodercli_script=_QODER_WITH_PLUGINS,
+        python_script=_python_version_script((3, 11)),
+        agent_sec_cli_script=_AGENT_SEC_CLI_PII_ONLY,
+    )
+
+    assert proc.returncode != 0
+    assert "skill-ledger check is unavailable" in proc.stderr
 
 
 def test_install_validates_and_installs(tmp_path: Path) -> None:

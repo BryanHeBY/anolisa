@@ -43,6 +43,7 @@ PY
 require_agent_sec_cli() {
     command -v agent-sec-cli >/dev/null 2>&1 || die "agent-sec-cli not found on PATH"
     agent-sec-cli scan-pii --help >/dev/null 2>&1 || die "agent-sec-cli scan-pii is unavailable"
+    agent-sec-cli skill-ledger check --help >/dev/null 2>&1 || die "agent-sec-cli skill-ledger check is unavailable"
 }
 
 require_plugin_files() {

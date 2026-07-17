@@ -27,6 +27,20 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-skill-ledger",
+            "description": "Validates local Skills with Skill Ledger before execution",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/skill_ledger_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Checking Skill trust status..."
+          }
+        ]
+      },
+      {
         "matcher": "",
         "hooks": [
           {

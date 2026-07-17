@@ -38,14 +38,16 @@ ACTIVATION_POLICY_PASS_WARN_ONLY = "pass_warn_only"
 
 
 class TestDefaultConfig(unittest.TestCase):
-    """Default config must include the three well-known skill directories."""
+    """Default config must include the well-known skill directories."""
 
     def test_default_skill_dirs_present(self):
         dirs = DEFAULT_SKILL_DIRS
         self.assertIn("~/.openclaw/skills/*", dirs)
         self.assertIn("~/.copilot-shell/skills/*", dirs)
         self.assertIn("~/.hermes/skills/**", dirs)
+        self.assertIn("~/.qoder/skills/*", dirs)
         self.assertIn("/usr/share/anolisa/skills/*", dirs)
+        self.assertNotIn(".qoder/skills/*", dirs)
         self.assertTrue(_DEFAULT_CONFIG["enableDefaultSkillDirs"])
         self.assertEqual(_DEFAULT_CONFIG["managedSkillDirs"], [])
 

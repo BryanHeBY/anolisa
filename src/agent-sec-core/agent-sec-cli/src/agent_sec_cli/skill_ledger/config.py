@@ -39,6 +39,7 @@ DEFAULT_SKILL_DIRS = [
     "~/.openclaw/skills/*",
     "~/.copilot-shell/skills/*",
     "~/.hermes/skills/**",
+    "~/.qoder/skills/*",
     "/usr/share/anolisa/skills/*",
 ]
 _IGNORED_RECURSIVE_DIRS = frozenset(

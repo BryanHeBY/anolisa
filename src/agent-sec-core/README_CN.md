@@ -281,6 +281,12 @@ agent-sec-cli skill-ledger scan /path/to/skill
 agent-sec-cli skill-ledger status
 ```
 
+内置 Qoder CLI plugin 为 `Skill` tool 注册 `PreToolUse` hook。hook 先从
+`~/.qoder/skills/` 解析用户级 Skill，再从 `<cwd>/.qoder/skills/` 解析项目级
+Skill，随后执行只读的 `skill-ledger check`，并按
+`SKILL_LEDGER_HOOK_POLICY=ask|debug|warn|block`（默认 `ask`）处理结果。每次
+检查都会把 Qoder trace 标识写入安全审计日志。
+
 设计文档：[`docs/design/SKILL_LEDGER_CN.md`](docs/design/SKILL_LEDGER_CN.md) · 用户指南：[`docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md`](docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md)
 
 ## 审计日志

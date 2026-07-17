@@ -281,6 +281,12 @@ agent-sec-cli skill-ledger scan /path/to/skill
 agent-sec-cli skill-ledger status
 ```
 
+The bundled Qoder CLI plugin registers a `PreToolUse` hook for the `Skill`
+tool. It resolves user Skills from `~/.qoder/skills/` before project Skills
+from `<cwd>/.qoder/skills/`, runs a read-only `skill-ledger check`, and applies the
+`SKILL_LEDGER_HOOK_POLICY=ask|debug|warn|block` policy (default: `ask`). Each
+check carries Qoder trace identifiers into the security audit log.
+
 Design doc: [`docs/design/SKILL_LEDGER_CN.md`](docs/design/SKILL_LEDGER_CN.md) · User guide: [`docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md`](docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md)
 
 ## Audit Log
