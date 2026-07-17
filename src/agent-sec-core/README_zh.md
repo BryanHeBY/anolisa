@@ -123,6 +123,7 @@ agent-sec-core/
 │   │   └── security_middleware/ # 中间层 + 后端实现
 │   ├── dev-tools/             # 后端扩展开发指南
 │   └── pyproject.toml         # 构建配置
+├── qwen-code-extension/       # Qwen Code PII 策略与 Observability hooks
 ├── skills/                    # 安全相关 skill 集合（skill-ledger、code-scanner、prompt-scanner 等）
 ├── tools/                     # sign-skill.sh — PGP 技能签名工具
 ├── tests/                     # 单元测试、集成测试、端到端测试
@@ -185,6 +186,20 @@ make build-sandbox
 ```bash
 sudo yum install agent-sec-core
 ```
+
+### 防止 Qwen Code 泄露 PII
+
+Qwen Code extension 默认观察用户输入、工具输入/输出和最终模型输出。设置
+`PII_CHECKER_MODE=block` 后会在受支持的决策点执行 scanner 的高风险 `deny` verdict；
+Qwen Code 0.19.9 的失败工具输出仅审计，scanner 失败时仍保持 fail-open。
+
+```bash
+export PII_CHECKER_MODE=block
+./qwen-code-extension/scripts/deploy.sh
+```
+
+配置项及工具/模型后置输出的阻断边界见
+[Qwen Code extension 指南](qwen-code-extension/README.md)。
 
 ### 生成沙箱策略
 

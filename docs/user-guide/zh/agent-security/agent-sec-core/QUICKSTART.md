@@ -181,6 +181,32 @@ agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
 agent-sec-cli scan-pii --text "some text" --include-low-confidence
 ```
 
+#### Qwen Code 集成
+
+Qwen Code extension 会扫描用户输入、工具输入、成功及失败的工具输出和最终模型输出。
+默认启用 observe-only 和 fail-open；原始扫描内容只通过 stdin 传给 `scan-pii`，告警只使用
+脱敏 evidence。
+
+```bash
+# 显式阻断 scanner deny verdict
+export PII_CHECKER_MODE=block
+./qwen-code-extension/scripts/deploy.sh
+```
+
+| 环境变量 | 默认值 | 行为 |
+|----------|--------|------|
+| `PII_CHECKER_ENABLED` | `true` | 设为 `false`、`0`、`no` 或 `off` 时跳过扫描 |
+| `PII_CHECKER_MODE` | `observe` | `observe` 告警；`block` 阻断 deny；`deny` 是兼容别名 |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | 开启后传递 `--include-low-confidence` |
+| `PII_CHECKER_TIMEOUT` | `5` | scanner 超时秒数，最大 8 秒 |
+
+用户输入和工具输入可在执行前阻断。工具成功执行后才触发 `PostToolUse`，此时副作用已经
+发生；Qwen Code 0.19.9 会消费 `continue:false`，在下游正常处理前把成功结果转为
+hook-stopped error，但不能撤销工具副作用。该版本的 `PostToolUseFailure` 不消费阻断字段，
+因此失败输出只能扫描和审计，仍进入既有错误处理链。最终模型输出命中 deny 时只要求重写
+一次；重复进入 `Stop` 时不再阻断，以避免重试循环。Qwen Code 当前没有 pre-render 输出
+替换 Hook，因此模型输出阻断属于尽力而为。
+
 ### Security Baseline（安全基线）
 
 通过 `agent-sec-cli harden` 执行系统安全加固（Alinux 上底层调用 loongshield seharden）。

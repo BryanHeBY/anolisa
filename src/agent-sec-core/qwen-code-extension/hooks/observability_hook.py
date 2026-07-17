@@ -14,6 +14,7 @@ from typing import Any
 
 from pii_text import json_dumps as _json_dumps
 from pii_text import text_sha256, value_to_text
+from qwen_trace_context import with_trace_context
 
 _CLI_TIMEOUT_SECONDS = 3
 # Read one extra byte below to distinguish an exact-limit payload from truncation.
@@ -162,10 +163,10 @@ def _process_output_details(*values: Any) -> str:
     return details or "no stderr or stdout was captured"
 
 
-def _redact_text(text: str) -> str | None:
+def _redact_text(text: str, trace_input: dict[str, Any]) -> str | None:
     try:
         result = subprocess.run(
-            _PII_REDACT_COMMAND,
+            with_trace_context(_PII_REDACT_COMMAND, trace_input),
             input=text,
             capture_output=True,
             text=True,
@@ -189,13 +190,13 @@ def _redact_text(text: str) -> str | None:
     return redacted if isinstance(redacted, str) else None
 
 
-def _redact_sensitive_value(value: Any) -> Any:
+def _redact_sensitive_value(value: Any, trace_input: dict[str, Any]) -> Any:
     """Redact a sensitive metric value, or return _DROP on scan failure."""
     if isinstance(value, str):
-        redacted = _redact_text(value)
+        redacted = _redact_text(value, trace_input)
         return _DROP if redacted is None else redacted
 
-    redacted = _redact_text(_json_dumps(value))
+    redacted = _redact_text(_json_dumps(value), trace_input)
     if redacted is None:
         return _DROP
     try:
@@ -204,14 +205,14 @@ def _redact_sensitive_value(value: Any) -> Any:
         return redacted
 
 
-def _redact_metrics(value: Any) -> Any:
+def _redact_metrics(value: Any, trace_input: dict[str, Any]) -> Any:
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             safe_item = (
-                _redact_sensitive_value(item)
+                _redact_sensitive_value(item, trace_input)
                 if key in _SENSITIVE_METRIC_KEYS
-                else _redact_metrics(item)
+                else _redact_metrics(item, trace_input)
             )
             if safe_item is not _DROP:
                 redacted[key] = safe_item
@@ -219,7 +220,7 @@ def _redact_metrics(value: Any) -> Any:
     if isinstance(value, list):
         return [
             item
-            for item in (_redact_metrics(item) for item in value)
+            for item in (_redact_metrics(item, trace_input) for item in value)
             if item is not _DROP
         ]
     return value
@@ -227,9 +228,16 @@ def _redact_metrics(value: Any) -> Any:
 
 def _redact_observability_record(record: dict[str, Any]) -> dict[str, Any]:
     safe_record = dict(record)
+    metadata = record.get("metadata")
+    trace_input: dict[str, Any] = {}
+    if isinstance(metadata, dict):
+        trace_input = {
+            "session_id": metadata.get("sessionId"),
+            "tool_call_id": metadata.get("toolCallId"),
+        }
     metrics = safe_record.get("metrics")
     if isinstance(metrics, dict):
-        safe_record["metrics"] = _redact_metrics(metrics)
+        safe_record["metrics"] = _redact_metrics(metrics, trace_input)
     return safe_record
 
 

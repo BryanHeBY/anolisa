@@ -281,6 +281,23 @@ def test_main_redacts_payload_and_emits_no_decision(monkeypatch, capsys):
     assert "alice@example.com" not in payload_text
     assert "a***@example.com" in payload_text
     assert calls[-1][0] == observability_hook._OBSERVABILITY_COMMAND
+    pii_call = next(call for call in calls if "scan-pii" in call[0])
+    assert pii_call[0] == [
+        "agent-sec-cli",
+        "--trace-context",
+        json.dumps(
+            {"agent_name": "qwen-code", "session_id": "session-123"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        "scan-pii",
+        "--stdin",
+        "--format",
+        "json",
+        "--redact-output",
+        "--source",
+        "observability",
+    ]
 
 
 def test_main_skips_empty_tool_result_reentry_without_local_state(monkeypatch, capsys):
@@ -464,7 +481,7 @@ def test_non_object_json_returns_noop_without_cli(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {}
 
 
-def test_manifest_mounts_only_supported_observability_events():
+def test_manifest_mounts_observability_and_pii_hooks_on_supported_events():
     manifest = json.loads((_EXTENSION_DIR / "qwen-extension.json").read_text())
     expected_events = {
         "UserPromptSubmit",
@@ -479,23 +496,29 @@ def test_manifest_mounts_only_supported_observability_events():
     for event_name, entries in manifest["hooks"].items():
         assert len(entries) == 1
         hooks = entries[0]["hooks"]
+        hooks_by_name = {hook["name"]: hook for hook in hooks}
+        expected_names = {
+            "agent-sec-observability",
+            "agent-sec-pii-checker",
+        }
         if event_name == "UserPromptSubmit":
-            assert len(hooks) == 2
-            assert hooks[0]["name"] == "agent-sec-prompt-scanner"
-            assert hooks[0].get("async") is None
-            assert hooks[0]["command"] == (
+            expected_names.add("agent-sec-prompt-scanner")
+            prompt_scanner = hooks_by_name["agent-sec-prompt-scanner"]
+            assert prompt_scanner.get("async") is None
+            assert prompt_scanner["command"] == (
                 'python3 "${extensionPath}${/}hooks${/}prompt_scanner_hook.py"'
             )
-            assert hooks[0]["timeout"] == 15000
-            assert hooks[1]["name"] == "agent-sec-observability"
-            assert hooks[1]["async"] is True
-            assert hooks[1]["command"] == (
-                'python3 "${extensionPath}${/}hooks${/}observability_hook.py"'
-            )
-        else:
-            assert len(hooks) == 1
-            assert hooks[0]["name"] == "agent-sec-observability"
-            assert hooks[0]["async"] is True
-            assert hooks[0]["command"] == (
-                'python3 "${extensionPath}${/}hooks${/}observability_hook.py"'
-            )
+            assert prompt_scanner["timeout"] == 15000
+
+        assert set(hooks_by_name) == expected_names
+        observability = hooks_by_name["agent-sec-observability"]
+        assert observability["async"] is True
+        assert observability["command"] == (
+            'python3 "${extensionPath}${/}hooks${/}observability_hook.py"'
+        )
+        pii_checker = hooks_by_name["agent-sec-pii-checker"]
+        assert "async" not in pii_checker
+        assert pii_checker["timeout"] == 10000
+        assert pii_checker["command"] == (
+            'python3 "${extensionPath}${/}hooks${/}pii_checker_hook.py"'
+        )

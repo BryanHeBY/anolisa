@@ -20,6 +20,13 @@
             "description": "Record the Qwen Code user prompt event",
             "timeout": 10000,
             "async": true
+          },
+          {
+            "type": "command",
+            "name": "agent-sec-pii-checker",
+            "command": "python3 \"${extensionPath}${/}hooks${/}pii_checker_hook.py\"",
+            "description": "Scan Qwen Code user prompts for PII and credentials",
+            "timeout": 10000
           }
         ]
       }
@@ -34,6 +41,13 @@
             "description": "Record the Qwen Code pre-tool event",
             "timeout": 10000,
             "async": true
+          },
+          {
+            "type": "command",
+            "name": "agent-sec-pii-checker",
+            "command": "python3 \"${extensionPath}${/}hooks${/}pii_checker_hook.py\"",
+            "description": "Scan Qwen Code tool inputs for PII and credentials",
+            "timeout": 10000
           }
         ]
       }
@@ -48,6 +62,13 @@
             "description": "Record the Qwen Code successful tool event",
             "timeout": 10000,
             "async": true
+          },
+          {
+            "type": "command",
+            "name": "agent-sec-pii-checker",
+            "command": "python3 \"${extensionPath}${/}hooks${/}pii_checker_hook.py\"",
+            "description": "Scan Qwen Code tool outputs for PII and credentials",
+            "timeout": 10000
           }
         ]
       }
@@ -62,6 +83,13 @@
             "description": "Record the Qwen Code failed tool event",
             "timeout": 10000,
             "async": true
+          },
+          {
+            "type": "command",
+            "name": "agent-sec-pii-checker",
+            "command": "python3 \"${extensionPath}${/}hooks${/}pii_checker_hook.py\"",
+            "description": "Scan Qwen Code tool failures for PII and credentials",
+            "timeout": 10000
           }
         ]
       }
@@ -76,6 +104,13 @@
             "description": "Record the Qwen Code completed agent run",
             "timeout": 10000,
             "async": true
+          },
+          {
+            "type": "command",
+            "name": "agent-sec-pii-checker",
+            "command": "python3 \"${extensionPath}${/}hooks${/}pii_checker_hook.py\"",
+            "description": "Scan Qwen Code model output for PII and credentials",
+            "timeout": 10000
           }
         ]
       }
@@ -90,6 +125,13 @@
             "description": "Record the Qwen Code failed agent run",
             "timeout": 10000,
             "async": true
+          },
+          {
+            "type": "command",
+            "name": "agent-sec-pii-checker",
+            "command": "python3 \"${extensionPath}${/}hooks${/}pii_checker_hook.py\"",
+            "description": "Audit partial Qwen Code model output for PII and credentials",
+            "timeout": 10000
           }
         ]
       }

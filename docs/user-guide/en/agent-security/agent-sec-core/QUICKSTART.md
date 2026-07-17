@@ -181,6 +181,35 @@ agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
 agent-sec-cli scan-pii --text "some text" --include-low-confidence
 ```
 
+#### Qwen Code integration
+
+The Qwen Code extension scans user prompts, tool inputs, successful and failed tool
+outputs, and final model output. It is enabled in observe-only, fail-open mode by
+default; raw scan content is passed to `scan-pii` only through stdin, and notices use
+only redacted evidence.
+
+```bash
+# Explicitly block scanner deny verdicts
+export PII_CHECKER_MODE=block
+./qwen-code-extension/scripts/deploy.sh
+```
+
+| Environment variable | Default | Behavior |
+|----------------------|---------|----------|
+| `PII_CHECKER_ENABLED` | `true` | Set to `false`, `0`, `no`, or `off` to skip scanning |
+| `PII_CHECKER_MODE` | `observe` | `observe` warns; `block` blocks deny verdicts; `deny` is an alias |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Passes `--include-low-confidence` when enabled |
+| `PII_CHECKER_TIMEOUT` | `5` | Scanner timeout in seconds, capped at 8 seconds |
+
+User prompts and tool inputs can be stopped before execution. For a successful tool call,
+`PostToolUse` runs after side effects have occurred, but Qwen Code 0.19.9 consumes
+`continue:false` and converts the normal result into a hook-stopped error before downstream
+handling. It cannot undo the tool's side effects. `PostToolUseFailure` does not consume
+blocking fields in that version, so failed outputs are scan-and-audit only and remain in the
+existing error flow. A denied final model output receives one rewrite attempt; a repeated
+`Stop` hook is not blocked again, preventing retry loops. Qwen Code does not currently
+provide a pre-render output replacement hook, so model-output blocking is best effort.
+
 ### Security Baseline
 
 System hardening via `agent-sec-cli harden` (wraps loongshield seharden on Alinux).

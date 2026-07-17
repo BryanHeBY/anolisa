@@ -176,6 +176,7 @@ Provides lifecycle observability through Qwen Code command hooks.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/scripts/deploy.sh
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/observability_hook.py
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/pii_checker_hook.py
 /opt/agent-sec/qwen-code-extension/
 %license LICENSE
 

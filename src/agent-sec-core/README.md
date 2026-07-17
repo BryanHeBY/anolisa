@@ -123,6 +123,7 @@ agent-sec-core/
 │   │   └── security_middleware/ # Middleware layer + backends
 │   ├── dev-tools/             # Developer guides for extending backends
 │   └── pyproject.toml         # Build configuration
+├── qwen-code-extension/       # Qwen Code PII policy + Observability hooks
 ├── skills/                    # Security-related skills (skill-ledger, code-scanner, prompt-scanner, ...)
 ├── tools/                     # sign-skill.sh — PGP skill signing utility
 ├── tests/                     # Unit, integration, and e2e tests
@@ -185,6 +186,21 @@ The binary is output to `linux-sandbox/target/release/linux-sandbox`.
 ```bash
 sudo yum install agent-sec-core
 ```
+
+### Protect Qwen Code from PII leakage
+
+The Qwen Code extension observes user input, tool input/output, and final model output
+by default. Set `PII_CHECKER_MODE=block` to enforce high-risk scanner `deny` verdicts
+at supported decision points; failed tool outputs are audit-only in Qwen Code 0.19.9,
+and scanner failures remain fail-open.
+
+```bash
+export PII_CHECKER_MODE=block
+./qwen-code-extension/scripts/deploy.sh
+```
+
+See [the Qwen Code extension guide](qwen-code-extension/README.md) for configuration and
+the post-tool/model-output enforcement boundaries.
 
 ### Generate Sandbox Policy
 
