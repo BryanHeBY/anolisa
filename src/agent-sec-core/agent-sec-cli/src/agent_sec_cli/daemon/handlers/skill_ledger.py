@@ -18,11 +18,13 @@ from agent_sec_cli.daemon.registry import (
     MethodSpec,
 )
 from agent_sec_cli.daemon.runtime import DaemonRuntime
+from agent_sec_cli.skill_ledger.path_identity import (
+    validate_canonical_skill_dir,
+)
 
 METHOD_SKILLFS_NOTIFY_CHANGE = "skill_ledger.skillfs_notify_change"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-_SKILL_MANIFEST = "SKILL.md"
 _SKILL_META = ".skill-meta"
 
 
@@ -77,14 +79,9 @@ def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
     """Validate daemon request params for a SkillFS change notification."""
     schema_version = params.get("schemaVersion")
     if schema_version != SCHEMA_VERSION:
-        raise BadRequestError("params.schemaVersion must be 1")
+        raise BadRequestError("params.schemaVersion must be 2")
 
-    skill_dir = _validate_skill_dir(params.get("skillDir"))
-    skill_name = params.get("skillName")
-    if not isinstance(skill_name, str) or not skill_name:
-        raise BadRequestError("params.skillName must be a non-empty string")
-    if skill_name != skill_dir.name:
-        raise BadRequestError("params.skillName must match skillDir basename")
+    canonical_skill_dir = _validate_canonical_skill_dir(params.get("canonicalSkillDir"))
 
     event_kind = params.get("eventKind")
     if event_kind not in SKILLFS_EVENT_KINDS:
@@ -93,30 +90,18 @@ def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
 
     paths = _validate_paths(params.get("paths"))
     return SkillFsChange(
-        skill_dir=skill_dir,
-        skill_name=skill_name,
+        canonical_skill_dir=canonical_skill_dir,
+        reported_skill_id=params.get("skillId"),
         event_kinds={event_kind},
         paths=set(paths),
     )
 
 
-def _validate_skill_dir(value: Any) -> Path:
-    if not isinstance(value, str) or not value:
-        raise BadRequestError("params.skillDir must be a non-empty string")
-    if "\x00" in value:
-        raise BadRequestError("params.skillDir must not contain NUL characters")
-    path = Path(value)
-    if not path.is_absolute():
-        raise BadRequestError("params.skillDir must be an absolute path")
+def _validate_canonical_skill_dir(value: Any) -> Path:
     try:
-        resolved = path.resolve(strict=True)
-    except OSError as exc:
-        raise BadRequestError(f"params.skillDir is not accessible: {exc}") from exc
-    if not resolved.is_dir():
-        raise BadRequestError("params.skillDir must be a directory")
-    if not (resolved / _SKILL_MANIFEST).is_file():
-        raise BadRequestError("params.skillDir must contain SKILL.md")
-    return resolved
+        return validate_canonical_skill_dir(value)
+    except ValueError as exc:
+        raise BadRequestError(f"params.canonicalSkillDir {exc}") from exc
 
 
 def _validate_paths(value: Any) -> list[str]:
@@ -130,7 +115,9 @@ def _validate_paths(value: Any) -> list[str]:
             raise BadRequestError("params.paths must not contain NUL characters")
         path = Path(item)
         if not path.parts or path.is_absolute() or ".." in path.parts:
-            raise BadRequestError("params.paths must be relative paths under skillDir")
+            raise BadRequestError(
+                "params.paths must be relative paths under canonicalSkillDir"
+            )
         paths.append(item)
     return paths
 

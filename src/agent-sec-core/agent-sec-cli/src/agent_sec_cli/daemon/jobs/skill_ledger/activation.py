@@ -11,6 +11,10 @@ from agent_sec_cli.daemon.jobs.skill_ledger.protocol import SkillFsChange
 from agent_sec_cli.daemon.jobs.skill_ledger.worker_client import (
     SkillLedgerWorkerClient,
 )
+from agent_sec_cli.skill_ledger.config import resolve_managed_skill_dirs
+from agent_sec_cli.skill_ledger.path_identity import (
+    normalize_canonical_skill_dir,
+)
 
 SKILL_LEDGER_ACTIVATION_JOB = "skill-ledger-activation"
 DEFAULT_DEBOUNCE_SECONDS = 0.5
@@ -74,10 +78,10 @@ class SkillLedgerActivationJob(BackgroundJob):
         """Queue a SkillFS change. Returns whether it was newly queued."""
         if self._wake_event is None:
             raise UnavailableError("skill-ledger activation job is not running")
-        existing = self._pending.get(change.skill_dir)
+        existing = self._pending.get(change.canonical_skill_dir)
         newly_queued = existing is None
         if existing is None:
-            self._pending[change.skill_dir] = change
+            self._pending[change.canonical_skill_dir] = change
         else:
             existing.merge(change)
         self._wake_event.set()
@@ -116,9 +120,9 @@ class SkillLedgerActivationJob(BackgroundJob):
 
     def _requeue_changes(self, changes: list[SkillFsChange]) -> None:
         for change in changes:
-            existing = self._pending.get(change.skill_dir)
+            existing = self._pending.get(change.canonical_skill_dir)
             if existing is None:
-                self._pending[change.skill_dir] = change
+                self._pending[change.canonical_skill_dir] = change
             else:
                 existing.merge(change)
         if changes and self._wake_event is not None:
@@ -129,14 +133,14 @@ class SkillLedgerActivationJob(BackgroundJob):
         try:
             result = await self._worker_client.process_change(change)
             self._last_processed = result
-            self._last_error = result.get("error")
-            self._state = "error" if self._last_error else "running"
+            self._last_error = None
+            self._state = "running"
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._last_error = str(exc)
             self._last_processed = {
-                "skillDir": str(change.skill_dir),
+                "canonicalSkillDir": str(change.canonical_skill_dir),
                 "skillName": change.skill_name,
                 "status": "error",
                 "error": str(exc),
@@ -148,8 +152,7 @@ class SkillLedgerActivationJob(BackgroundJob):
             for skill_dir in _resolve_managed_skill_dirs():
                 self.enqueue(
                     SkillFsChange(
-                        skill_dir=skill_dir.resolve(),
-                        skill_name=skill_dir.name,
+                        canonical_skill_dir=normalize_canonical_skill_dir(skill_dir),
                         event_kinds={"reconcile"},
                         paths=set(),
                     )
@@ -160,8 +163,4 @@ class SkillLedgerActivationJob(BackgroundJob):
 
 
 def _resolve_managed_skill_dirs() -> list[Path]:
-    from agent_sec_cli.skill_ledger.config import (  # noqa: PLC0415
-        resolve_managed_skill_dirs,
-    )
-
     return resolve_managed_skill_dirs()

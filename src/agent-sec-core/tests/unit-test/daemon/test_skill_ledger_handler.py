@@ -46,9 +46,9 @@ def make_skill(tmp_path: Path, name: str = "demo-skill") -> Path:
 def request_for(skill_dir: Path, **overrides: Any) -> DaemonRequest:
     """Build a daemon request for SkillFS notify tests."""
     params: dict[str, Any] = {
-        "schemaVersion": 1,
-        "skillDir": str(skill_dir),
-        "skillName": skill_dir.name,
+        "schemaVersion": 2,
+        "canonicalSkillDir": str(skill_dir),
+        "skillId": f"category/{skill_dir.name}",
         "eventKind": "write",
         "paths": ["SKILL.md"],
     }
@@ -74,8 +74,9 @@ def test_parse_skillfs_change_validates_request(tmp_path: Path):
 
     change = parse_skillfs_change(request_for(skill_dir).params)
 
-    assert change.skill_dir == skill_dir.resolve()
+    assert change.canonical_skill_dir == skill_dir
     assert change.skill_name == "weather"
+    assert change.reported_skill_id == "category/weather"
     assert change.event_kinds == {"write"}
     assert change.paths == {"SKILL.md"}
 
@@ -87,7 +88,7 @@ def test_parse_skillfs_change_accepts_reconcile_with_empty_paths(tmp_path: Path)
         request_for(skill_dir, eventKind="reconcile", paths=[]).params
     )
 
-    assert change.skill_dir == skill_dir.resolve()
+    assert change.canonical_skill_dir == skill_dir
     assert change.skill_name == "weather"
     assert change.event_kinds == {"reconcile"}
     assert change.paths == set()
@@ -96,10 +97,11 @@ def test_parse_skillfs_change_accepts_reconcile_with_empty_paths(tmp_path: Path)
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"schemaVersion": 2}, "schemaVersion"),
-        ({"skillDir": "relative-skill"}, "absolute path"),
-        ({"skillDir": "~/relative-to-home"}, "absolute path"),
-        ({"skillName": "other"}, "skillName"),
+        ({"schemaVersion": 1}, "schemaVersion"),
+        ({"canonicalSkillDir": "relative-skill"}, "absolute path"),
+        ({"canonicalSkillDir": "~/relative-to-home"}, "absolute path"),
+        ({"canonicalSkillDir": "//skills/weather"}, "single leading"),
+        ({"canonicalSkillDir": "/skills/bad\x00name"}, "must not contain NUL"),
         ({"eventKind": "chmod"}, "eventKind"),
         ({"paths": "/absolute"}, "paths"),
         ({"paths": ["/absolute"]}, "relative paths"),
@@ -119,19 +121,35 @@ def test_parse_skillfs_change_rejects_invalid_params(
         parse_skillfs_change(request_for(skill_dir, **overrides).params)
 
 
-def test_parse_skillfs_change_rejects_nul_skill_dir(tmp_path: Path):
+def test_parse_skillfs_change_accepts_hidden_canonical_and_opaque_skill_id(
+    tmp_path: Path,
+):
+    skill_dir = tmp_path / "hidden" / "apple" / "notes"
+
+    change = parse_skillfs_change(request_for(skill_dir, skillId={"future": 2}).params)
+
+    assert change.canonical_skill_dir == skill_dir
+    assert change.reported_skill_id == {"future": 2}
+
+
+def test_parse_skillfs_change_accepts_missing_skill_id(tmp_path: Path):
+    skill_dir = tmp_path / "hidden" / "weather"
+    params = request_for(skill_dir).params
+    params.pop("skillId")
+
+    change = parse_skillfs_change(params)
+
+    assert change.reported_skill_id is None
+
+
+def test_parse_skillfs_change_rejects_non_normalized_canonical(tmp_path: Path):
     skill_dir = make_skill(tmp_path, "weather")
+    non_normalized = f"{skill_dir}/../weather"
 
-    with pytest.raises(BadRequestError, match="NUL"):
-        parse_skillfs_change(request_for(skill_dir, skillDir=f"{skill_dir}\x00").params)
-
-
-def test_parse_skillfs_change_requires_skill_manifest(tmp_path: Path):
-    skill_dir = tmp_path / "not-a-skill"
-    skill_dir.mkdir()
-
-    with pytest.raises(BadRequestError, match="SKILL.md"):
-        parse_skillfs_change(request_for(skill_dir).params)
+    with pytest.raises(BadRequestError, match="lexically normalized"):
+        parse_skillfs_change(
+            request_for(skill_dir, canonicalSkillDir=non_normalized).params
+        )
 
 
 def test_metadata_only_notification_is_accepted_and_ignored(tmp_path: Path):
@@ -143,7 +161,7 @@ def test_metadata_only_notification_is_accepted_and_ignored(tmp_path: Path):
         runtime,
     )
 
-    assert response.data["schemaVersion"] == 1
+    assert response.data["schemaVersion"] == 2
     assert response.data["accepted"] is True
     assert response.data["ignored"] is True
     assert response.data["reason"] == "metadata-only change"
@@ -172,12 +190,14 @@ def test_notify_enqueues_registered_activation_job(monkeypatch, tmp_path: Path):
 
     response = asyncio.run(scenario())
 
-    assert response.data["schemaVersion"] == 1
+    assert response.data["schemaVersion"] == 2
     assert response.data["accepted"] is True
     assert response.data["ignored"] is False
     assert response.data["queued"] is True
     assert response.data["coalesced"] is False
     assert response.data["skill"]["skillName"] == "weather"
+    assert response.data["skill"]["canonicalSkillDir"] == str(skill_dir)
+    assert response.data["skill"]["reportedSkillId"] == "category/weather"
 
 
 def test_notify_enqueues_reconcile_with_empty_paths(monkeypatch, tmp_path: Path):
@@ -206,7 +226,7 @@ def test_notify_enqueues_reconcile_with_empty_paths(monkeypatch, tmp_path: Path)
 
     response = asyncio.run(scenario())
 
-    assert response.data["schemaVersion"] == 1
+    assert response.data["schemaVersion"] == 2
     assert response.data["accepted"] is True
     assert response.data["ignored"] is False
     assert response.data["queued"] is True

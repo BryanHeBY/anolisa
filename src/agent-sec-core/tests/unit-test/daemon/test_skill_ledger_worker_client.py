@@ -147,8 +147,7 @@ class FakeProcess:
 def make_change(tmp_path: Path) -> SkillFsChange:
     skill_dir = tmp_path / "weather"
     return SkillFsChange(
-        skill_dir=skill_dir,
-        skill_name=skill_dir.name,
+        canonical_skill_dir=skill_dir,
         event_kinds={"write"},
         paths={"SKILL.md"},
     )

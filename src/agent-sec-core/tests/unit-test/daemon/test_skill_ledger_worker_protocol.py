@@ -23,8 +23,8 @@ from agent_sec_cli.daemon.jobs.skill_ledger.protocol import (
 def make_change(tmp_path: Path) -> SkillFsChange:
     skill_dir = tmp_path / "weather"
     return SkillFsChange(
-        skill_dir=skill_dir,
-        skill_name=skill_dir.name,
+        canonical_skill_dir=skill_dir,
+        reported_skill_id="category/weather",
         event_kinds={"write", "rename"},
         paths={"SKILL.md", "run.sh"},
     )
@@ -78,7 +78,7 @@ def test_worker_error_response_round_trip():
                 "method": "process_change",
                 "change": {},
             },
-            "skillDir",
+            "canonicalSkillDir",
         ),
         (
             {
@@ -86,8 +86,7 @@ def test_worker_error_response_round_trip():
                 "requestId": "1",
                 "method": "process_change",
                 "change": {
-                    "skillDir": "relative",
-                    "skillName": "relative",
+                    "canonicalSkillDir": "relative",
                     "eventKinds": [],
                     "paths": [],
                 },
@@ -100,8 +99,20 @@ def test_worker_error_response_round_trip():
                 "requestId": "1",
                 "method": "process_change",
                 "change": {
-                    "skillDir": "/skills/weather",
-                    "skillName": "weather",
+                    "canonicalSkillDir": "//skills/weather",
+                    "eventKinds": ["write"],
+                    "paths": [],
+                },
+            },
+            "single leading",
+        ),
+        (
+            {
+                "schemaVersion": 1,
+                "requestId": "1",
+                "method": "process_change",
+                "change": {
+                    "canonicalSkillDir": "/skills/weather",
                     "eventKinds": ["unknown"],
                     "paths": [],
                 },
@@ -114,8 +125,7 @@ def test_worker_error_response_round_trip():
                 "requestId": "1",
                 "method": "process_change",
                 "change": {
-                    "skillDir": "/skills/weather",
-                    "skillName": "weather",
+                    "canonicalSkillDir": "/skills/weather",
                     "eventKinds": ["write"],
                     "paths": ["../escape"],
                 },
@@ -128,8 +138,7 @@ def test_worker_error_response_round_trip():
                 "requestId": "1",
                 "method": "process_change",
                 "change": {
-                    "skillDir": "/skills/weather\x00",
-                    "skillName": "weather",
+                    "canonicalSkillDir": "/skills/weather\x00",
                     "eventKinds": ["write"],
                     "paths": [],
                 },
@@ -142,8 +151,7 @@ def test_worker_error_response_round_trip():
                 "requestId": "1",
                 "method": "process_change",
                 "change": {
-                    "skillDir": "/skills/weather",
-                    "skillName": "weather",
+                    "canonicalSkillDir": "/skills/weather",
                     "eventKinds": ["write"],
                     "paths": ["scripts/run\x00.sh"],
                 },

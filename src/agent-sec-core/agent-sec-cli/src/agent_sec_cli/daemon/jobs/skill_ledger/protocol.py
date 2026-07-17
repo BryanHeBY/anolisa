@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_sec_cli.skill_ledger.path_identity import (
+    validate_canonical_skill_dir,
+)
+
 WORKER_SCHEMA_VERSION = 1
 WORKER_PROCESS_CHANGE_METHOD = "process_change"
 MAX_WORKER_FRAME_BYTES = 4 * 1024 * 1024
@@ -32,46 +36,49 @@ class WorkerProtocolError(ValueError):
 class SkillFsChange:
     """Validated SkillFS change notification."""
 
-    skill_dir: Path
-    skill_name: str
+    canonical_skill_dir: Path
+    reported_skill_id: Any | None = None
     event_kinds: set[str] = field(default_factory=set)
     paths: set[str] = field(default_factory=set)
 
+    @property
+    def skill_name(self) -> str:
+        """Return the canonical leaf name used for display only."""
+        return self.canonical_skill_dir.name
+
     def merge(self, other: "SkillFsChange") -> None:
         """Merge another notification for the same skill."""
+        if other.reported_skill_id is not None:
+            self.reported_skill_id = other.reported_skill_id
         self.event_kinds.update(other.event_kinds)
         self.paths.update(other.paths)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable job/debug payload."""
-        return {
-            "skillDir": str(self.skill_dir),
+        payload: dict[str, Any] = {
+            "canonicalSkillDir": str(self.canonical_skill_dir),
             "skillName": self.skill_name,
             "eventKinds": sorted(self.event_kinds),
             "paths": sorted(self.paths),
         }
+        if self.reported_skill_id is not None:
+            payload["reportedSkillId"] = self.reported_skill_id
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SkillFsChange":
         """Validate and build a change received by the worker."""
-        skill_dir = payload.get("skillDir")
-        skill_name = payload.get("skillName")
+        canonical_skill_dir = payload.get("canonicalSkillDir")
         event_kinds = payload.get("eventKinds")
         paths = payload.get("paths")
 
-        if not isinstance(skill_dir, str) or not skill_dir:
-            raise WorkerProtocolError("change.skillDir must be a non-empty string")
-        if "\x00" in skill_dir:
-            raise WorkerProtocolError("change.skillDir must not contain NUL characters")
-        if not Path(skill_dir).is_absolute():
-            raise WorkerProtocolError("change.skillDir must be an absolute path")
-        if not isinstance(skill_name, str) or not skill_name:
-            raise WorkerProtocolError("change.skillName must be a non-empty string")
-        if skill_name != Path(skill_dir).name:
-            raise WorkerProtocolError("change.skillName must match skillDir basename")
+        try:
+            canonical_path = validate_canonical_skill_dir(canonical_skill_dir)
+        except ValueError as exc:
+            raise WorkerProtocolError(f"change.canonicalSkillDir {exc}") from exc
         return cls(
-            skill_dir=Path(skill_dir),
-            skill_name=skill_name,
+            canonical_skill_dir=canonical_path,
+            reported_skill_id=payload.get("reportedSkillId"),
             event_kinds=_event_kind_set(event_kinds),
             paths=_relative_path_set(paths),
         )
@@ -273,6 +280,6 @@ def _relative_path_set(value: Any) -> set[str]:
         path = Path(item)
         if not path.parts or path.is_absolute() or ".." in path.parts:
             raise WorkerProtocolError(
-                "change.paths must contain relative paths under skillDir"
+                "change.paths must contain relative paths under canonicalSkillDir"
             )
     return paths

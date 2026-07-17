@@ -34,6 +34,12 @@ from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.core import decision as decision_core
 from agent_sec_cli.skill_ledger.core import live_root as live_root_core
 from agent_sec_cli.skill_ledger.core import resolver as resolver_core
+from agent_sec_cli.skill_ledger.core.certifier import (
+    _persist_manifest_update,
+    _prepare_manifest_for_update,
+)
+from agent_sec_cli.skill_ledger.core.file_hasher import compute_file_hashes
+from agent_sec_cli.skill_ledger.core.live_root import ResolvedSkillRoot
 from agent_sec_cli.skill_ledger.core.resolver import resolve_activation
 from agent_sec_cli.skill_ledger.errors import KeyNotFoundError
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
@@ -2533,11 +2539,13 @@ def test_show_reuses_exposure_summary_check_result(ws, monkeypatch):
                 os.environ[key] = value
 
     assert out["latestStatus"] == "pass"
-    assert check_calls == [str(skill)]
+    assert len(check_calls) == 1
+    assert check_calls[0].canonical_dir == skill
+    assert check_calls[0].io_dir == skill
 
 
-def test_show_on_fuse_view_uses_live_root_for_status(ws):
-    """show must not hash the FUSE active snapshot as the live skill root."""
+def test_show_on_fuse_view_does_not_infer_backing_root(ws):
+    """Without SkillFS resolver, Ledger must not guess a backing root."""
     skill = make_skill(ws.skills_dir, "decision-show-fuse-view", {"data.txt": "safe"})
     env = ws.env()
     pass_findings = write_findings_file(
@@ -2569,12 +2577,9 @@ def test_show_on_fuse_view_uses_live_root_for_status(ws):
     assert backing_out["latestStatus"] == "deny"
     assert backing_out["activeVersionId"] == "v000001"
     assert backing_out["reasonCode"] == "latest_risk_fallback_to_previous"
-    assert fuse_out["latestStatus"] == backing_out["latestStatus"]
-    assert fuse_out["activeVersionId"] == backing_out["activeVersionId"]
-    assert fuse_out["reasonCode"] == backing_out["reasonCode"]
-    assert fuse_out["findings"] == backing_out["findings"]
-    assert fuse_out["rootMatchesActive"] == backing_out["rootMatchesActive"]
-    assert "danger.sh" not in json.dumps(fuse_out)
+    assert fuse_out["latestStatus"] == "unmanaged"
+    assert fuse_out["managed"] is False
+    assert fuse_out["canonicalSkillDir"] == str(fuse_view)
 
 
 def test_show_unmanaged_skill_root_returns_diagnostic(ws):
@@ -2649,7 +2654,10 @@ def test_show_managed_read_only_root_returns_unmanaged(ws, monkeypatch):
     assert "not writable" in out["manageabilityReason"]
 
 
-def test_decide_allow_on_fuse_view_updates_latest_without_rescanning(ws):
+def test_decide_allow_on_fuse_view_updates_latest_without_rescanning(
+    ws,
+    monkeypatch,
+):
     """allow via FUSE view must not sign the active snapshot as a new version."""
     skill = make_skill(ws.skills_dir, "decision-allow-fuse-view", {"data.txt": "safe"})
     env = ws.env()
@@ -2671,6 +2679,14 @@ def test_decide_allow_on_fuse_view_updates_latest_without_rescanning(ws):
         ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
     )
     fuse_view = make_fuse_view_from_snapshot(skill, ws.root / "fuse-view", "v000001")
+    root = live_root_core.ResolvedSkillRoot(fuse_view, skill, "skillfs")
+    resolver_calls = []
+
+    def fake_resolve(_resolver, canonical_skill_dir):
+        resolver_calls.append(Path(canonical_skill_dir))
+        return root
+
+    monkeypatch.setattr(live_root_core.SkillRootResolver, "resolve", fake_resolve)
 
     r = run_skill_ledger(
         ["decide", str(fuse_view), "--action", "allow", "--reason", "reviewed"],
@@ -2678,6 +2694,7 @@ def test_decide_allow_on_fuse_view_updates_latest_without_rescanning(ws):
     )
 
     assert r.returncode == 0, f"decide failed: {r.stderr}"
+    assert resolver_calls == [fuse_view]
     assert sorted(
         p.name for p in (skill / ".skill-meta" / "versions").glob("*.json")
     ) == ["v000001.json", "v000002.json"]
@@ -2691,8 +2708,8 @@ def test_decide_allow_on_fuse_view_updates_latest_without_rescanning(ws):
     }
 
 
-def test_decide_does_not_trust_fuse_view_from_default_skill_dirs(ws, monkeypatch):
-    """Default discovery dirs must not make a FUSE view a managed source root."""
+def test_default_discovery_does_not_make_fuse_view_managed(ws, monkeypatch):
+    """Default discovery remains separate from canonical managed coverage."""
     skill = make_skill(
         ws.skills_dir,
         "decision-default-dir-fuse-view",
@@ -2731,14 +2748,6 @@ def test_decide_does_not_trust_fuse_view_from_default_skill_dirs(ws, monkeypatch
     assert shown_out["managed"] is False
     assert shown_out["message"] is None
 
-    r = run_skill_ledger(
-        ["decide", str(fuse_view), "--action", "allow", "--reason", "reviewed"],
-        env_extra=env,
-    )
-
-    assert r.returncode == 1
-    assert "managedSkillDirs" in r.stderr
-    assert "source/backing" in r.stderr
     latest = read_latest_manifest(skill)
     assert latest["versionId"] == "v000002"
     assert latest.get("userDecision") is None
@@ -2771,7 +2780,7 @@ def test_export_writes_snapshot_manifest_and_findings(ws):
     assert findings_out == [{"rule": "deny", "level": "deny", "message": "deny"}]
 
 
-def test_export_latest_from_fuse_view_uses_signed_snapshot(ws):
+def test_export_latest_from_fuse_view_uses_signed_snapshot(ws, monkeypatch):
     """latest export is a read-only signed snapshot review path."""
     skill = make_skill(
         ws.skills_dir,
@@ -2797,6 +2806,14 @@ def test_export_latest_from_fuse_view_uses_signed_snapshot(ws):
         ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
     )
     fuse_view = make_fuse_view_from_snapshot(skill, ws.root / "fuse-view", "v000001")
+    root = live_root_core.ResolvedSkillRoot(fuse_view, skill, "skillfs")
+    resolver_calls = []
+
+    def fake_resolve(_resolver, canonical_skill_dir):
+        resolver_calls.append(Path(canonical_skill_dir))
+        return root
+
+    monkeypatch.setattr(live_root_core.SkillRootResolver, "resolve", fake_resolve)
     out_dir = ws.root / "exported-fuse-latest"
 
     r = run_skill_ledger(
@@ -2806,6 +2823,8 @@ def test_export_latest_from_fuse_view_uses_signed_snapshot(ws):
     assert r.returncode == 0, f"export failed: {r.stderr}"
     out = parse_json_output(r.stdout)
 
+    assert resolver_calls == [fuse_view]
+    assert out["canonicalSkillDir"] == str(fuse_view)
     assert out["versionId"] == "v000002"
     assert (out_dir / "snapshot" / "data.txt").read_text() == "safe"
     assert (out_dir / "snapshot" / "danger.sh").read_text() == (
@@ -3150,14 +3169,6 @@ def test_resolve_pass_warn_only_uses_pending_stub_without_pass_or_warn_snapshot(
 
 def test_resolve_legacy_latest_scanned_excludes_none_snapshot(ws):
     """Legacy latest_scanned still requires a pass/warn snapshot."""
-    from agent_sec_cli.skill_ledger.core.certifier import (  # noqa: PLC0415
-        _persist_manifest_update,
-        _prepare_manifest_for_update,
-    )
-    from agent_sec_cli.skill_ledger.core.file_hasher import (  # noqa: PLC0415
-        compute_file_hashes,
-    )
-
     skill = make_skill(ws.skills_dir, "resolve-latest-none", {"data.txt": "v1"})
     env = ws.env()
     previous = {key: os.environ.get(key) for key in env}
@@ -3170,7 +3181,7 @@ def test_resolve_legacy_latest_scanned_excludes_none_snapshot(ws):
             backend,
         )
         _persist_manifest_update(
-            str(skill),
+            ResolvedSkillRoot(skill, skill, "host"),
             manifest,
             [],
             backend,
