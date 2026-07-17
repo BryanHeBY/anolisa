@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4
+
+- fix(memory): auto-recall returns empty results after observe — synchronously reindex after memory_observe so before_prompt_build hook finds new content (#1520)
+- fix(memory): install.sh sets allowConversationAccess for hooks (#1521)
+
 ## 0.2.3
 
 - fix(memory): normalize OpenClaw content blocks from array of content blocks `[{type:"text", text:"..."}]` to string before trigger matching and hashing, so auto-capture actually fires instead of coercing to `"[object Object]"`
