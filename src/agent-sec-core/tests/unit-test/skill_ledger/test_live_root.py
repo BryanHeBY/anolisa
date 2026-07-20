@@ -94,27 +94,50 @@ def test_resolved_root_projects_nested_payload_paths_with_boundaries(
 ) -> None:
     canonical = tmp_path / "mount" / "weather"
     live = tmp_path / "backing" / "weather"
-    sibling = Path(f"{live}-archive") / "data.json"
+    sibling_paths = {
+        "numeric": Path(f"{live}2") / "data.json",
+        "dash": Path(f"{live}-archive") / "data.json",
+        "underscore": Path(f"{live}_archive") / "data.json",
+        "dot": Path(f"{live}.old") / "data.json",
+    }
     outside = tmp_path / "other" / "data.json"
     root = ResolvedSkillRoot(canonical, live, "skillfs")
     payload = {
         "exact": str(live),
+        "quoted": f"path '{live}' failed",
+        "colon": f"{live}: permission denied",
+        "uri": f"file://{live}/secret.txt",
+        "child": str(live / "scripts" / "run.py"),
         "nested": [
             f"failed to read '{live / 'scripts' / 'run.py'}'",
-            {"sibling": str(sibling), "outside": str(outside)},
+            {
+                "siblings": {name: str(path) for name, path in sibling_paths.items()},
+                "outside": str(outside),
+            },
         ],
     }
 
+    assert root.contains_io_path(payload)
     projected = root.canonicalize_payload(payload)
 
     assert projected == {
         "exact": str(canonical),
+        "quoted": f"path '{canonical}' failed",
+        "colon": f"{canonical}: permission denied",
+        "uri": f"file://{canonical}/secret.txt",
+        "child": str(canonical / "scripts" / "run.py"),
         "nested": [
             f"failed to read '{canonical / 'scripts' / 'run.py'}'",
-            {"sibling": str(sibling), "outside": str(outside)},
+            {
+                "siblings": {name: str(path) for name, path in sibling_paths.items()},
+                "outside": str(outside),
+            },
         ],
     }
     assert not root.contains_io_path(projected)
+    assert not root.contains_io_path(
+        {name: str(path) for name, path in sibling_paths.items()}
+    )
     assert root.contains_io_path({str(live): "path used as a metadata key"})
 
 

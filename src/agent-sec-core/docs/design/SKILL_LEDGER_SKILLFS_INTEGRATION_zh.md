@@ -22,7 +22,7 @@ canonical path 到 live source 的映射并提供只读 resolver，Skill Ledger 
 | `canonicalSkillDir` | SkillFS 与 Skill Ledger 的接口合同 | 用户和宿主看到的绝对、词法规范化 skill 路径；是配置、事件合并和结果输出的唯一权威身份 |
 | `liveSkillDir` | SkillFS resolver 返回值 | daemon 或 CLI 当前可访问、可读写的 live source；可能位于 backing root |
 | `ioSkillDir` | Skill Ledger 内部 | 本次操作实际使用的目录；有 SkillFS 时等于 `liveSkillDir`，host 模式下等于 `canonicalSkillDir` |
-| `skillId` | SkillFS notify metadata | 可选 opaque 诊断信息，例如 Hermes 的 `apple/apple-notes`；Ledger 不用它解析路径、去重或做决策 |
+| `skillId` | SkillFS notify metadata | notify v2 必填的非空字符串，例如 Hermes 的 `apple/apple-notes`；Ledger 仅将其作为 opaque 诊断信息，不用它解析路径、去重或做决策 |
 | `skillName` | Skill Ledger manifest v1 与展示层 | `canonicalSkillDir` 的 basename；不是唯一身份，允许不同 canonical path 具有相同 basename |
 
 `canonicalSkillDir` 只做绝对化和词法规范化，不通过 `realpath` 跟随 symlink，也不要求在 daemon
@@ -208,7 +208,7 @@ Hermes nested skill 的请求示例：
 | --- | --- | --- | --- |
 | `schemaVersion` | number | 必须为 `2` | v1 不兼容，其他版本明确拒绝 |
 | `canonicalSkillDir` | string | 绝对、词法规范化、单个前导 `/`；不支持 `~` 或 `//` | 唯一处理键；接收阶段不检查目录存在或 `SKILL.md` |
-| `skillId` | 任意 JSON 值，可省略 | SkillFS 应发送稳定完整 id | 仅记录为 `reportedSkillId`；不校验、不解释、不参与处理 |
+| `skillId` | string | 必填且非空；SkillFS 发送稳定完整 id | 仅校验类型和非空并记录为 `reportedSkillId`；不解释格式、不参与处理 |
 | `eventKind` | string | `mkdir` / `create` / `write` / `rename` / `unlink` / `rmdir` / `setattr` / `truncate` / `reconcile` | 诊断与事件合并 |
 | `paths` | string[] | 相对 canonical skill 根；不得为空字符串、绝对路径或包含 `..` | 描述可能变化的文件；可为空 |
 
@@ -283,7 +283,7 @@ canonical 身份来源。它可以继续使用独立的 schemaVersion `1` 和内
 ```
 
 Ledger v2 不直接读取该日志。若未来增加 replay，SkillFS 必须在发送边界把内部事件转换为
-`canonicalSkillDir` + 可选 `skillId` 的 notify v2，而不能把日志中的 live `skillDir` 直接交给
+`canonicalSkillDir` + 必填非空字符串 `skillId` 的 notify v2，而不能把日志中的 live `skillDir` 直接交给
 Ledger。日志写入失败只影响诊断，不改变当前运行视图。
 
 ## Activation 策略

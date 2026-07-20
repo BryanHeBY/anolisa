@@ -37,7 +37,7 @@ class SkillFsChange:
     """Validated SkillFS change notification."""
 
     canonical_skill_dir: Path
-    reported_skill_id: Any | None = None
+    reported_skill_id: str | None = None
     event_kinds: set[str] = field(default_factory=set)
     paths: set[str] = field(default_factory=set)
 
@@ -78,7 +78,9 @@ class SkillFsChange:
             raise WorkerProtocolError(f"change.canonicalSkillDir {exc}") from exc
         return cls(
             canonical_skill_dir=canonical_path,
-            reported_skill_id=payload.get("reportedSkillId"),
+            reported_skill_id=_optional_reported_skill_id(
+                payload.get("reportedSkillId")
+            ),
             event_kinds=_event_kind_set(event_kinds),
             paths=_relative_path_set(paths),
         )
@@ -254,6 +256,16 @@ def _request_id(payload: dict[str, Any]) -> str:
     if not isinstance(request_id, str) or not request_id:
         raise WorkerProtocolError("requestId must be a non-empty string")
     return request_id
+
+
+def _optional_reported_skill_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise WorkerProtocolError(
+            "change.reportedSkillId must be a non-empty string when present"
+        )
+    return value
 
 
 def _string_set(value: Any, field_name: str) -> set[str]:

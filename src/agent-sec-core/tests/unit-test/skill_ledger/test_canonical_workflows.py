@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from agent_sec_cli.skill_ledger.core import certifier as certifier_core
+from agent_sec_cli.skill_ledger.core import resolver as resolver_core
 from agent_sec_cli.skill_ledger.core.certifier import (
     certify,
     scan_batch,
@@ -243,6 +244,84 @@ def test_scanner_error_paths_are_canonicalized_before_manifest_signing(
         assert str(live) not in content
         assert str(canonical / "__init__.py") in content
     assert checked["status"] == "warn"
+
+
+def test_signed_findings_project_diagnostic_path_contexts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = tmp_path / "mount" / "weather"
+    live = _make_skill(tmp_path / "backing", "weather", "weather")
+    root = ResolvedSkillRoot(canonical, live, "skillfs")
+    _write_config(tmp_path, [canonical])
+    backend = _backend(tmp_path, monkeypatch)
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(
+        json.dumps(
+            [
+                {
+                    "rule": "diagnostic-paths",
+                    "level": "warn",
+                    "message": f"path '{live}' failed",
+                    "metadata": {
+                        "colon": f"{live}: permission denied",
+                        "uri": f"file://{live}/secret.txt",
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = certify(root, backend, findings_path=str(findings_path))
+    checked = check(root, backend)
+    shown = show_skill(root, backend)
+    export_dir = tmp_path / "export"
+    export_skill(
+        root,
+        backend,
+        version=result["versionId"],
+        output=str(export_dir),
+    )
+
+    persisted_payloads = [
+        (live / ".skill-meta" / "latest.json").read_text(encoding="utf-8"),
+        (live / ".skill-meta" / "versions" / f"{result['versionId']}.json").read_text(
+            encoding="utf-8"
+        ),
+        (export_dir / "manifest.json").read_text(encoding="utf-8"),
+        (export_dir / "findings.json").read_text(encoding="utf-8"),
+        json.dumps([checked, shown]),
+    ]
+    for payload in persisted_payloads:
+        assert str(live) not in payload
+        assert f"path '{canonical}' failed" in payload
+        assert f"{canonical}: permission denied" in payload
+        assert f"file://{canonical}/secret.txt" in payload
+    assert checked["status"] == "warn"
+
+
+def test_activation_xattr_error_projects_exact_live_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = tmp_path / "mount" / "weather"
+    live = _make_skill(tmp_path / "backing", "weather", "weather")
+    root = ResolvedSkillRoot(canonical, live, "skillfs")
+    _write_config(tmp_path, [canonical])
+    backend = _backend(tmp_path, monkeypatch)
+    certify(root, backend, findings_path=str(_write_findings(tmp_path, "weather")))
+
+    def fail_setxattr(_path: str, _name: str, _payload: bytes) -> None:
+        raise PermissionError(13, "Permission denied", str(live))
+
+    monkeypatch.setattr(resolver_core.os, "setxattr", fail_setxattr, raising=False)
+
+    result = resolve_activation(root, backend)
+
+    error = result["activationXattr"]["error"]
+    assert str(canonical) in error
+    assert str(live) not in error
 
 
 def test_unprojectable_io_path_fails_before_snapshot_creation(

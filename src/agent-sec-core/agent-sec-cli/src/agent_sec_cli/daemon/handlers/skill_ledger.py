@@ -82,6 +82,7 @@ def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
         raise BadRequestError("params.schemaVersion must be 2")
 
     canonical_skill_dir = _validate_canonical_skill_dir(params.get("canonicalSkillDir"))
+    skill_id = _validate_skill_id(params.get("skillId"))
 
     event_kind = params.get("eventKind")
     if event_kind not in SKILLFS_EVENT_KINDS:
@@ -91,7 +92,7 @@ def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
     paths = _validate_paths(params.get("paths"))
     return SkillFsChange(
         canonical_skill_dir=canonical_skill_dir,
-        reported_skill_id=params.get("skillId"),
+        reported_skill_id=skill_id,
         event_kinds={event_kind},
         paths=set(paths),
     )
@@ -102,6 +103,12 @@ def _validate_canonical_skill_dir(value: Any) -> Path:
         return validate_canonical_skill_dir(value)
     except ValueError as exc:
         raise BadRequestError(f"params.canonicalSkillDir {exc}") from exc
+
+
+def _validate_skill_id(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise BadRequestError("params.skillId must be a non-empty string")
+    return value
 
 
 def _validate_paths(value: Any) -> list[str]:

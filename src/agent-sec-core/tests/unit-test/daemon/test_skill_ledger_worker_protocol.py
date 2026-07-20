@@ -39,6 +39,20 @@ def test_worker_request_round_trip(tmp_path: Path):
     assert parsed.change == request.change
 
 
+def test_worker_request_round_trip_without_reported_skill_id(tmp_path: Path):
+    change = SkillFsChange(
+        canonical_skill_dir=tmp_path / "weather",
+        event_kinds={"reconcile"},
+        paths=set(),
+    )
+    request = new_worker_request(change)
+
+    parsed = parse_worker_request(serialize_worker_request(request))
+
+    assert parsed.change == change
+    assert parsed.change.reported_skill_id is None
+
+
 def test_worker_success_response_round_trip():
     response = success_worker_response("request-1", {"status": "processed"})
 
@@ -157,6 +171,34 @@ def test_worker_error_response_round_trip():
                 },
             },
             "NUL",
+        ),
+        (
+            {
+                "schemaVersion": 1,
+                "requestId": "1",
+                "method": "process_change",
+                "change": {
+                    "canonicalSkillDir": "/skills/weather",
+                    "reportedSkillId": "",
+                    "eventKinds": ["write"],
+                    "paths": [],
+                },
+            },
+            "reportedSkillId",
+        ),
+        (
+            {
+                "schemaVersion": 1,
+                "requestId": "1",
+                "method": "process_change",
+                "change": {
+                    "canonicalSkillDir": "/skills/weather",
+                    "reportedSkillId": {"future": 2},
+                    "eventKinds": ["write"],
+                    "paths": [],
+                },
+            },
+            "reportedSkillId",
         ),
     ],
 )

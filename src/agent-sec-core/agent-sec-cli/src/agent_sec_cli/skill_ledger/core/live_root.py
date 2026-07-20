@@ -34,8 +34,8 @@ SkillRootSource: TypeAlias = Literal["host", "skillfs"]
 
 
 def _path_root_pattern(root: Path) -> re.Pattern[str]:
-    """Match a complete POSIX path root, excluding longer sibling paths."""
-    return re.compile(rf"(?<![\w./~-]){re.escape(str(root))}(?=$|/)")
+    """Match a complete POSIX path token, excluding sibling-name continuations."""
+    return re.compile(rf"(?<![\w.@~+-]){re.escape(str(root))}(?![\w.@~+-])")
 
 
 class _ResolverSocketMissing(Exception):

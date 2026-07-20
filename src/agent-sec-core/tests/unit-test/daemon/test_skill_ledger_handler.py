@@ -102,6 +102,11 @@ def test_parse_skillfs_change_accepts_reconcile_with_empty_paths(tmp_path: Path)
         ({"canonicalSkillDir": "~/relative-to-home"}, "absolute path"),
         ({"canonicalSkillDir": "//skills/weather"}, "single leading"),
         ({"canonicalSkillDir": "/skills/bad\x00name"}, "must not contain NUL"),
+        ({"skillId": None}, "skillId"),
+        ({"skillId": ""}, "skillId"),
+        ({"skillId": 7}, "skillId"),
+        ({"skillId": []}, "skillId"),
+        ({"skillId": {}}, "skillId"),
         ({"eventKind": "chmod"}, "eventKind"),
         ({"paths": "/absolute"}, "paths"),
         ({"paths": ["/absolute"]}, "relative paths"),
@@ -121,25 +126,35 @@ def test_parse_skillfs_change_rejects_invalid_params(
         parse_skillfs_change(request_for(skill_dir, **overrides).params)
 
 
-def test_parse_skillfs_change_accepts_hidden_canonical_and_opaque_skill_id(
+def test_parse_skillfs_change_preserves_opaque_skill_id(
     tmp_path: Path,
 ):
     skill_dir = tmp_path / "hidden" / "apple" / "notes"
 
-    change = parse_skillfs_change(request_for(skill_dir, skillId={"future": 2}).params)
+    change = parse_skillfs_change(
+        request_for(skill_dir, skillId="reported/id-does-not-match").params
+    )
 
     assert change.canonical_skill_dir == skill_dir
-    assert change.reported_skill_id == {"future": 2}
+    assert change.reported_skill_id == "reported/id-does-not-match"
 
 
-def test_parse_skillfs_change_accepts_missing_skill_id(tmp_path: Path):
+def test_parse_skillfs_change_accepts_flat_skill_id(tmp_path: Path):
+    skill_dir = tmp_path / "hidden" / "weather"
+
+    change = parse_skillfs_change(request_for(skill_dir, skillId="weather").params)
+
+    assert change.canonical_skill_dir == skill_dir
+    assert change.reported_skill_id == "weather"
+
+
+def test_parse_skillfs_change_rejects_missing_skill_id(tmp_path: Path):
     skill_dir = tmp_path / "hidden" / "weather"
     params = request_for(skill_dir).params
     params.pop("skillId")
 
-    change = parse_skillfs_change(params)
-
-    assert change.reported_skill_id is None
+    with pytest.raises(BadRequestError, match="skillId"):
+        parse_skillfs_change(params)
 
 
 def test_parse_skillfs_change_rejects_non_normalized_canonical(tmp_path: Path):
@@ -165,6 +180,16 @@ def test_metadata_only_notification_is_accepted_and_ignored(tmp_path: Path):
     assert response.data["accepted"] is True
     assert response.data["ignored"] is True
     assert response.data["reason"] == "metadata-only change"
+
+
+def test_metadata_only_notification_still_requires_skill_id(tmp_path: Path):
+    skill_dir = make_skill(tmp_path, "weather")
+    runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    request = request_for(skill_dir, paths=[".skill-meta/latest.json"])
+    request.params.pop("skillId")
+
+    with pytest.raises(BadRequestError, match="skillId"):
+        skillfs_notify_change_handler(request, runtime)
 
 
 def test_notify_enqueues_registered_activation_job(monkeypatch, tmp_path: Path):
