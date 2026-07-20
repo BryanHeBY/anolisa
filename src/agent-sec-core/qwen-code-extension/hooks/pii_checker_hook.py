@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-"""Scan Qwen Code hook content for PII and credentials."""
+"""Scan Qwen Code hook content for PII and credentials.
+
+Qwen Code compatibility contract
+--------------------------------
+This hook targets the Qwen Code 0.19.9 protocol:
+
+* ``PostToolUse`` stops downstream handling through ``continue=false``;
+  ``decision=block`` alone is not consumed by that version.
+* ``PostToolUseFailure`` and ``StopFailure`` do not consume blocking output, so
+  they remain scan-and-audit only.
+* ``stop_hook_active`` identifies a repeated ``Stop`` pass, which must not be
+  blocked again or it can create a rewrite loop.
+* Qwen Code has no pre-render output-transform hook, so final-output blocking is
+  best effort.
+
+The 0.19.9 HookInput does not expose a runtime version field. Compatibility is
+therefore pinned by protocol tests instead of inferred inside the hook.
+"""
 
 import json
 import math
