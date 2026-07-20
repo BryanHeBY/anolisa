@@ -30,6 +30,13 @@ from pathlib import Path
 import agent_sec_cli.security_events as security_events
 import pytest
 from agent_sec_cli.cli import app as cli_app
+from agent_sec_cli.daemon.handlers.security_query import (
+    security_events_list_handler,
+    security_summary_handler,
+)
+from agent_sec_cli.daemon.protocol import DaemonRequest
+from agent_sec_cli.daemon.runtime import DaemonRuntime
+from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
 from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.core import decision as decision_core
 from agent_sec_cli.skill_ledger.core import live_root as live_root_core
@@ -2406,6 +2413,94 @@ def test_show_reports_active_latest_decision_and_root_match(ws):
     assert "allow after review" in out["message"]
     assert out["warnings"]
     assert out["warnings"] == [out["message"]]
+
+
+def test_show_event_flows_through_jsonl_sqlite_and_dashboard(ws, monkeypatch):
+    skill = make_skill(ws.skills_dir, "dashboard-show", {"data.txt": "safe"})
+    findings = write_findings_file(
+        ws.fixtures,
+        "dashboard-show-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    event_data = ws.root / "events_dashboard_show"
+    event_data.mkdir()
+    env = ws.env({"AGENT_SEC_DATA_DIR": str(event_data)})
+
+    reset_security_event_writers()
+    try:
+        certified = run_skill_ledger(
+            ["certify", str(skill), "--findings", str(findings)],
+            env_extra=env,
+        )
+        shown = run_skill_ledger(["show", str(skill)], env_extra=env)
+    finally:
+        reset_security_event_writers()
+
+    assert certified.returncode == 0, certified.stderr
+    assert shown.returncode == 0, shown.stderr
+    stdout_result = parse_json_output(shown.stdout)
+    assert stdout_result["latestStatus"] == "pass"
+    assert "verdict" not in stdout_result
+
+    jsonl_events = read_security_events(event_data)
+    show_jsonl = next(
+        event
+        for event in jsonl_events
+        if event["details"]["result"].get("command") == "show"
+    )
+    assert show_jsonl["details"]["result"]["verdict"] == "pass"
+    assert show_jsonl["details"]["result"]["skill_name"] == skill.name
+
+    sqlite_reader = SqliteEventReader(path=event_data / "security-events.db")
+    try:
+        pass_events = sqlite_reader.query(
+            category="skill_ledger",
+            verdict="pass",
+        )
+        show_sqlite = next(
+            event
+            for event in pass_events
+            if event.details["result"].get("command") == "show"
+        )
+        assert show_sqlite.event_id == show_jsonl["event_id"]
+        assert sqlite_reader.count_by("verdict", category="skill_ledger") == {"pass": 2}
+    finally:
+        sqlite_reader.close()
+
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(event_data))
+    runtime = DaemonRuntime(socket_path=event_data / "daemon.sock")
+    list_result = security_events_list_handler(
+        DaemonRequest(
+            method="sec.events.list",
+            params={"category": "skill_ledger", "verdict": "pass"},
+        ),
+        runtime,
+    )
+    dashboard_show = next(
+        item
+        for item in list_result.data["items"]
+        if item["event_id"] == show_jsonl["event_id"]
+    )
+    assert dashboard_show["verdict"] == "pass"
+    assert dashboard_show["command"] == "show"
+    assert dashboard_show["skill_name"] == skill.name
+    assert "details" not in dashboard_show
+
+    summary_result = security_summary_handler(
+        DaemonRequest(
+            method="sec.summary",
+            params={"category": "skill_ledger", "latest_limit": 10},
+        ),
+        runtime,
+    )
+    summary_show = next(
+        item
+        for item in summary_result.data["latest_events"]
+        if item["event_id"] == show_jsonl["event_id"]
+    )
+    assert summary_show["verdict"] == "pass"
+    assert summary_show["command"] == "show"
+    assert summary_show["skill_name"] == skill.name
 
 
 def test_show_findings_summary_handles_missing_fields_and_empty_findings(ws):
