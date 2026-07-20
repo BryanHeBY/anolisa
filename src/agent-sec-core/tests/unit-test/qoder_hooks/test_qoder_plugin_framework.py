@@ -110,7 +110,7 @@ _AGENT_SEC_CLI = textwrap.dedent("""\
     #!/usr/bin/env bash
     set -euo pipefail
     case "$*" in
-        "scan-pii --help"|"skill-ledger check --help")
+        "scan-pii --help"|"skill-ledger check --help"|"observability record --help")
             exit 0
             ;;
         *)
@@ -144,7 +144,14 @@ def test_hooks_json_uses_qoder_plugin_wrapper() -> None:
     hooks = json.loads((_HOOKS_DIR / "hooks.json").read_text())
 
     assert set(hooks) == {"hooks"}
-    assert set(hooks["hooks"]) == {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
+    assert set(hooks["hooks"]) == {
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+        "StopFailure",
+    }
     pre_tool = hooks["hooks"]["PreToolUse"]
     skill_ledger = next(entry for entry in pre_tool if entry["matcher"] == "Skill")
     hook = skill_ledger["hooks"][0]
