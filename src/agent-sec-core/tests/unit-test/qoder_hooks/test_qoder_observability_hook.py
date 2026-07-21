@@ -1,5 +1,6 @@
 """Unit tests for the Qoder observability command hook."""
 
+import builtins
 import importlib.util
 import io
 import json
@@ -194,12 +195,11 @@ def test_stop_maps_successful_agent_run() -> None:
     }
 
 
-def test_stop_failure_maps_error_type_and_partial_response() -> None:
+def test_stop_failure_prefers_error_details_and_maps_partial_response() -> None:
     record = _record(
         _base(
             "StopFailure",
-            error_type="rate_limit",
-            error="request failed",
+            error="rate_limit",
             error_details="rate limit exceeded",
             last_assistant_message="Partial answer",
         )
@@ -212,12 +212,47 @@ def test_stop_failure_maps_error_type_and_partial_response() -> None:
         "assistant_texts_count": 1,
         "success": False,
         "response": "Partial answer",
-        "stop_reason": "rate_limit",
+    }
+
+
+def test_stop_failure_falls_back_to_required_error_category() -> None:
+    record = _record(_base("StopFailure", error="rate_limit"))
+
+    assert record["hook"] == "after_agent_run"
+    assert record["metrics"] == {
+        "error": "rate_limit",
+        "output_kind": "empty",
+        "assistant_texts_count": 0,
+        "success": False,
+    }
+
+
+def test_stop_failure_normalizes_malformed_optional_fields() -> None:
+    record = _record(
+        _base(
+            "StopFailure",
+            error={"category": "rate_limit"},
+            error_details=["unexpected shape"],
+            last_assistant_message={"text": "unexpected shape"},
+        )
+    )
+
+    assert record["hook"] == "after_agent_run"
+    assert record["metrics"] == {
+        "error": "unknown",
+        "output_kind": "empty",
+        "assistant_texts_count": 0,
+        "success": False,
     }
 
 
 @pytest.mark.parametrize("event_name", ("BeforeModel", "AfterModel", "SessionStart"))
 def test_events_without_schema_mapping_are_skipped(event_name: str) -> None:
+    assert observability_hook._build_record(_base(event_name), dict(_CONTEXT)) is None
+
+
+@pytest.mark.parametrize("event_name", ([], {}))
+def test_malformed_event_name_is_skipped_without_raising(event_name) -> None:
     assert observability_hook._build_record(_base(event_name), dict(_CONTEXT)) is None
 
 
@@ -284,7 +319,7 @@ def test_all_six_qoder_events_build_schema_valid_records() -> None:
         ),
         (_base("Stop", last_assistant_message="done"), _CONTEXT),
         (
-            _base("StopFailure", error_type="unknown", error="failed"),
+            _base("StopFailure", error="unknown"),
             _CONTEXT,
         ),
     ]
@@ -366,7 +401,9 @@ def test_main_redacts_and_uses_host_trace_context_for_both_cli_calls(
     assert "a***@example.com" in serialized
 
 
-def test_redaction_failure_drops_raw_value_but_keeps_safe_metrics(monkeypatch) -> None:
+def test_redaction_failure_drops_raw_value_and_reports_once(
+    monkeypatch, capsys
+) -> None:
     monkeypatch.setattr(
         observability_hook,
         "_redact_text",
@@ -381,6 +418,12 @@ def test_redaction_failure_drops_raw_value_but_keeps_safe_metrics(monkeypatch) -
     assert "prompt" not in safe_record["metrics"]
     assert "user_input" not in safe_record["metrics"]
     assert safe_record["metrics"]["pii_scan_input_sha256"]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "qoder-observability-hook: PII redaction failed; sensitive metric dropped\n"
+    )
+    assert "alice@example.com" not in captured.err
 
 
 @pytest.mark.parametrize("payload", ("not-json", "[]"))
@@ -398,6 +441,77 @@ def test_invalid_input_is_fail_open_without_cli(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_unexpected_input_error_is_fail_open_without_leaking_details(
+    monkeypatch, capsys
+) -> None:
+    def fail_read():
+        raise RecursionError("alice@example.com")
+
+    monkeypatch.setattr(observability_hook, "_read_stdin_payload", fail_read)
+
+    observability_hook.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "qoder-observability-hook: unexpected RecursionError while processing unknown\n"
+    )
+    assert "alice@example.com" not in captured.err
+
+
+def test_unexpected_processing_error_is_fail_open_without_leaking_payload(
+    monkeypatch, capsys
+) -> None:
+    def fail_build(_input_data, _context):
+        raise RuntimeError("alice@example.com")
+
+    monkeypatch.setattr(observability_hook, "_build_record", fail_build)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                _base(
+                    "StopFailure",
+                    error="rate_limit",
+                    error_details="alice@example.com",
+                )
+            )
+        ),
+    )
+
+    observability_hook.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "qoder-observability-hook: unexpected RuntimeError while processing StopFailure\n"
+    )
+    assert "alice@example.com" not in captured.err
+
+
+def test_diagnostic_write_failure_is_fail_open(monkeypatch) -> None:
+    def fail_print(*_args, **_kwargs):
+        raise BrokenPipeError("stderr is closed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "print", fail_print)
+        observability_hook._diagnostic("ignored")
+
+
+def test_failure_reporting_failure_is_fail_open(monkeypatch) -> None:
+    def fail_read():
+        raise RecursionError("input failed")
+
+    def fail_event_name(_input_data):
+        raise TypeError("diagnostic failed")
+
+    monkeypatch.setattr(observability_hook, "_read_stdin_payload", fail_read)
+    monkeypatch.setattr(observability_hook, "_diagnostic_event_name", fail_event_name)
+
+    observability_hook.main()
 
 
 def test_oversized_input_is_diagnosed_without_leaking_payload(

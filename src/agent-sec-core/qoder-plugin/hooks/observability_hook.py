@@ -57,7 +57,10 @@ _DROP = object()
 
 def _diagnostic(message: str) -> None:
     """Write a payload-free diagnostic without affecting Qoder execution."""
-    print(f"qoder-observability-hook: {message}", file=sys.stderr)
+    try:
+        print(f"qoder-observability-hook: {message}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - diagnostics must preserve fail-open behavior
+        pass
 
 
 def _read_stdin_payload() -> str | bytes | None:
@@ -303,7 +306,11 @@ def _build_stop_failure(
     """Map ``StopFailure`` to a failed ``after_agent_run`` record."""
     response = input_data.get("last_assistant_message", "")
     has_text = isinstance(response, str) and bool(response)
-    error = input_data.get("error_details") or input_data.get("error") or "unknown"
+    error_details = _non_empty_string(input_data.get("error_details"))
+    error_category = _non_empty_string(input_data.get("error"))
+    # The required error category identifies an API failure, not a model stop
+    # reason. Use it only when Qoder omits the optional human-readable details.
+    error = error_details or error_category or "unknown"
     metrics: dict[str, Any] = {
         "error": error,
         "output_kind": "text" if has_text else "empty",
@@ -312,9 +319,6 @@ def _build_stop_failure(
     }
     if has_text:
         metrics["response"] = response
-    error_type = _non_empty_string(input_data.get("error_type"))
-    if error_type is not None:
-        metrics["stop_reason"] = error_type
     return _base_record(
         context,
         hook="after_agent_run",
@@ -339,7 +343,10 @@ def _build_record(
     """Map one supported Qoder payload to an observability record."""
     if not isinstance(input_data, dict):
         return None
-    builder = _BUILDERS.get(input_data.get("hook_event_name"))
+    event_name = _non_empty_string(input_data.get("hook_event_name"))
+    if event_name is None:
+        return None
+    builder = _BUILDERS.get(event_name)
     if builder is None:
         return None
     resolved = trace_context(input_data) if context is None else context
@@ -350,8 +357,19 @@ def _diagnostic_event_name(input_data: Any) -> str:
     """Return only a trusted event name for diagnostic output."""
     if not isinstance(input_data, dict):
         return "unknown"
-    event_name = input_data.get("hook_event_name")
+    event_name = _non_empty_string(input_data.get("hook_event_name"))
     return event_name if event_name in _BUILDERS else "unknown"
+
+
+def _unexpected_failure_diagnostic(exc: Exception, input_data: Any) -> None:
+    """Report an unexpected failure without allowing reporting to raise."""
+    try:
+        _diagnostic(
+            f"unexpected {type(exc).__name__} while processing "
+            f"{_diagnostic_event_name(input_data)}"
+        )
+    except Exception:  # noqa: BLE001 - failure reporting is the final hook boundary
+        pass
 
 
 def _process_text(value: Any) -> str:
@@ -382,19 +400,15 @@ def _redact_text(text: str, context: dict[str, str]) -> str | None:
             timeout=_CLI_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError, TimeoutError):
-        return None
-    if result.returncode != 0:
-        return None
-
-    try:
+        if result.returncode != 0:
+            return None
         data = json.loads(result.stdout)
-    except (json.JSONDecodeError, TypeError, ValueError):
+        if not isinstance(data, dict):
+            return None
+        redacted = data.get("redacted_text")
+        return redacted if isinstance(redacted, str) else None
+    except Exception:  # noqa: BLE001 - any redaction failure must remain fail-open
         return None
-    if not isinstance(data, dict):
-        return None
-    redacted = data.get("redacted_text")
-    return redacted if isinstance(redacted, str) else None
 
 
 def _redact_sensitive_value(
@@ -420,6 +434,8 @@ def _redact_sensitive_value(
                 safe_value = json.loads(redacted)
             except (json.JSONDecodeError, TypeError, ValueError):
                 safe_value = redacted
+    if safe_value is _DROP:
+        _diagnostic("PII redaction failed; sensitive metric dropped")
     cache[cache_key] = safe_value
     return safe_value
 
@@ -504,26 +520,24 @@ def _record_observability(record: dict[str, Any], context: dict[str, str]) -> No
 
 def main() -> None:
     """Read one Qoder hook event and record it without affecting execution."""
+    input_data: Any = None
     try:
-        payload = _read_stdin_payload()
-        if payload is None:
+        try:
+            payload = _read_stdin_payload()
+            if payload is None:
+                return
+            input_data = json.loads(payload)
+        except (json.JSONDecodeError, EOFError, OSError, TypeError, ValueError):
             return
-        input_data = json.loads(payload)
-    except (json.JSONDecodeError, EOFError, OSError, TypeError, ValueError):
-        return
-    if not isinstance(input_data, dict):
-        return
+        if not isinstance(input_data, dict):
+            return
 
-    try:
         context = trace_context(input_data)
         record = _build_record(input_data, context)
         if record is not None:
             _record_observability(record, context)
     except Exception as exc:  # noqa: BLE001 - hook boundary must remain fail-open
-        _diagnostic(
-            f"unexpected {type(exc).__name__} while processing "
-            f"{_diagnostic_event_name(input_data)}"
-        )
+        _unexpected_failure_diagnostic(exc, input_data)
 
 
 if __name__ == "__main__":
