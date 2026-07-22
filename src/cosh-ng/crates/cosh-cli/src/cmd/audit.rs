@@ -11,7 +11,9 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::json;
 
-use cosh_platform::audit::{self, parse_action_string, LoadedPolicy, ParseError};
+use cosh_platform::audit::{
+    self, parse_action_string, split_compound_command, LoadedPolicy, ParseError,
+};
 use cosh_platform::detect::Distro;
 use cosh_types::audit::{Action, ActionSubsystem, Decision, LogEntry, LogSource, Outcome, Policy};
 use cosh_types::error::{CoshError, ErrorCode};
@@ -140,7 +142,7 @@ struct LogOutput {
 
 enum BuiltAction {
     Structured(Action),
-    ParseDeny { reason: String, raw: String },
+    ParseDeny { error: ParseError, raw: String },
     Malformed(String),
 }
 
@@ -151,7 +153,7 @@ fn build_action(args: &CheckArgs) -> BuiltAction {
         return match parse_action_string(s) {
             Ok(a) => BuiltAction::Structured(a),
             Err(e) => BuiltAction::ParseDeny {
-                reason: format!("{}", e),
+                error: e,
                 raw: s.to_string(),
             },
         };
@@ -203,13 +205,53 @@ fn run_check(args: CheckArgs, distro: &Distro, start: Instant) -> i32 {
             let (loaded, load_warning) = LoadedPolicy::load();
             run_check_evaluate(action, &loaded, load_warning, distro, start)
         }
-        BuiltAction::ParseDeny { reason, raw } => {
-            // Semantic parse failure → produce Deny with reason "parse failed".
-            // The decision is still recorded (audit-design.md §4 last bullet).
+        BuiltAction::ParseDeny { error, raw } => {
             let (loaded, load_warning) = LoadedPolicy::load();
+
+            // If parse failed due to shell metacharacters, try evaluating each segment
+            if matches!(
+                error,
+                ParseError::ContainsShellMeta(_) | ParseError::ContainsControlByte
+            ) {
+                let segments = split_compound_command(&raw);
+
+                // Evaluate each segment and look for a real Deny decision
+                for segment in segments {
+                    if let Ok(mut action) = parse_action_string(&segment) {
+                        let decision = audit::evaluate(&action, &loaded);
+                        if decision.outcome == Outcome::Deny && decision.matched_rule.is_some() {
+                            // Preserve original compound command in audit log
+                            action.raw = Some(raw.clone());
+                            match audit::record_decision(action, &decision, LogSource::Cli) {
+                                Ok(()) => {
+                                    return print_success(
+                                        decision,
+                                        meta_with_optional_warning(
+                                            distro,
+                                            start,
+                                            load_warning.as_deref(),
+                                        ),
+                                    )
+                                }
+                                Err(mut e) => {
+                                    if let Ok(v) = serde_json::to_value(&decision) {
+                                        e = e.with_details(json!({ "decision": v }));
+                                    }
+                                    return print_failure(
+                                        e,
+                                        build_meta("audit", distro, start, false),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fall back to synthetic Deny
             let decision = Decision {
                 outcome: Outcome::Deny,
-                reason: format!("parse failed: {}", reason),
+                reason: format!("parse failed: {}", error),
                 matched_rule: None,
                 policy_version: loaded.policy_version.clone(),
             };
@@ -467,9 +509,36 @@ fn run_policy_explain(action_str: String, distro: &Distro, start: Instant) -> i3
                 );
             }
             other => {
-                // Show the deny reason explicitly (this is what would be
-                // recorded for a real `check` call).
                 let (loaded, load_warning) = LoadedPolicy::load();
+
+                // Same as run_check: if parse failed due to shell metacharacters,
+                // try evaluating each segment to find a real Deny decision.
+                if matches!(
+                    other,
+                    ParseError::ContainsShellMeta(_) | ParseError::ContainsControlByte
+                ) {
+                    let segments = split_compound_command(&action_str);
+
+                    for segment in segments {
+                        if let Ok(mut action) = parse_action_string(&segment) {
+                            let decision = audit::evaluate(&action, &loaded);
+                            if decision.outcome == Outcome::Deny && decision.matched_rule.is_some()
+                            {
+                                action.raw = Some(action_str.clone());
+                                return print_success(
+                                    PolicyExplainResult { action, decision },
+                                    meta_with_optional_warning(
+                                        distro,
+                                        start,
+                                        load_warning.as_deref(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Fall back to synthetic Deny
                 let decision = Decision {
                     outcome: Outcome::Deny,
                     reason: format!("parse failed: {}", other),

