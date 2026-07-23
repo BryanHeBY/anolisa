@@ -34,7 +34,15 @@ pub(crate) fn render_slash_actions<W: Write>(
         }
 
         clear_shell_prompt_line(output)?;
-        let restore_prompt = render_slash_command(command, event, blocks, adapter, state, output)?;
+        let restore_prompt = render_slash_command(
+            command,
+            event,
+            blocks,
+            adapter,
+            state,
+            event.cwd.as_deref(),
+            output,
+        )?;
         if restore_prompt {
             write_shell_prompt(state, output)?;
         }
