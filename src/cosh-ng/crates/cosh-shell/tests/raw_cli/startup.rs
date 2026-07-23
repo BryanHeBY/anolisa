@@ -2,6 +2,94 @@ use super::*;
 use ratatui::text::Span;
 
 #[test]
+fn help_flag_writes_to_stdout_not_stderr() {
+    // POSIX/GNU convention: --help output goes to stdout, not stderr.
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn cosh-shell --help");
+
+    assert!(output.status.success(), "--help should exit 0");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("Usage: cosh-shell"),
+        "--help text should be on stdout, got stdout={:?}",
+        stdout
+    );
+    assert!(
+        stderr.is_empty(),
+        "--help should not write to stderr, got stderr={:?}",
+        stderr
+    );
+}
+
+#[test]
+fn version_flag_writes_to_stdout_not_stderr() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn cosh-shell --version");
+
+    assert!(output.status.success(), "--version should exit 0");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("cosh-shell"),
+        "--version text should be on stdout, got stdout={:?}",
+        stdout
+    );
+    assert!(
+        stderr.is_empty(),
+        "--version should not write to stderr, got stderr={:?}",
+        stderr
+    );
+}
+
+#[test]
+fn diagnostics_export_help_writes_to_stdout_not_stderr() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .args(["diagnostics", "export", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn cosh-shell diagnostics export --help");
+
+    assert!(
+        output.status.success(),
+        "diagnostics export --help should exit 0"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("Usage:"),
+        "diagnostics export --help should write to stdout, got stdout={:?}",
+        stdout
+    );
+    assert!(
+        stderr.is_empty(),
+        "diagnostics export --help should not write to stderr, got stderr={:?}",
+        stderr
+    );
+}
+
+#[test]
 fn raw_cli_startup_banner_renders_when_enabled() {
     let output = run_raw_cli_with_env(
         "fake",
