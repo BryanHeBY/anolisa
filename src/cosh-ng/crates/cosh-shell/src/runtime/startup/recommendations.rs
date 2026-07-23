@@ -68,7 +68,7 @@ pub(crate) fn render_startup_banner<W: Write>(
         if !health_uses_startup_row(report) {
             let mut facts = report.clone();
             facts.try_items.clear();
-            renderer.write_health_banner(output, HealthBannerModel { report: &facts })?;
+            renderer.write_health_banner(output, HealthBannerModel::new(&facts))?;
             writeln!(output)?;
         }
         state.startup_health.rendered = true;
@@ -207,7 +207,7 @@ pub(crate) fn render_startup_health_banner<W: Write>(
     if show_health {
         let mut facts = report.clone();
         facts.try_items.clear();
-        renderer.write_health_banner(output, HealthBannerModel { report: &facts })?;
+        renderer.write_health_banner(output, HealthBannerModel::new(&facts))?;
         writeln!(output)?;
     }
     write_startup_suggestion_card(
