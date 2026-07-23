@@ -70,9 +70,42 @@ fn systemctl_query_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Spawn `cosh-cli` with audit state pinned to a sandbox: redirect the log,
-/// isolate user policy discovery, and clear any explicit policy override.
-/// Use this for audit tests so they neither read nor write the user's state.
+/// Check whether the system package manager binary is available.
+/// Returns `(binary_name, true)` if available, or `("unknown", false)` if none works.
+///
+/// Note: this only checks that the binary exists and responds to `--version`.
+/// It does NOT verify that the package repositories are accessible. In sandboxed
+/// or container environments the binary may exist but repo queries may fail —
+/// tests that depend on actual repo access should check the command exit status
+/// and skip gracefully rather than asserting success unconditionally.
+fn pkg_manager_available() -> (&'static str, bool) {
+    for (name, args) in [
+        ("dnf", vec!["--version"]),
+        ("apt-get", vec!["--version"]),
+        ("zypper", vec!["--version"]),
+        ("brew", vec!["--version"]),
+    ] {
+        if Command::new(name)
+            .args(&args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            return (
+                match name {
+                    "apt-get" => "apt",
+                    other => other,
+                },
+                true,
+            );
+        }
+    }
+    ("unknown", false)
+}
+
+/// Spawn `cosh-cli` with audit env vars pinned to a sandbox: log redirected to
+/// `audit_log` and any external `COSH_AUDIT_POLICY` cleared so the built-in
+/// `balanced` preset is used. Use this for any test that exercises the
+/// audit subsystem so it doesn't pollute the user's real audit log.
 fn cosh_bin_with_audit_sandbox(audit_log: &Path) -> Command {
     let mut cmd = cosh_bin();
     cmd.env("COSH_AUDIT_LOG", audit_log);
@@ -1062,32 +1095,85 @@ fn test_pkg_list_json_envelope() {
 
 #[test]
 fn test_pkg_install_dry_run_json_envelope() {
+    let (_, available) = pkg_manager_available();
+    if !available {
+        eprintln!("skipping: no working package manager found");
+        return;
+    }
+    // dry-run now validates package existence; use "bash" which is universally available.
     let output = cosh_bin()
-        .args(["pkg", "install", "--dry-run", "nginx"])
+        .args(["pkg", "install", "--dry-run", "bash"])
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "dry-run install of 'bash' should succeed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
     assert_eq!(json["ok"], true);
-    assert_eq!(json["data"]["package"], "nginx");
-    assert_eq!(json["data"]["version"], "(dry-run)");
+    assert_eq!(json["data"]["package"], "bash");
+    assert_eq!(json["meta"]["subsystem"], "pkg");
+    assert_eq!(json["meta"]["dry_run"], true);
+}
+
+#[test]
+fn test_pkg_install_dry_run_nonexistent_fails() {
+    let (_, available) = pkg_manager_available();
+    if !available {
+        eprintln!("skipping: no working package manager found");
+        return;
+    }
+    let output = cosh_bin()
+        .args(["pkg", "install", "--dry-run", "no-such-pkg-xyz-12345"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "dry-run install of a nonexistent package should fail"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("not found"),
+        "error message should mention 'not found': {}",
+        json["error"]["message"]
+    );
     assert_eq!(json["meta"]["subsystem"], "pkg");
     assert_eq!(json["meta"]["dry_run"], true);
 }
 
 #[test]
 fn test_pkg_remove_dry_run_json_envelope() {
+    let (_, available) = pkg_manager_available();
+    if !available {
+        eprintln!("skipping: no working package manager found");
+        return;
+    }
+    // dry-run now validates the package is installed; use "bash" which is always installed.
     let output = cosh_bin()
-        .args(["pkg", "remove", "--dry-run", "nginx"])
+        .args(["pkg", "remove", "--dry-run", "bash"])
         .output()
         .unwrap();
 
-    // dry-run remove always succeeds (even if pkg not installed)
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "dry-run remove of 'bash' should succeed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -1095,6 +1181,31 @@ fn test_pkg_remove_dry_run_json_envelope() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["meta"]["dry_run"], true);
     assert_eq!(json["meta"]["subsystem"], "pkg");
+}
+
+#[test]
+fn test_pkg_remove_dry_run_nonexistent_fails() {
+    let (_, available) = pkg_manager_available();
+    if !available {
+        eprintln!("skipping: no working package manager found");
+        return;
+    }
+    let output = cosh_bin()
+        .args(["pkg", "remove", "--dry-run", "no-such-pkg-xyz-12345"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "dry-run remove of a nonexistent package should fail"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["meta"]["subsystem"], "pkg");
+    assert_eq!(json["meta"]["dry_run"], true);
 }
 
 // --- svc: integration tests ---
