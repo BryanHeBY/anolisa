@@ -67,6 +67,30 @@ fn bash_history_file_marker_is_native_only() {
 }
 
 #[test]
+fn bash_preexec_marker_skips_completion_with_comp_type_guard() {
+    let script = bash_marker_script();
+
+    // Locate the start of _cosh_preexec_marker to ensure the guard is at the
+    // function entry, not somewhere later in the script.
+    let fn_start = script
+        .find("_cosh_preexec_marker() {")
+        .expect("_cosh_preexec_marker should exist");
+    let fn_body = &script[fn_start..];
+    let guard = fn_body
+        .find("if [[ -n \"${COMP_TYPE:-}\" && ( -n \"${COMP_LINE:-}\" || -n \"${COMP_POINT:-}\" ) ]]; then")
+        .expect("completion guard with COMP_TYPE should be present");
+
+    // Guard must appear before the first heavy operation (trap snapshot).
+    let trap_snapshot = fn_body
+        .find("trap_snapshot_file")
+        .expect("trap snapshot should exist");
+    assert!(
+        guard < trap_snapshot,
+        "completion guard should precede heavy trap snapshot logic"
+    );
+}
+
+#[test]
 fn parser_clean_strips_zsh_bracketed_paste_and_applies_backspace() {
     let mut parser = parser_for_test("clean-zsh-control");
     let input =
