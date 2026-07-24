@@ -379,13 +379,27 @@ _cosh_preexec_marker() {
     eval "$active_debug_trap" 2>/dev/null || true
     return 0
   fi
+
+  local history_entry
+  local history_no
+  local command
+  history_entry="$(_cosh_history_entry)"
+  history_no="$(_cosh_history_no "$history_entry")"
+  command="$(_cosh_history_command_from_entry "$history_entry")"
+
+  if [[ "${_COSH_AT_PROMPT:-0}" != 1 ]]; then
+    # Heuristic: when cosh-shell restores the prompt by replaying it directly
+    # (instead of letting bash run PROMPT_COMMAND), _COSH_AT_PROMPT stays 0.
+    # In that case the user is still effectively at a prompt. If the current
+    # command starts with '/' it is either a slash command or an absolute path.
+    # Either way we treat it as prompt-level input so the normal intercept/fallback
+    # logic (which uses _cosh_should_intercept_unknown) decides what to do.
+    if [[ -n "${BASH_COMMAND:-}" && "${BASH_COMMAND:-}" == /* ]]; then
+      _COSH_AT_PROMPT=1
+    fi
+  fi
+
   if [[ "${_COSH_AT_PROMPT:-0}" == 1 ]]; then
-    local history_entry
-    local history_no
-    local command
-    history_entry="$(_cosh_history_entry)"
-    history_no="$(_cosh_history_no "$history_entry")"
-    command="$(_cosh_history_command_from_entry "$history_entry")"
     local compact_command="${command//[[:space:]]/}"
     local compact_bash_command="${BASH_COMMAND//[[:space:]]/}"
     if [[ -n "${BASH_COMMAND:-}" && ( -z "$compact_command" || ( "$compact_bash_command" != *"$compact_command"* && "$compact_command" != *"$compact_bash_command"* ) ) ]]; then
@@ -398,6 +412,9 @@ _cosh_preexec_marker() {
       fi
       local fallback_reason
       if fallback_reason="$(_cosh_should_intercept_unknown "$fallback_first_word" "$fallback_command" "$fallback_argc")"; then
+        # Clear the echoed command line so the slash command panel can render
+        # in its place, avoiding visual duplication of the command text.
+        printf '\r\033[2K'
         _cosh_emit_intercept_marker "$fallback_command" "$fallback_reason"
         _COSH_AT_PROMPT=0
         eval "$active_debug_trap" 2>/dev/null || true
@@ -426,6 +443,9 @@ _cosh_preexec_marker() {
         fi
         local reason
         if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
+          # Clear the echoed command line so the slash command panel can render
+          # in its place, avoiding visual duplication of the command text.
+          printf '\r\033[2K'
           _cosh_emit_intercept_marker "$command" "$reason"
           _COSH_AT_PROMPT=0
           eval "$active_debug_trap" 2>/dev/null || true
