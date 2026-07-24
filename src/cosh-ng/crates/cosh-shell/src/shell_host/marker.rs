@@ -348,6 +348,15 @@ _cosh_preexec_marker() {
   if [[ "${_COSH_SNAPSHOT_DEBUG_TRAP:-0}" == 1 ]]; then
     return 0
   fi
+  # Skip during completion — with extdebug the DEBUG trap fires for every
+  # internal command bash runs during glob expansion / completion, and the
+  # heavy operations below (date subprocess, file I/O) cause noticeable lag.
+  # Require COMP_TYPE (only set by bash during programmable completion) in
+  # addition to COMP_LINE/COMP_POINT so that residual COMP_LINE values do
+  # not permanently silence preexec markers for real commands.
+  if [[ -n "${COMP_TYPE:-}" && ( -n "${COMP_LINE:-}" || -n "${COMP_POINT:-}" ) ]]; then
+    return 0
+  fi
   local active_debug_trap="${_COSH_ACTIVE_DEBUG_TRAP:-}"
   if [[ "${_COSH_IN_PROMPT_COMMAND:-0}" != 1 && "${_COSH_DEBUG_TRAP_MAY_CHANGE:-0}" == 1 ]]; then
     local trap_snapshot_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.debug-trap"
