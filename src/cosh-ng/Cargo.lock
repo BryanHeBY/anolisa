@@ -646,6 +646,7 @@ version = "0.13.0"
 dependencies = [
  "agent-client-protocol",
  "clap",
+ "futures",
  "nix 0.29.0",
  "serde",
  "serde_json",

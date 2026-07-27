@@ -11,6 +11,7 @@
 
 mod bridge;
 mod protocol;
+mod session;
 
 use clap::{Parser, Subcommand};
 

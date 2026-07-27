@@ -4,22 +4,22 @@
 //! process group spawn, kill on drop, SIGTERM then SIGKILL on shutdown, and
 //! stdin EOF from the shell always takes the agent down with the bridge.
 //!
-//! ACP session wiring (session/new, prompt streaming, terminal delegation) is
-//! layered on top of this skeleton in a follow-up change; until then every
-//! post-handshake message except `shutdown` is answered with a recoverable
-//! `agent_failed` so cosh-shell can degrade cleanly.
+//! After the handshake the agent's stdio moves into the ACP SDK transport and
+//! `session::drive` translates between the shell JSONL protocol and ACP; the
+//! child process handle itself stays here so custody survives SDK shutdown.
 
 use std::io::Write;
 use std::process::Stdio;
 use std::time::Duration;
 
+use agent_client_protocol::Client;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::protocol::{
-    parse_shell_message, AgentCapabilities, BridgeMessage, InitializeParams, ShellMessage,
-    PROTOCOL_VERSION,
+    parse_shell_message, BridgeMessage, InitializeParams, ShellMessage, PROTOCOL_VERSION,
 };
+use crate::session;
 
 /// Grace period between SIGTERM and SIGKILL when stopping the agent.
 const AGENT_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
@@ -90,7 +90,7 @@ async fn stop_agent(child: &mut Child) {
 }
 
 /// Writes one protocol message as a JSONL line on stdout.
-fn emit(message: &BridgeMessage) {
+pub(crate) fn emit(message: &BridgeMessage) {
     match serde_json::to_string(message) {
         Ok(line) => {
             let mut stdout = std::io::stdout().lock();
@@ -146,81 +146,41 @@ pub async fn run() -> i32 {
     };
     tracing::info!(agent = %params.agent.name, "agent process started");
 
-    // ACP initialize round-trip is wired in the follow-up change; the
-    // skeleton reports default capabilities so cosh-shell can gate features
-    // conservatively.
-    emit(&BridgeMessage::Initialized {
-        protocol_version: PROTOCOL_VERSION,
-        agent_capabilities: AgentCapabilities::default(),
-        auth_methods: Vec::new(),
-    });
-
-    let exit_code = loop {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => {
-                tracing::info!("shell stream closed; stopping agent");
-                break 0;
-            }
-            Err(error) => {
-                tracing::warn!("shell stream error: {error}");
-                break 1;
-            }
-        };
-        match parse_shell_message(&line) {
-            Ok(ShellMessage::Shutdown) => {
-                tracing::info!("shutdown requested");
-                break 0;
-            }
-            Ok(ShellMessage::Initialize(_)) => {
-                emit(&BridgeMessage::protocol_error(
-                    "duplicate initialize".to_string(),
-                ));
-                break 1;
-            }
-            Ok(message) => {
-                // Session wiring lands in the follow-up change; answer with a
-                // recoverable failure instead of silently dropping requests.
-                // Only the variant name is logged: AuthResponse values may
-                // carry secrets (ADR-012).
-                tracing::debug!(
-                    message = message_variant(&message),
-                    "session message before ACP wiring"
-                );
-                emit(&BridgeMessage::AgentFailed {
-                    code: "not_implemented".to_string(),
-                    message: "ACP session wiring is not implemented yet".to_string(),
-                    recoverable: true,
-                    hint: None,
-                });
-            }
-            Err(error) => {
-                tracing::warn!("ignoring malformed shell message: {error}");
-            }
+    // Only the pipes move into the SDK transport; the child handle stays here
+    // so custody (SIGTERM grace, kill on drop) survives SDK shutdown.
+    let (Some(agent_stdin), Some(agent_stdout)) = (agent.stdin.take(), agent.stdout.take()) else {
+        emit(&BridgeMessage::AgentFailed {
+            code: "agent_spawn_failed".to_string(),
+            message: "agent process has no piped stdio".to_string(),
+            recoverable: true,
+            hint: None,
+        });
+        stop_agent(&mut agent).await;
+        return 1;
+    };
+    let transport = session::agent_transport(agent_stdin, agent_stdout);
+    let result = Client
+        .builder()
+        .name("cosh-acp")
+        .connect_with(transport, async move |cx| {
+            session::drive(cx, params, lines).await
+        })
+        .await;
+    let exit_code = match result {
+        Ok(code) => code,
+        Err(error) => {
+            emit(&BridgeMessage::AgentFailed {
+                code: "acp_connection_failed".to_string(),
+                message: format!("ACP connection failed: {error}"),
+                recoverable: true,
+                hint: None,
+            });
+            1
         }
     };
 
     stop_agent(&mut agent).await;
     exit_code
-}
-
-/// Variant name for logging; never includes payload fields because auth
-/// responses may carry secret values (ADR-012).
-fn message_variant(message: &ShellMessage) -> &'static str {
-    match message {
-        ShellMessage::Initialize(_) => "initialize",
-        ShellMessage::SessionNew { .. } => "session_new",
-        ShellMessage::SessionLoad { .. } => "session_load",
-        ShellMessage::Prompt { .. } => "prompt",
-        ShellMessage::Cancel { .. } => "cancel",
-        ShellMessage::PermissionResponse { .. } => "permission_response",
-        ShellMessage::AuthResponse { .. } => "auth_response",
-        ShellMessage::TerminalCreated { .. } => "terminal_created",
-        ShellMessage::TerminalOutput { .. } => "terminal_output",
-        ShellMessage::TerminalExit { .. } => "terminal_exit",
-        ShellMessage::TerminalDenied { .. } => "terminal_denied",
-        ShellMessage::Shutdown => "shutdown",
-    }
 }
 
 #[cfg(test)]
