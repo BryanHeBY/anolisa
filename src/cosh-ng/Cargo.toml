@@ -5,6 +5,7 @@ members = [
     "crates/cosh-cli",
     "crates/cosh-core",
     "crates/cosh-shell",
+    "crates/cosh-acp",
 ]
 resolver = "2"
 
