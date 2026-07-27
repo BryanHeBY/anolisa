@@ -108,7 +108,8 @@ fn env_credentials_present(kind: crate::adapter::AdapterKind, provider_type: &st
     use crate::adapter::AdapterKind;
     match kind {
         AdapterKind::Fake => true,
-        AdapterKind::CoshCore => match provider_type {
+        // ACP defaults to the cosh-core agent, so mirror CoshCore (ADR-012).
+        AdapterKind::CoshCore | AdapterKind::Acp => match provider_type {
             "aliyun" => {
                 env_non_empty("ALIBABA_CLOUD_ACCESS_KEY_ID")
                     && env_non_empty("ALIBABA_CLOUD_ACCESS_KEY_SECRET")
@@ -172,7 +173,7 @@ fn config_credentials_present(kind: crate::adapter::AdapterKind) -> bool {
     let provider_type = field("type").unwrap_or("generic");
     match kind {
         AdapterKind::Fake => true,
-        AdapterKind::CoshCore => match provider_type {
+        AdapterKind::CoshCore | AdapterKind::Acp => match provider_type {
             "aliyun" => {
                 field("auth_source") == Some("ecs_ram_role")
                     || (field("access_key_id").is_some_and(config_value_present)

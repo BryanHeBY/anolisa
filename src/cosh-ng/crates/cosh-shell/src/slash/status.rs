@@ -320,6 +320,14 @@ fn runtime_identity(adapter: &AdapterInstance, state: &InlineState) -> RuntimeId
                 },
             }
         }
+        AdapterInstance::Acp(acp) => RuntimeIdentity {
+            provider_id: Some(format!("acp:{}", acp.agent_name)),
+            provider_type: Some("ACP".to_string()),
+            model: observed_model,
+            // Agent-side identity details arrive with the capability
+            // handshake in later stages (ADR-011).
+            provider_details_available: false,
+        },
     }
 }
 

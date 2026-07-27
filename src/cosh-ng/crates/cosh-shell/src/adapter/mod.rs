@@ -7,6 +7,7 @@ use crate::types::{AgentEvent, AgentRequest};
 
 const QUESTION_ANSWER_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 
+mod acp;
 mod claude;
 mod claude_stream;
 mod claude_stream_extract;
@@ -31,6 +32,7 @@ mod prompt_tests;
 mod qwen;
 mod qwen_stream;
 
+pub use acp::AcpAdapter;
 pub use claude::ClaudeCodeAdapter;
 use claude_stream::ClaudeStreamParser;
 pub use control_protocol::*;
@@ -300,6 +302,7 @@ pub enum AdapterKind {
     ClaudeCode,
     QwenCli,
     CoshCore,
+    Acp,
 }
 
 impl AdapterKind {
@@ -309,6 +312,7 @@ impl AdapterKind {
             "claude" | "claude-code" => Some(Self::ClaudeCode),
             "co" | "qwen" | "qwen-cli" => Some(Self::QwenCli),
             "cosh-core" | "core" => Some(Self::CoshCore),
+            "acp" => Some(Self::Acp),
             _ => None,
         }
     }
@@ -320,6 +324,7 @@ pub enum AdapterInstance {
     ClaudeCode(ClaudeCodeAdapter),
     QwenCli(QwenCliAdapter),
     CoshCore(CoshCoreAdapter),
+    Acp(AcpAdapter),
 }
 
 impl AgentAdapter for AdapterInstance {
@@ -329,6 +334,7 @@ impl AgentAdapter for AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.name(),
             Self::QwenCli(adapter) => adapter.name(),
             Self::CoshCore(adapter) => adapter.name(),
+            Self::Acp(adapter) => adapter.name(),
         }
     }
 
@@ -338,6 +344,7 @@ impl AgentAdapter for AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.capabilities(),
             Self::QwenCli(adapter) => adapter.capabilities(),
             Self::CoshCore(adapter) => adapter.capabilities(),
+            Self::Acp(adapter) => adapter.capabilities(),
         }
     }
 
@@ -347,6 +354,7 @@ impl AgentAdapter for AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.run(request),
             Self::QwenCli(adapter) => adapter.run(request),
             Self::CoshCore(adapter) => adapter.run(request),
+            Self::Acp(adapter) => adapter.run(request),
         }
     }
 
@@ -360,6 +368,7 @@ impl AgentAdapter for AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.run_stream(request, sink),
             Self::QwenCli(adapter) => adapter.run_stream(request, sink),
             Self::CoshCore(adapter) => adapter.run_stream(request, sink),
+            Self::Acp(adapter) => adapter.run_stream(request, sink),
         }
     }
 }
@@ -374,6 +383,7 @@ impl AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.start_cancellable(request, mode),
             Self::QwenCli(adapter) => adapter.start_cancellable(request, mode),
             Self::CoshCore(adapter) => adapter.start_cancellable(request, mode),
+            Self::Acp(adapter) => adapter.start_cancellable(request, mode),
             _ => start_threaded_adapter_run(self.clone(), request),
         }
     }
@@ -383,6 +393,9 @@ impl AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
             Self::QwenCli(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
             Self::CoshCore(adapter) => adapter.committed_session_id(),
+            // Session commit tracking for the ACP bridge lands in S4/S5
+            // (shell-side session ledger, ADR-011).
+            Self::Acp(_) => None,
             Self::Fake(_) => None,
         }
     }
@@ -395,6 +408,9 @@ impl AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.start_fresh_session(),
             Self::QwenCli(adapter) => adapter.start_fresh_session(),
             Self::CoshCore(adapter) => adapter.start_fresh_session(),
+            // The ACP adapter binds sessions per turn only until the ledger
+            // lands; there is nothing to detach yet.
+            Self::Acp(_) => FreshSessionOutcome::Unsupported,
             // The fake adapter never resumes a provider session, so there is
             // nothing to detach; report unsupported rather than faking success.
             Self::Fake(_) => FreshSessionOutcome::Unsupported,
@@ -406,6 +422,7 @@ impl AdapterInstance {
             Self::ClaudeCode(adapter) => Some(adapter.program.clone()),
             Self::QwenCli(adapter) => Some(adapter.program.clone()),
             Self::CoshCore(adapter) => Some(adapter.program.clone()),
+            Self::Acp(adapter) => Some(adapter.program.clone()),
             Self::Fake(_) => None,
         }
     }
@@ -459,6 +476,7 @@ pub fn adapter_for_kind(kind: AdapterKind) -> AdapterInstance {
         AdapterKind::ClaudeCode => AdapterInstance::ClaudeCode(ClaudeCodeAdapter::default()),
         AdapterKind::QwenCli => AdapterInstance::QwenCli(QwenCliAdapter::default()),
         AdapterKind::CoshCore => AdapterInstance::CoshCore(CoshCoreAdapter::default()),
+        AdapterKind::Acp => AdapterInstance::Acp(AcpAdapter::default()),
     }
 }
 

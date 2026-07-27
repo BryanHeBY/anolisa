@@ -3,7 +3,7 @@
 mod implementation;
 
 pub use implementation::{
-    adapter_for_kind, AdapterError, AdapterInstance, AdapterKind, AgentAdapter,
+    adapter_for_kind, AcpAdapter, AdapterError, AdapterInstance, AdapterKind, AgentAdapter,
     AgentBackendCapabilities, AgentRunHandle, AgentRunPoll, ApprovalDecision, ApprovalResponse,
     AuthFieldInfo, AuthProviderInfo, AuthResponse, ClaudeCodeAdapter, ControlProtocolCapabilities,
     CoshCoreAdapter, FakeAgentAdapter, HostExecutedShellMetadata, HostExecutedShellResult,
