@@ -276,7 +276,7 @@ fn without_a_prefetched_challenge_prepare_still_asks_the_registry() {
     let error = apply_aliyun_prepare(&adapter_without_registry(), &mut auth)
         .expect_err("registry is consulted when nothing was prefetched");
 
-    assert!(error.contains("cosh-core"), "{error}");
+    assert!(error.contains("no registry"), "{error}");
     assert_eq!(auth.phase, AuthPhase::ManagingProviders);
 }
 
