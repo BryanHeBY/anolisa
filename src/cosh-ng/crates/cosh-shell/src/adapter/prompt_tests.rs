@@ -1168,6 +1168,9 @@ fn bound_failure_request(failure_class: &str, user_input: Option<&str>) -> Agent
 
 #[test]
 fn bound_insight_prompt_redacts_runtime_cwd_and_closes_total_context_budget() {
+    // Hold the shared env lock: doctor env-collector tests swap HOME to
+    // temp dirs in parallel, which would break the redaction assertion.
+    let _guard = crate::diagnostics::test_env::env_guard();
     let mut request = bound_failure_request("BuildOrTestFailure", None);
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/tester".to_string());
     request.command_block.cwd = format!("{home}/private/project");
