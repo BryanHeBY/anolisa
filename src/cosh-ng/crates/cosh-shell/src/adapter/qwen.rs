@@ -134,6 +134,7 @@ impl AgentAdapter for QwenCliAdapter {
             user_question: true,
             cancellable: true,
             control_protocol: true,
+            registry: false,
         }
     }
 

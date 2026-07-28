@@ -370,6 +370,7 @@ impl AgentAdapter for CoshCoreAdapter {
             user_question: true,
             cancellable: true,
             control_protocol: true,
+            registry: true,
         }
     }
 

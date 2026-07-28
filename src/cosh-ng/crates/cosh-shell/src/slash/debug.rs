@@ -175,7 +175,9 @@ fn evidence_tool_registered(adapter: &AdapterInstance, state: &InlineState) -> b
                 .control_capabilities()
                 .can_handle_shell_evidence_tool
         })
-        .unwrap_or_else(|| adapter.name() == "cosh-core" && adapter.capabilities().control_protocol)
+        // Before a run negotiates capabilities, the backend's own declaration
+        // is the only signal available.
+        .unwrap_or_else(|| adapter.capabilities().control_protocol)
 }
 
 fn evidence_namespaces(state: &InlineState) -> String {

@@ -174,6 +174,15 @@ impl AcpAdapter {
         .to_string()
     }
 
+    /// True when the configured agent is cosh-core, which serves the registry
+    /// control plane over its own side channel (ADR-012).
+    pub(super) fn serves_registry(&self) -> bool {
+        self.agent_args.iter().any(|arg| arg == "--acp")
+            && std::path::Path::new(&self.agent_command)
+                .file_name()
+                .is_some_and(|name| name == "cosh-core")
+    }
+
     /// Detaches from the committed session so the next turn starts fresh.
     pub(super) fn start_fresh_session(&self) -> super::FreshSessionOutcome {
         super::detach_committed_session(&self.session_id)
@@ -207,6 +216,7 @@ impl AgentAdapter for AcpAdapter {
             user_question: false,
             cancellable: true,
             control_protocol: false,
+            registry: self.serves_registry(),
         }
     }
 

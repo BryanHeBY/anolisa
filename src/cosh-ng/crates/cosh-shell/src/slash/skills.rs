@@ -10,7 +10,7 @@ pub(super) fn render_skills_command<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+    if !adapter.capabilities().registry {
         let i18n = state.i18n();
         return render_notice_panel(
             output,
@@ -18,7 +18,7 @@ pub(super) fn render_skills_command<W: Write>(
             vec![i18n.t(MessageId::SlashRegistryUnavailable).to_string()],
             None,
         );
-    };
+    }
 
     let action = sub.unwrap_or("list");
     let i18n = state.i18n();
@@ -26,7 +26,7 @@ pub(super) fn render_skills_command<W: Write>(
     match action {
         "list" => {
             let params = Value::Null;
-            match cosh_core.registry_query("skills", "list", params) {
+            match adapter.registry_request("skills", "list", params) {
                 Ok(data) => {
                     let body = format_skills_list(&data, &i18n);
                     render_notice_panel(output, i18n.t(MessageId::SlashSkillsTitle), body, None)
@@ -50,7 +50,7 @@ pub(super) fn render_skills_command<W: Write>(
                 );
             }
             let params = serde_json::json!({ "name": name });
-            match cosh_core.registry_query("skills", "detail", params) {
+            match adapter.registry_request("skills", "detail", params) {
                 Ok(data) => {
                     let body = format_skill_detail(&data);
                     render_notice_panel(output, i18n.t(MessageId::SlashSkillsTitle), body, None)
@@ -74,7 +74,7 @@ pub(super) fn render_skills_command<W: Write>(
                 );
             }
             let params = serde_json::json!({ "name": name });
-            match cosh_core.registry_query("skills", "enable", params) {
+            match adapter.registry_request("skills", "enable", params) {
                 Ok(_) => render_notice_panel(
                     output,
                     i18n.t(MessageId::SlashSkillsTitle),
@@ -100,7 +100,7 @@ pub(super) fn render_skills_command<W: Write>(
                 );
             }
             let params = serde_json::json!({ "name": name });
-            match cosh_core.registry_query("skills", "disable", params) {
+            match adapter.registry_request("skills", "disable", params) {
                 Ok(_) => render_notice_panel(
                     output,
                     i18n.t(MessageId::SlashSkillsTitle),

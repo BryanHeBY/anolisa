@@ -53,122 +53,126 @@ impl CoshCoreAdapter {
         {
             return result;
         }
-        let result = self.registry_query_short(domain, action, params);
+        let result = registry_query_short(&self.program, domain, action, params);
         if result.is_ok() {
             self.runtime.note_external_mutation(domain, action);
         }
         result
     }
+}
 
-    fn registry_query_short(
-        &self,
-        domain: &str,
-        action: &str,
-        params: Value,
-    ) -> Result<Value, RegistryQueryError> {
-        let request_id = format!("reg-{}", std::process::id());
-        let request = serde_json::json!({
-            "type": "registry_request",
-            "request_id": request_id,
-            "domain": domain,
-            "action": action,
-            "params": params,
+/// Runs one registry request as a short-lived `cosh-core --registry` call.
+///
+/// The registry control plane is shell-to-core and never crosses the ACP
+/// bridge (ADR-012), so it only needs the core's path, not an adapter.
+pub(crate) fn registry_query_short(
+    program: &str,
+    domain: &str,
+    action: &str,
+    params: Value,
+) -> Result<Value, RegistryQueryError> {
+    let request_id = format!("reg-{}", std::process::id());
+    let request = serde_json::json!({
+        "type": "registry_request",
+        "request_id": request_id,
+        "domain": domain,
+        "action": action,
+        "params": params,
+    });
+
+    let request_json = serde_json::to_string(&request)
+        .map_err(|error| RegistryQueryError::Transport(format!("serialize error: {error}")))?;
+
+    let mut command = Command::new(program);
+    command
+        .arg("--registry")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = command.spawn().map_err(|error| {
+        RegistryQueryError::Transport(format!("failed to spawn cosh-core --registry: {error}"))
+    })?;
+
+    // Write request to stdin
+    let write_result = child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| RegistryQueryError::Transport("failed to open stdin".to_string()))
+        .and_then(|stdin| {
+            writeln!(stdin, "{request_json}")
+                .map_err(|error| RegistryQueryError::Transport(format!("write error: {error}")))
         });
+    if let Err(error) = write_result {
+        super::terminate_and_reap_process(&mut child);
+        return Err(error);
+    }
+    // Drop stdin to signal EOF.
+    drop(child.stdin.take());
 
-        let request_json = serde_json::to_string(&request)
-            .map_err(|error| RegistryQueryError::Transport(format!("serialize error: {error}")))?;
+    // Read response from stdout with timeout
+    let Some(stdout) = child.stdout.take() else {
+        super::terminate_and_reap_process(&mut child);
+        return Err(RegistryQueryError::Transport(
+            "failed to open stdout".to_string(),
+        ));
+    };
 
-        let mut command = Command::new(&self.program);
-        command
-            .arg("--registry")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0);
-        let mut child = command.spawn().map_err(|error| {
-            RegistryQueryError::Transport(format!("failed to spawn cosh-core --registry: {error}"))
-        })?;
-
-        // Write request to stdin
-        let write_result = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| RegistryQueryError::Transport("failed to open stdin".to_string()))
-            .and_then(|stdin| {
-                writeln!(stdin, "{request_json}")
-                    .map_err(|error| RegistryQueryError::Transport(format!("write error: {error}")))
-            });
-        if let Err(error) = write_result {
-            super::terminate_and_reap_process(&mut child);
-            return Err(error);
-        }
-        // Drop stdin to signal EOF.
-        drop(child.stdin.take());
-
-        // Read response from stdout with timeout
-        let Some(stdout) = child.stdout.take() else {
-            super::terminate_and_reap_process(&mut child);
-            return Err(RegistryQueryError::Transport(
-                "failed to open stdout".to_string(),
-            ));
-        };
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let reader_handle = std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(l) if !l.trim().is_empty() => {
-                        let _ = tx.send(Ok(l));
-                        return;
-                    }
-                    Ok(_) => continue,
-                    Err(e) => {
-                        let _ = tx.send(Err(format!("read error: {e}")));
-                        return;
-                    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(l) if !l.trim().is_empty() => {
+                    let _ = tx.send(Ok(l));
+                    return;
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    let _ = tx.send(Err(format!("read error: {e}")));
+                    return;
                 }
             }
-            let _ = tx.send(Err("no response received (EOF)".to_string()));
-        });
-
-        let response_line = match rx.recv_timeout(registry_timeout(domain, action)) {
-            Ok(Ok(line)) => line,
-            Ok(Err(e)) => {
-                super::terminate_and_reap_process(&mut child);
-                let _ = reader_handle.join();
-                return Err(RegistryQueryError::Transport(e));
-            }
-            Err(_) => {
-                super::terminate_and_reap_process(&mut child);
-                let _ = reader_handle.join();
-                return Err(RegistryQueryError::Transport(
-                    "registry query timed out".to_string(),
-                ));
-            }
-        };
-
-        let _ = reader_handle.join();
-        let _ = child.wait();
-
-        // Parse the response
-        let resp: Value = serde_json::from_str(&response_line)
-            .map_err(|error| RegistryQueryError::Transport(format!("parse error: {error}")))?;
-
-        let success = resp
-            .get("success")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if success {
-            Ok(resp.get("data").cloned().unwrap_or(Value::Null))
-        } else {
-            let error = resp
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error")
-                .to_string();
-            Err(RegistryQueryError::Response(error))
         }
+        let _ = tx.send(Err("no response received (EOF)".to_string()));
+    });
+
+    let response_line = match rx.recv_timeout(registry_timeout(domain, action)) {
+        Ok(Ok(line)) => line,
+        Ok(Err(e)) => {
+            super::terminate_and_reap_process(&mut child);
+            let _ = reader_handle.join();
+            return Err(RegistryQueryError::Transport(e));
+        }
+        Err(_) => {
+            super::terminate_and_reap_process(&mut child);
+            let _ = reader_handle.join();
+            return Err(RegistryQueryError::Transport(
+                "registry query timed out".to_string(),
+            ));
+        }
+    };
+
+    let _ = reader_handle.join();
+    let _ = child.wait();
+
+    // Parse the response
+    let resp: Value = serde_json::from_str(&response_line)
+        .map_err(|error| RegistryQueryError::Transport(format!("parse error: {error}")))?;
+
+    let success = resp
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if success {
+        Ok(resp.get("data").cloned().unwrap_or(Value::Null))
+    } else {
+        let error = resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error")
+            .to_string();
+        Err(RegistryQueryError::Response(error))
     }
 }
 

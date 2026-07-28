@@ -65,6 +65,7 @@ impl AgentAdapter for FakeAgentAdapter {
             user_question: true,
             cancellable: true,
             control_protocol: false,
+            registry: false,
         }
     }
 

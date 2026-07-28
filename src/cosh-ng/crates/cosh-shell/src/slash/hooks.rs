@@ -19,30 +19,29 @@ pub(crate) fn render_hooks_command<W: Write>(
             let hooks = state.hooks.engine.registered_hook_infos();
             let shell_lines = hooks_status_body(state, &hooks, &i18n);
 
-            // Agent Hooks section (only available with CoshCore backend)
-            let (agent_view, agent_hook_count) =
-                if let AdapterInstance::CoshCore(cosh_core) = adapter {
-                    match cosh_core.registry_query("hooks", "list", Value::Null) {
-                        Ok(data) => {
-                            let count = data.as_array().map(|a| a.len()).unwrap_or(0);
-                            let groups = group_agent_hooks(&data);
-                            let view = if groups.is_empty() {
-                                AgentHooksView::Message("(none)".to_string())
-                            } else {
-                                AgentHooksView::Groups(groups)
-                            };
-                            (view, count)
-                        }
-                        Err(e) => (AgentHooksView::Message(format!("Error: {e}")), 0),
+            // Agent hooks come from the registry, which not every backend has.
+            let (agent_view, agent_hook_count) = if adapter.capabilities().registry {
+                match adapter.registry_request("hooks", "list", Value::Null) {
+                    Ok(data) => {
+                        let count = data.as_array().map(|a| a.len()).unwrap_or(0);
+                        let groups = group_agent_hooks(&data);
+                        let view = if groups.is_empty() {
+                            AgentHooksView::Message("(none)".to_string())
+                        } else {
+                            AgentHooksView::Groups(groups)
+                        };
+                        (view, count)
                     }
-                } else {
-                    (
-                        AgentHooksView::Message(
-                            i18n.t(MessageId::SlashHooksAgentUnavailable).to_string(),
-                        ),
-                        0,
-                    )
-                };
+                    Err(e) => (AgentHooksView::Message(format!("Error: {e}")), 0),
+                }
+            } else {
+                (
+                    AgentHooksView::Message(
+                        i18n.t(MessageId::SlashHooksAgentUnavailable).to_string(),
+                    ),
+                    0,
+                )
+            };
 
             let total_hook_count = hooks.len() + agent_hook_count;
             let omitted_template = if i18n.language() == crate::config::Language::ZhCn {
@@ -128,11 +127,11 @@ pub(crate) fn render_hooks_command<W: Write>(
                     vec![i18n.format(MessageId::SlashHooksEnabledBody, &[("id", id)])],
                     None,
                 )
-            } else if let AdapterInstance::CoshCore(cosh_core) = adapter {
+            } else if adapter.capabilities().registry {
                 // Agent hook: persistent enable via registry
                 let params = serde_json::json!({ "name": id });
                 let i18n = state.i18n();
-                match cosh_core.registry_query("hooks", "enable", params) {
+                match adapter.registry_request("hooks", "enable", params) {
                     Ok(_) => render_notice_panel(
                         output,
                         i18n.t(MessageId::SlashHooksEnabledTitle),
@@ -147,7 +146,7 @@ pub(crate) fn render_hooks_command<W: Write>(
                     ),
                 }
             } else {
-                // No CoshCore adapter: fallback to session-level enable
+                // No registry: fall back to session-level enable.
                 state.hooks.disabled.remove(id);
                 let i18n = state.i18n();
                 render_notice_panel(
@@ -171,11 +170,11 @@ pub(crate) fn render_hooks_command<W: Write>(
                     vec![i18n.format(MessageId::SlashHooksDisabledBody, &[("id", id)])],
                     None,
                 )
-            } else if let AdapterInstance::CoshCore(cosh_core) = adapter {
+            } else if adapter.capabilities().registry {
                 // Agent hook: persistent disable via registry
                 let params = serde_json::json!({ "name": id });
                 let i18n = state.i18n();
-                match cosh_core.registry_query("hooks", "disable", params) {
+                match adapter.registry_request("hooks", "disable", params) {
                     Ok(_) => render_notice_panel(
                         output,
                         i18n.t(MessageId::SlashHooksDisabledTitle),
@@ -190,7 +189,7 @@ pub(crate) fn render_hooks_command<W: Write>(
                     ),
                 }
             } else {
-                // No CoshCore adapter: fallback to session-level disable
+                // No registry: fall back to session-level disable.
                 state.hooks.disabled.insert(id.to_string());
                 let i18n = state.i18n();
                 render_notice_panel(

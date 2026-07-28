@@ -81,6 +81,12 @@ pub struct AgentBackendCapabilities {
     pub user_question: bool,
     pub cancellable: bool,
     pub control_protocol: bool,
+    /// Serves the `/skills`, `/hooks`, and `/extensions` control plane.
+    ///
+    /// The registry never crosses the ACP bridge (ADR-012); it is a
+    /// shell-to-core side channel, so this is true whenever the backing agent
+    /// is cosh-core regardless of which adapter drives turns.
+    pub registry: bool,
 }
 
 pub trait AgentAdapter {
@@ -385,6 +391,47 @@ impl AdapterInstance {
             Self::CoshCore(adapter) => adapter.start_cancellable(request, mode),
             Self::Acp(adapter) => adapter.start_cancellable(request, mode),
             _ => start_threaded_adapter_run(self.clone(), request),
+        }
+    }
+
+    /// Runs one registry request.
+    ///
+    /// Callers gate rendering on [`AgentBackendCapabilities::registry`]; a
+    /// backend without one still answers here, with an error, so a missing
+    /// gate degrades to a message rather than a panic.
+    pub(crate) fn registry_request(
+        &self,
+        domain: &str,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.registry_request_classified(domain, action, params)
+            .map_err(RegistryQueryError::into_message)
+    }
+
+    /// Registry request that keeps transport and response failures apart, for
+    /// callers that can recover from a lost connection.
+    pub(crate) fn registry_request_classified(
+        &self,
+        domain: &str,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RegistryQueryError> {
+        match self {
+            Self::CoshCore(adapter) => adapter.registry_query_classified(domain, action, params),
+            // The bridge is not involved: the shell calls the core directly, so
+            // this works for any ACP turn whose agent happens to be cosh-core.
+            Self::Acp(adapter) if adapter.serves_registry() => {
+                cosh_core_registry::registry_query_short(
+                    &adapter.agent_command,
+                    domain,
+                    action,
+                    params,
+                )
+            }
+            _ => Err(RegistryQueryError::Response(
+                "this agent backend has no registry".to_string(),
+            )),
         }
     }
 

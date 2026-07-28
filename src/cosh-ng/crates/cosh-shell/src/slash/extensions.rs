@@ -14,35 +14,33 @@ pub(super) fn render_extensions_command<W: Write>(
     output: &mut W,
 ) -> std::io::Result<()> {
     let i18n = state.i18n();
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+    if !adapter.capabilities().registry {
         return render_notice_panel(
             output,
             i18n.t(MessageId::SlashExtensionsTitle),
             vec![i18n.t(MessageId::SlashRegistryUnavailable).to_string()],
             None,
         );
-    };
+    }
     let command = match parser::parse(args) {
         Ok(command) => command,
         Err(error) => return render(output, &i18n, vec![localized_error(&i18n, &error)]),
     };
 
     let result = match command {
-        ExtensionCommand::List => query(cosh_core, "list", Value::Null, |data| {
+        ExtensionCommand::List => query(adapter, "list", Value::Null, |data| {
             format_extensions_list(data, &i18n)
         }),
-        ExtensionCommand::Info { name } => {
-            query(cosh_core, "info", json!({"name": name}), |data| {
-                format_extension_detail(data, &i18n)
-            })
-        }
+        ExtensionCommand::Info { name } => query(adapter, "info", json!({"name": name}), |data| {
+            format_extension_detail(data, &i18n)
+        }),
         ExtensionCommand::Doctor { name } => {
-            query(cosh_core, "doctor", json!({"name": name}), |data| {
+            query(adapter, "doctor", json!({"name": name}), |data| {
                 format_doctor(data, &i18n)
             })
         }
         ExtensionCommand::New { path, template } => query(
-            cosh_core,
+            adapter,
             "new",
             json!({"path": path, "template": template}),
             |data| {
@@ -63,7 +61,7 @@ pub(super) fn render_extensions_command<W: Write>(
                 ))
             } else {
                 preflight(
-                    cosh_core,
+                    adapter,
                     "install-preflight",
                     json!({
                         "source": source,
@@ -74,47 +72,44 @@ pub(super) fn render_extensions_command<W: Write>(
                 )
             }
         }
-        ExtensionCommand::Link { source } => preflight(
-            cosh_core,
-            "link-preflight",
-            json!({"source": source}),
-            &i18n,
-        ),
+        ExtensionCommand::Link { source } => {
+            preflight(adapter, "link-preflight", json!({"source": source}), &i18n)
+        }
         ExtensionCommand::Update { name } => {
-            preflight(cosh_core, "update-preflight", json!({"name": name}), &i18n)
+            preflight(adapter, "update-preflight", json!({"name": name}), &i18n)
         }
         ExtensionCommand::UpdateAll => {
-            update_all_or_query_result(cosh_core).map(|data| format_update_all(&data, &i18n))
+            update_all_or_query_result(adapter).map(|data| format_update_all(&data, &i18n))
         }
         ExtensionCommand::Uninstall { name } => {
-            query(cosh_core, "uninstall", json!({"name": name}), |data| {
+            query(adapter, "uninstall", json!({"name": name}), |data| {
                 format_mutation(data, &i18n)
             })
         }
         ExtensionCommand::Enable { name } => {
-            query(cosh_core, "enable", json!({"name": name}), |data| {
+            query(adapter, "enable", json!({"name": name}), |data| {
                 format_mutation(data, &i18n)
             })
         }
         ExtensionCommand::Disable { name } => {
-            query(cosh_core, "disable", json!({"name": name}), |data| {
+            query(adapter, "disable", json!({"name": name}), |data| {
                 format_mutation(data, &i18n)
             })
         }
         ExtensionCommand::SelectSource { name, source } => query(
-            cosh_core,
+            adapter,
             "select-source",
             json!({"name": name, "source": source}),
             |data| format_mutation(data, &i18n),
         ),
         ExtensionCommand::SettingsList { name, scope } => query(
-            cosh_core,
+            adapter,
             "settings-list",
             json!({"name": name, "scope": scope}),
             |data| format_settings_list(data, &i18n),
         ),
         ExtensionCommand::SettingsGet { name, key, scope } => query(
-            cosh_core,
+            adapter,
             "settings-get",
             json!({"name": name, "key": key, "scope": scope}),
             |data| format_setting(data, &i18n),
@@ -125,7 +120,7 @@ pub(super) fn render_extensions_command<W: Write>(
             value,
             scope,
         } => query(
-            cosh_core,
+            adapter,
             "settings-set",
             json!({"name": name, "key": key, "value": value, "scope": scope}),
             |data| {
@@ -140,7 +135,7 @@ pub(super) fn render_extensions_command<W: Write>(
             },
         ),
         ExtensionCommand::SettingsUnset { name, key, scope } => query(
-            cosh_core,
+            adapter,
             "settings-unset",
             json!({"name": name, "key": key, "scope": scope}),
             |data| {
@@ -148,7 +143,7 @@ pub(super) fn render_extensions_command<W: Write>(
                 format_setting(setting, &i18n)
             },
         ),
-        ExtensionCommand::Reload => query(cosh_core, "reload", Value::Null, |data| {
+        ExtensionCommand::Reload => query(adapter, "reload", Value::Null, |data| {
             vec![tr(
                 &i18n,
                 &format!(
@@ -164,11 +159,11 @@ pub(super) fn render_extensions_command<W: Write>(
             )]
         }),
         ExtensionCommand::Operation { operation_id } => {
-            operation_or_result(cosh_core, &operation_id, &i18n)
+            operation_or_result(adapter, &operation_id, &i18n)
         }
-        ExtensionCommand::Consent { operation_id } => consent(cosh_core, &operation_id, &i18n),
+        ExtensionCommand::Consent { operation_id } => consent(adapter, &operation_id, &i18n),
         ExtensionCommand::Cancel { operation_id } => query(
-            cosh_core,
+            adapter,
             "cancel",
             json!({"operation_id": operation_id}),
             |_| vec![tr(&i18n, "Operation cancelled.", "操作已取消。")],
@@ -184,7 +179,7 @@ pub(super) fn render_extensions_command<W: Write>(
 }
 
 fn query<F>(
-    adapter: &crate::adapter::CoshCoreAdapter,
+    adapter: &AdapterInstance,
     action: &str,
     params: Value,
     format: F,
@@ -193,17 +188,17 @@ where
     F: FnOnce(&Value) -> Vec<String>,
 {
     adapter
-        .registry_query("extensions", action, params)
+        .registry_request("extensions", action, params)
         .map(|data| format(&data))
 }
 
 fn preflight(
-    adapter: &crate::adapter::CoshCoreAdapter,
+    adapter: &AdapterInstance,
     action: &str,
     params: Value,
     i18n: &I18n,
 ) -> Result<Vec<String>, String> {
-    let data = adapter.registry_query("extensions", action, params)?;
+    let data = adapter.registry_request("extensions", action, params)?;
     if data
         .get("consent_required")
         .and_then(Value::as_bool)
@@ -219,11 +214,11 @@ fn preflight(
 }
 
 fn consent(
-    adapter: &crate::adapter::CoshCoreAdapter,
+    adapter: &AdapterInstance,
     operation_id: &str,
     i18n: &I18n,
 ) -> Result<Vec<String>, String> {
-    let operation = adapter.registry_query(
+    let operation = adapter.registry_request(
         "extensions",
         "operation",
         json!({"operation_id": operation_id}),
@@ -238,18 +233,18 @@ fn consent(
 }
 
 fn operation_or_result(
-    adapter: &crate::adapter::CoshCoreAdapter,
+    adapter: &AdapterInstance,
     operation_id: &str,
     i18n: &I18n,
 ) -> Result<Vec<String>, String> {
-    match adapter.registry_query(
+    match adapter.registry_request(
         "extensions",
         "operation",
         json!({"operation_id": operation_id}),
     ) {
         Ok(operation) => Ok(format_preflight(&operation, i18n)),
         Err(error) if error.contains("extension_operation_not_found") => adapter
-            .registry_query(
+            .registry_request(
                 "extensions",
                 "result",
                 json!({"operation_id": operation_id}),
@@ -268,11 +263,11 @@ fn format_operation_result(data: &Value, i18n: &I18n) -> Vec<String> {
 }
 
 fn commit_or_query_result(
-    adapter: &crate::adapter::CoshCoreAdapter,
+    adapter: &AdapterInstance,
     operation_id: &str,
     fingerprint: &str,
 ) -> Result<Value, String> {
-    match adapter.registry_query_classified(
+    match adapter.registry_request_classified(
         "extensions",
         "commit",
         json!({"operation_id": operation_id, "fingerprint": fingerprint}),
@@ -280,7 +275,7 @@ fn commit_or_query_result(
         Ok(result) => Ok(result),
         Err(RegistryQueryError::Response(error)) => Err(error),
         Err(RegistryQueryError::Transport(commit_error)) => adapter
-            .registry_query(
+            .registry_request(
                 "extensions",
                 "result",
                 json!({"operation_id": operation_id}),
@@ -293,10 +288,10 @@ fn commit_or_query_result(
     }
 }
 
-fn update_all_or_query_result(adapter: &crate::adapter::CoshCoreAdapter) -> Result<Value, String> {
-    let prepared = adapter.registry_query("extensions", "update-all-preflight", Value::Null)?;
+fn update_all_or_query_result(adapter: &AdapterInstance) -> Result<Value, String> {
+    let prepared = adapter.registry_request("extensions", "update-all-preflight", Value::Null)?;
     let operation_id = string_field(&prepared, "operation_id")?;
-    match adapter.registry_query_classified(
+    match adapter.registry_request_classified(
         "extensions",
         "update-all-commit",
         json!({"operation_id": operation_id}),
@@ -304,7 +299,7 @@ fn update_all_or_query_result(adapter: &crate::adapter::CoshCoreAdapter) -> Resu
         Ok(result) => Ok(result),
         Err(RegistryQueryError::Response(error)) => Err(error),
         Err(RegistryQueryError::Transport(commit_error)) => adapter
-            .registry_query(
+            .registry_request(
                 "extensions",
                 "result",
                 json!({"operation_id": operation_id}),

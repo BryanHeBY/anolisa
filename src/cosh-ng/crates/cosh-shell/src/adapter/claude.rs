@@ -162,6 +162,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             user_question: true,
             cancellable: true,
             control_protocol: true,
+            registry: false,
         }
     }
 
