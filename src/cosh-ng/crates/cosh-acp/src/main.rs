@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 mod bridge;
+mod mcp_shell;
 mod protocol;
 mod session;
 
@@ -50,11 +51,7 @@ fn main() -> std::process::ExitCode {
                 .expect("failed to build tokio runtime");
             runtime.block_on(bridge::run())
         }
-        Form::McpShell => {
-            // Implemented in S2 (ADR-011 migration plan).
-            tracing::error!("mcp-shell is not implemented yet");
-            2
-        }
+        Form::McpShell => mcp_shell::run(),
     };
     std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
