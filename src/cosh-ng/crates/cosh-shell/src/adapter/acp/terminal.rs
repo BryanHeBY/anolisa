@@ -256,7 +256,15 @@ fn request_approval(
     if sent.is_err() {
         return None;
     }
+    await_decision(&request_id, approvals, cancelled)
+}
 
+/// Waits for the card answer that matches `request_id`.
+fn await_decision(
+    request_id: &str,
+    approvals: &mpsc::Receiver<ApprovalResponse>,
+    cancelled: &Arc<AtomicBool>,
+) -> Option<ApprovalDecision> {
     let deadline = std::time::Instant::now() + APPROVAL_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if cancelled.load(Ordering::SeqCst) {
@@ -280,6 +288,71 @@ fn request_approval(
         }
     }
     None
+}
+
+/// Raises the shell's approval card for an agent permission request and
+/// answers the bridge with the chosen option.
+///
+/// Approval stays a shell decision: the bridge only relays, so the same card
+/// serves ACP permissions and dual-lane command execution.
+pub(super) fn handle_permission_request(
+    run_id: &str,
+    request_id: &str,
+    title: &str,
+    options: &[(&str, &str)],
+    writer: &BridgeWriter,
+    events: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
+    approvals: &mpsc::Receiver<ApprovalResponse>,
+    cancelled: &Arc<AtomicBool>,
+) {
+    let card_id = format!("acp-permission-{request_id}");
+    let sent = events.send(Ok(AgentEvent::ToolPermissionRequest {
+        run_id: run_id.to_string(),
+        request_id: card_id.clone(),
+        tool_name: "Agent".to_string(),
+        tool_input: serde_json::json!({ "title": title }),
+        tool_use_id: request_id.to_string(),
+        hook_requires_approval: false,
+        audit_ref: None,
+    }));
+    if sent.is_err() {
+        permission_response(writer, request_id, None);
+        return;
+    }
+    let option_id = match await_decision(&card_id, approvals, cancelled) {
+        Some(ApprovalDecision::Allow) => pick_option(options, ALLOW_KINDS),
+        Some(ApprovalDecision::Deny { .. }) => pick_option(options, REJECT_KINDS),
+        // No answer and host-executed replay are both "the user did not pick
+        // one of these options", which ACP models as a cancelled request.
+        _ => None,
+    };
+    permission_response(writer, request_id, option_id);
+}
+
+/// Option kinds that mean the agent may proceed.
+const ALLOW_KINDS: &[&str] = &["allow_once", "allow_always"];
+
+/// Option kinds that mean the agent must not proceed.
+const REJECT_KINDS: &[&str] = &["reject_once", "reject_always"];
+
+/// Picks the first offered option whose kind is acceptable.
+fn pick_option(options: &[(&str, &str)], kinds: &[&str]) -> Option<String> {
+    options
+        .iter()
+        .find(|(_, kind)| kinds.contains(kind))
+        .map(|(id, _)| (*id).to_string())
+}
+
+fn permission_response(writer: &BridgeWriter, request_id: &str, option_id: Option<String>) {
+    write_message(
+        writer,
+        &serde_json::json!({
+            "method": "permission_response",
+            "request_id": request_id,
+            "option_id": option_id,
+            "cancelled": option_id.is_none(),
+        }),
+    );
 }
 
 /// Forwards background lane events to the bridge until the run ends.

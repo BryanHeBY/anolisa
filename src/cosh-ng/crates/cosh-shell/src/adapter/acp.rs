@@ -21,8 +21,10 @@ use crate::command::BackgroundLane;
 use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
 
 mod terminal;
+mod wire;
 
 use self::terminal::{BridgeWriter, TerminalCreate};
+use self::wire::{map_bridge_event, session_new_line, BridgeEvent};
 use super::claude::{send_agent_event, terminate_process};
 use super::prompt_from_request;
 use super::{
@@ -31,7 +33,7 @@ use super::{
 };
 
 /// Internal JSONL protocol version this adapter speaks.
-const ACP_BRIDGE_PROTOCOL_VERSION: u32 = 1;
+pub(super) const ACP_BRIDGE_PROTOCOL_VERSION: u32 = 1;
 
 /// Adapter that delegates Agent turns to an ACP agent via the cosh-acp bridge.
 #[derive(Debug, Clone)]
@@ -78,77 +80,6 @@ fn discover_binary(env_var: &str, name: &str) -> String {
     name.to_string()
 }
 
-/// Wire mirror of the bridge `initialize` parameters (protocol v1).
-#[derive(Debug, Serialize)]
-struct InitializeParams<'a> {
-    protocol_version: u32,
-    agent: LaunchSpec<'a>,
-    cwd: String,
-    mcp_servers: Vec<serde_json::Value>,
-    capabilities: Capabilities,
-    locale: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct LaunchSpec<'a> {
-    name: &'a str,
-    command: &'a str,
-    args: &'a [String],
-    env: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Serialize)]
-struct Capabilities {
-    terminal: bool,
-}
-
-/// Wire mirror of bridge events consumed in S1; unknown events are ignored
-/// so the bridge can evolve additively.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-enum BridgeEvent {
-    Initialized {
-        protocol_version: u32,
-    },
-    SessionCreated {
-        session_id: String,
-    },
-    TextDelta {
-        text: String,
-    },
-    ThoughtDelta {
-        text: String,
-    },
-    PromptCompleted {
-        stop_reason: String,
-    },
-    TerminalCreate {
-        terminal_id: String,
-        command: String,
-        #[serde(default)]
-        args: Vec<String>,
-        #[serde(default)]
-        env: BTreeMap<String, String>,
-        #[serde(default)]
-        cwd: Option<String>,
-    },
-    TerminalKill {
-        terminal_id: String,
-    },
-    TerminalRelease {
-        terminal_id: String,
-    },
-    AgentFailed {
-        code: String,
-        message: String,
-        recoverable: bool,
-        #[serde(default)]
-        hint: Option<String>,
-    },
-    #[serde(other)]
-    Unknown,
-}
-
 impl AcpAdapter {
     /// Creates an adapter for explicit bridge and agent executables.
     pub fn new(program: impl Into<String>, allow_spawn: bool) -> Self {
@@ -183,7 +114,11 @@ impl AcpAdapter {
         params.to_string()
     }
 
-    fn prompt_line(request: &AgentRequest, mode: CoshApprovalMode) -> String {
+    /// Builds the prompt message for the session the bridge just created.
+    ///
+    /// The session id comes from the agent, not from the shell: the shell's
+    /// own session id names a terminal session, not an agent transcript.
+    fn prompt_line(request: &AgentRequest, session_id: &str, mode: CoshApprovalMode) -> String {
         let approval_mode = match mode {
             CoshApprovalMode::Recommend => "strict",
             CoshApprovalMode::Auto => "auto",
@@ -192,7 +127,7 @@ impl AcpAdapter {
         serde_json::json!({
             "method": "prompt",
             "request_id": request.id,
-            "session_id": request.session_id,
+            "session_id": session_id,
             "text": prompt_from_request(request),
             "approval_mode": approval_mode,
         })
@@ -364,6 +299,15 @@ fn spawn_bridge(adapter: &AcpAdapter) -> Result<Child, String> {
             )
         })
 }
+/// Writes one protocol line, treating a write failure as a fatal turn error.
+fn write_bridge_line(writer: &BridgeWriter, line: &str) -> Result<(), AdapterError> {
+    let mut stdin = writer.lock().map_err(|_| AdapterError {
+        message: "bridge writer poisoned".to_string(),
+    })?;
+    writeln!(stdin, "{line}").map_err(|error| AdapterError {
+        message: format!("failed to write to bridge: {error}"),
+    })
+}
 
 /// Writes the handshake and prompt, then maps bridge events until a terminal
 /// event or stream end. Terminal lifecycle events route through the dual-lane
@@ -390,17 +334,9 @@ fn drive_bridge(
         *slot = Some(Arc::clone(&writer));
     }
 
-    for line in [
-        adapter.initialize_line(),
-        AcpAdapter::prompt_line(request, mode),
-    ] {
-        let mut stdin = writer.lock().map_err(|_| AdapterError {
-            message: "bridge writer poisoned".to_string(),
-        })?;
-        writeln!(stdin, "{line}").map_err(|error| AdapterError {
-            message: format!("failed to write to bridge: {error}"),
-        })?;
-    }
+    // Only the handshake goes out now: the bridge mints the session id, so
+    // session_new and prompt follow as its replies arrive.
+    write_bridge_line(&writer, &adapter.initialize_line())?;
 
     // Background lane plus a pump that forwards its output/exit events to
     // the bridge while the reader below may be blocked on stdout.
@@ -463,6 +399,50 @@ fn drive_bridge(
             | Ok(BridgeEvent::TerminalRelease { terminal_id }) => {
                 lane.kill(&terminal_id);
             }
+            Ok(BridgeEvent::Initialized { protocol_version }) => {
+                send_agent_event(
+                    sender,
+                    AgentEvent::StatusChanged {
+                        run_id: run_id.clone(),
+                        phase: "connected".to_string(),
+                        message: format!("cosh-acp bridge ready (protocol v{protocol_version})"),
+                    },
+                );
+                write_bridge_line(&writer, &session_new_line())?;
+            }
+            Ok(BridgeEvent::SessionCreated { session_id }) => {
+                send_agent_event(
+                    sender,
+                    AgentEvent::StatusChanged {
+                        run_id: run_id.clone(),
+                        phase: "session".to_string(),
+                        message: format!("agent session {session_id} created"),
+                    },
+                );
+                write_bridge_line(
+                    &writer,
+                    &AcpAdapter::prompt_line(request, &session_id, mode),
+                )?;
+            }
+            Ok(BridgeEvent::PermissionRequest {
+                request_id,
+                title,
+                options,
+            }) => {
+                terminal::handle_permission_request(
+                    &run_id,
+                    &request_id,
+                    &title,
+                    &options
+                        .iter()
+                        .map(|option| (option.id.as_str(), option.kind.as_str()))
+                        .collect::<Vec<_>>(),
+                    &writer,
+                    sender,
+                    approvals,
+                    cancelled,
+                );
+            }
             Ok(event) => {
                 if let Some(mapped) = map_bridge_event(&run_id, event, &mut terminal_seen) {
                     send_agent_event(sender, mapped);
@@ -499,71 +479,6 @@ fn drive_bridge(
         }
     }
     Ok(())
-}
-
-fn map_bridge_event(
-    run_id: &str,
-    event: BridgeEvent,
-    terminal_seen: &mut bool,
-) -> Option<AgentEvent> {
-    match event {
-        BridgeEvent::Initialized { protocol_version } => Some(AgentEvent::StatusChanged {
-            run_id: run_id.to_string(),
-            phase: "connected".to_string(),
-            message: format!("cosh-acp bridge ready (protocol v{protocol_version})"),
-        }),
-        BridgeEvent::SessionCreated { session_id } => Some(AgentEvent::StatusChanged {
-            run_id: run_id.to_string(),
-            phase: "session".to_string(),
-            message: format!("agent session {session_id} created"),
-        }),
-        BridgeEvent::TextDelta { text } => Some(AgentEvent::TextDelta {
-            run_id: run_id.to_string(),
-            text,
-        }),
-        BridgeEvent::ThoughtDelta { text } => Some(AgentEvent::StatusChanged {
-            run_id: run_id.to_string(),
-            phase: "thinking".to_string(),
-            message: text,
-        }),
-        BridgeEvent::PromptCompleted { stop_reason } => {
-            *terminal_seen = true;
-            if stop_reason == "cancelled" {
-                Some(AgentEvent::AgentCancelled {
-                    run_id: run_id.to_string(),
-                    reason: "agent confirmed cancellation".to_string(),
-                })
-            } else {
-                Some(AgentEvent::AgentCompleted {
-                    run_id: run_id.to_string(),
-                    summary: format!("agent turn completed ({stop_reason})"),
-                })
-            }
-        }
-        BridgeEvent::TerminalCreate { .. }
-        | BridgeEvent::TerminalKill { .. }
-        | BridgeEvent::TerminalRelease { .. } => {
-            // Routed by drive_bridge before mapping; unreachable here.
-            None
-        }
-        BridgeEvent::AgentFailed {
-            code,
-            message,
-            recoverable,
-            hint,
-        } => {
-            *terminal_seen = true;
-            let hint_suffix = hint
-                .map(|hint| format!(" (hint: {hint})"))
-                .unwrap_or_default();
-            let recoverable_note = if recoverable { "recoverable" } else { "fatal" };
-            Some(AgentEvent::AgentFailed {
-                run_id: run_id.to_string(),
-                error: format!("[{code}, {recoverable_note}] {message}{hint_suffix}"),
-            })
-        }
-        BridgeEvent::Unknown => None,
-    }
 }
 
 #[cfg(test)]
@@ -617,7 +532,7 @@ mod tests {
 
     #[test]
     fn prompt_line_carries_approval_mode() {
-        let line = AcpAdapter::prompt_line(&request(), CoshApprovalMode::Trust);
+        let line = AcpAdapter::prompt_line(&request(), "agent-session", CoshApprovalMode::Trust);
         let value: serde_json::Value = serde_json::from_str(&line).expect("json");
         assert_eq!(value["method"], "prompt");
         assert_eq!(value["approval_mode"], "trust");
