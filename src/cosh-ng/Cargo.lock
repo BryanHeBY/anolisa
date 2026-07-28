@@ -675,6 +675,7 @@ name = "cosh-core"
 version = "0.13.0"
 dependencies = [
  "aes-gcm",
+ "agent-client-protocol",
  "async-trait",
  "atty",
  "chrono",
