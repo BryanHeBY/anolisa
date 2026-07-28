@@ -37,6 +37,8 @@ while IFS= read -r line; do
       printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"sess-1"}}\n' "$id"
       ;;
     *'"method":"session/load"'*)
+      # Agents replay the transcript when a session is reloaded.
+      printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"REPLAYED HISTORY"}}}}\n'
       printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
       ;;
     *'"method":"session/prompt"'*)
@@ -129,8 +131,10 @@ fn acp_session_round_trip_streams_and_completes() {
         })
         .to_string(),
     );
+    // The replayed transcript must not reach the shell: it is already on
+    // screen, and forwarding it would render old answers as this turn's output.
     let loaded = bridge.next_event();
-    assert_eq!(loaded["event"], "session_loaded");
+    assert_eq!(loaded["event"], "session_loaded", "{loaded}");
     assert_eq!(loaded["request_id"], "rq2");
     assert_eq!(loaded["session_id"], "sess-1");
 

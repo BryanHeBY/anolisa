@@ -244,16 +244,30 @@ pub async fn run() -> i32 {
     let transport = session::agent_transport(agent_stdin, agent_stdout);
     let registry = std::sync::Arc::new(crate::terminal::TerminalRegistry::default());
     let pending = std::sync::Arc::new(crate::pending::PendingRequests::default());
+    // Set while `session/load` is in flight. Agents replay the transcript as
+    // session updates when a session is reloaded, and replayed history must
+    // not be rendered as this turn's output.
+    let replaying = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let result = Client
         .builder()
         .name("cosh-acp")
         .on_receive_notification(
-            async move |notification: acp::SessionNotification, _cx| {
-                // Session updates are handled at the connection level so both
-                // a freshly created and a reloaded session stream through the
-                // same path; the SDK's ActiveSession only covers the former.
-                session::emit_session_update(notification);
-                Ok(())
+            {
+                let replaying = std::sync::Arc::clone(&replaying);
+                async move |notification: acp::SessionNotification, _cx| {
+                    // Session updates are handled at the connection level so
+                    // both a freshly created and a reloaded session stream
+                    // through the same path; the SDK's ActiveSession only
+                    // covers the former.
+                    if replaying.load(std::sync::atomic::Ordering::Acquire) {
+                        // Transcript replay from `session/load`: the shell
+                        // already has this history on screen.
+                        tracing::trace!("dropping replayed session update");
+                        return Ok(());
+                    }
+                    session::emit_session_update(notification);
+                    Ok(())
+                }
             },
             agent_client_protocol::on_receive_notification!(),
         )
@@ -383,7 +397,9 @@ pub async fn run() -> i32 {
         )
         .connect_with(transport, {
             let pending = std::sync::Arc::clone(&pending);
-            async move |cx| session::drive(cx, params, lines, registry, pending, agent_pid).await
+            async move |cx| {
+                session::drive(cx, params, lines, registry, pending, agent_pid, replaying).await
+            }
         })
         .await;
     pending.fail_all("bridge connection closed");

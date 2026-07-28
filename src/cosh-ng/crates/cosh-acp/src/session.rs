@@ -86,6 +86,7 @@ pub(crate) async fn drive(
     terminals: std::sync::Arc<TerminalRegistry>,
     pending: std::sync::Arc<crate::pending::PendingRequests>,
     agent_pid: Option<u32>,
+    replaying: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<i32, agent_client_protocol::Error> {
     let request = acp::InitializeRequest::new(ProtocolVersion::V1)
         .client_capabilities(acp::ClientCapabilities::new().terminal(params.capabilities.terminal))
@@ -204,11 +205,14 @@ pub(crate) async fn drive(
                         handle_shell_message(
                             &cx,
                             &params,
-                            &mut active,
-                            &mut inflight_request,
-                            &outcome_tx,
-                            &terminals,
-                            &pending,
+                            SessionContext {
+                                active: &mut active,
+                                inflight_request: &mut inflight_request,
+                                outcome_tx: &outcome_tx,
+                                terminals: &terminals,
+                                pending: &pending,
+                                replaying: &replaying,
+                            },
                             message,
                         )
                         .await?;
@@ -229,16 +233,34 @@ pub(crate) async fn drive(
 }
 
 /// Dispatches one post-handshake shell message.
+/// Everything one shell message may read or mutate, kept together so the
+/// dispatcher does not grow a parameter per concern.
+struct SessionContext<'a> {
+    /// Id of the session this bridge serves, once one is bound.
+    active: &'a mut Option<String>,
+    /// Request id of the turn in flight, cleared by the prompt response.
+    inflight_request: &'a mut Option<String>,
+    outcome_tx: &'a mpsc::UnboundedSender<(String, PromptOutcome)>,
+    terminals: &'a TerminalRegistry,
+    pending: &'a crate::pending::PendingRequests,
+    /// Set while a session is loading, so replayed history is dropped.
+    replaying: &'a std::sync::atomic::AtomicBool,
+}
+
 async fn handle_shell_message(
     cx: &ConnectionTo<Agent>,
     params: &InitializeParams,
-    active: &mut Option<String>,
-    inflight_request: &mut Option<String>,
-    outcome_tx: &mpsc::UnboundedSender<(String, PromptOutcome)>,
-    terminals: &TerminalRegistry,
-    pending: &crate::pending::PendingRequests,
+    ctx: SessionContext<'_>,
     message: ShellMessage,
 ) -> Result<(), agent_client_protocol::Error> {
+    let SessionContext {
+        active,
+        inflight_request,
+        outcome_tx,
+        terminals,
+        pending,
+        replaying,
+    } = ctx;
     match message {
         ShellMessage::SessionNew { request_id, cwd } => {
             let request = acp::NewSessionRequest::new(cwd)
@@ -267,7 +289,12 @@ async fn handle_shell_message(
         } => {
             let request = acp::LoadSessionRequest::new(session_id.clone(), &params.cwd)
                 .mcp_servers(translate_mcp_servers(&params.mcp_servers));
-            match cx.send_request(request).block_task().await {
+            // Drop the transcript the agent replays while loading; only output
+            // produced after the load belongs to the coming turn.
+            replaying.store(true, std::sync::atomic::Ordering::Release);
+            let loaded = cx.send_request(request).block_task().await;
+            replaying.store(false, std::sync::atomic::Ordering::Release);
+            match loaded {
                 Ok(_) => {
                     emit(&BridgeMessage::SessionLoaded {
                         request_id,
