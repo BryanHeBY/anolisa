@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = { workspace = true, features = ["clock", "serde"] }
-nix = { workspace = true, features = ["dir", "fs", "signal", "term"] }
+nix = { workspace = true, features = ["dir", "fs", "signal", "socket", "term"] }
 ratatui = "0.28"
 serde.workspace = true
 serde_json.workspace = true

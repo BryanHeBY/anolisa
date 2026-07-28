@@ -5,6 +5,7 @@ mod output_text;
 mod prelude;
 mod redaction;
 pub(crate) mod request;
+pub(crate) mod service;
 pub(crate) mod stream;
 
 pub(crate) use context_window::{
