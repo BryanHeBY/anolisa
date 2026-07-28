@@ -278,6 +278,15 @@ pub enum BridgeMessage {
         session_id: String,
         request_id: String,
         title: String,
+        /// Tool kind the agent declared (`execute`, `edit`, ...), so the shell
+        /// can render a card that shows what is actually being approved
+        /// instead of a bare "agent" placeholder.
+        #[serde(default)]
+        kind: String,
+        /// Arguments the agent passed to its own tool, verbatim. For command
+        /// execution this is where the command text lives.
+        #[serde(default)]
+        raw_input: Option<serde_json::Value>,
         options: Vec<PermissionOption>,
     },
     AuthRequired {

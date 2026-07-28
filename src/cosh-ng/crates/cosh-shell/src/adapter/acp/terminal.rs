@@ -295,22 +295,70 @@ fn await_decision(
 ///
 /// Approval stays a shell decision: the bridge only relays, so the same card
 /// serves ACP permissions and dual-lane command execution.
+/// One agent permission request relayed by the bridge.
+pub(super) struct PermissionRequest<'a> {
+    pub(super) request_id: &'a str,
+    pub(super) title: &'a str,
+    /// ACP tool kind the agent declared, e.g. `execute`.
+    pub(super) kind: &'a str,
+    /// Arguments the agent passed to its own tool.
+    pub(super) raw_input: Option<&'a serde_json::Value>,
+}
+
+/// Chooses how to present an agent permission request.
+///
+/// An `execute` request is shown as the command itself so the user can see what
+/// they are approving; the agent's title carries the command text when its
+/// arguments do not. Everything else keeps the agent's own title.
+fn permission_card(
+    title: &str,
+    kind: &str,
+    raw_input: Option<&serde_json::Value>,
+) -> (String, serde_json::Value) {
+    if kind != "execute" {
+        return (
+            "Agent".to_string(),
+            serde_json::json!({ "title": title, "kind": kind }),
+        );
+    }
+    let command = raw_input
+        .and_then(|input| input.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|command| !command.is_empty())
+        .unwrap_or(title);
+    (
+        "Bash".to_string(),
+        serde_json::json!({
+            "command": command,
+            // Stated plainly: approving this does not put the command on the
+            // shell's audited path, because the agent runs it itself.
+            "reason": "requested by the agent; runs inside the agent",
+        }),
+    )
+}
+
 pub(super) fn handle_permission_request(
     run_id: &str,
-    request_id: &str,
-    title: &str,
+    request: PermissionRequest<'_>,
     options: &[(&str, &str)],
     writer: &BridgeWriter,
     events: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
     approvals: &mpsc::Receiver<ApprovalResponse>,
     cancelled: &Arc<AtomicBool>,
 ) {
+    let PermissionRequest {
+        request_id,
+        title,
+        kind,
+        raw_input,
+    } = request;
     let card_id = format!("acp-permission-{request_id}");
+    let (tool_name, tool_input) = permission_card(title, kind, raw_input);
     let sent = events.send(Ok(AgentEvent::ToolPermissionRequest {
         run_id: run_id.to_string(),
         request_id: card_id.clone(),
-        tool_name: "Agent".to_string(),
-        tool_input: serde_json::json!({ "title": title }),
+        tool_name,
+        tool_input,
         tool_use_id: request_id.to_string(),
         hook_requires_approval: false,
         audit_ref: None,
@@ -379,6 +427,28 @@ mod tests {
     fn readonly_commands_take_the_background_lane() {
         assert_eq!(choose_lane("ls -la"), Lane::Background);
         assert_eq!(choose_lane("cat /etc/os-release"), Lane::Background);
+    }
+
+    #[test]
+    fn execute_permission_shows_the_command_not_a_placeholder() {
+        let input = serde_json::json!({ "command": "rm -rf /tmp/x" });
+        let (tool, rendered) = permission_card("run a command", "execute", Some(&input));
+        assert_eq!(tool, "Bash");
+        assert_eq!(rendered["command"], "rm -rf /tmp/x");
+    }
+
+    #[test]
+    fn execute_permission_falls_back_to_the_agent_title() {
+        let (tool, rendered) = permission_card("ls -1 /tmp", "execute", None);
+        assert_eq!(tool, "Bash");
+        assert_eq!(rendered["command"], "ls -1 /tmp");
+    }
+
+    #[test]
+    fn other_permission_kinds_keep_the_agent_title() {
+        let (tool, rendered) = permission_card("edit main.rs", "edit", None);
+        assert_eq!(tool, "Agent");
+        assert_eq!(rendered["title"], "edit main.rs");
     }
 
     #[test]

@@ -282,12 +282,18 @@ fn drive_bridge(
             Ok(BridgeEvent::PermissionRequest {
                 request_id,
                 title,
+                kind,
+                raw_input,
                 options,
             }) => {
                 terminal::handle_permission_request(
                     &run_id,
-                    &request_id,
-                    &title,
+                    terminal::PermissionRequest {
+                        request_id: &request_id,
+                        title: &title,
+                        kind: &kind,
+                        raw_input: raw_input.as_ref(),
+                    },
                     &options
                         .iter()
                         .map(|option| (option.id.as_str(), option.kind.as_str()))

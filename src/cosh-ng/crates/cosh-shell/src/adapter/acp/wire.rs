@@ -61,6 +61,13 @@ pub(super) enum BridgeEvent {
     PermissionRequest {
         request_id: String,
         title: String,
+        /// ACP tool kind the agent declared, e.g. `execute`.
+        #[serde(default)]
+        kind: String,
+        /// Arguments the agent passed to its own tool; carries the command
+        /// text for execution requests.
+        #[serde(default)]
+        raw_input: Option<serde_json::Value>,
         #[serde(default)]
         options: Vec<BridgePermissionOption>,
     },
