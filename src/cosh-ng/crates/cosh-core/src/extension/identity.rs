@@ -197,6 +197,14 @@ fn canonicalize_value(value: &mut Value) {
             for value in map.values_mut() {
                 canonicalize_value(value);
             }
+            // Key order must not depend on serde_json's `preserve_order`
+            // feature: any dependency can enable it, which would silently
+            // change every fingerprint. Rebuild in sorted key order instead.
+            let mut sorted: Vec<(String, Value)> = std::mem::take(map).into_iter().collect();
+            sorted.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, value) in sorted {
+                map.insert(key, value);
+            }
         }
         _ => {}
     }
