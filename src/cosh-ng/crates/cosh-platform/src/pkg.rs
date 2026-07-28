@@ -909,6 +909,7 @@ mod tests {
     // --- dry-run actually validates via the package manager ---
 
     #[test]
+    #[ignore = "dnf reports a privilege error before the dry run, so this needs root"]
     fn test_pkg_install_dry_run() {
         // Dry-run now actually runs dnf --assumeno; skip if dnf is unavailable.
         if !Command::new("dnf")
@@ -928,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "dnf reports a privilege error before the dry run, so this needs root"]
     fn test_pkg_install_dry_run_nonexistent() {
         // Dry-run now actually runs dnf --assumeno; skip if dnf is unavailable.
         if !Command::new("dnf")

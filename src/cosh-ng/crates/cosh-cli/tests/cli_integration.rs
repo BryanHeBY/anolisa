@@ -1234,6 +1234,7 @@ fn test_pkg_list_json_envelope() {
 // --- pkg install: dry-run ---
 
 #[test]
+#[ignore = "dnf reports a privilege error before the dry run, so this needs root"]
 fn test_pkg_install_dry_run_json_envelope() {
     let (_, available) = pkg_manager_available();
     if !available {
@@ -1263,6 +1264,7 @@ fn test_pkg_install_dry_run_json_envelope() {
 }
 
 #[test]
+#[ignore = "dnf reports a privilege error before the dry run, so this needs root"]
 fn test_pkg_install_dry_run_nonexistent_fails() {
     let (_, available) = pkg_manager_available();
     if !available {
