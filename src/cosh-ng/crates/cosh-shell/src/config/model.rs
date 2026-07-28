@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::tools::readonly_rules::RuntimeReadonlyConfig;
@@ -15,10 +16,38 @@ pub struct CoshConfig {
     pub log_level: String,
     pub ai_enabled: bool,
     pub health: HealthConfig,
+    pub acp: AcpConfig,
     pub recommendations: RecommendationsConfig,
     pub trusted_commands: Vec<String>,
     pub trusted_project_roots: Vec<PathBuf>,
     pub(super) readonly: RuntimeReadonlyConfig,
+}
+
+/// `[acp]` — configuration for ACP agents reached through the cosh-acp bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AcpConfig {
+    /// Name of the `[acp.agents.<name>]` entry to launch; empty means the
+    /// built-in cosh-core agent.
+    pub agent: String,
+    /// Declared agents, keyed by the name used in `agent`. Ordered so
+    /// diagnostics and error messages are stable.
+    pub agents: BTreeMap<String, AcpAgentConfig>,
+    /// Parse failures, surfaced by diagnostics instead of failing startup.
+    pub errors: Vec<String>,
+}
+
+/// One `[acp.agents.<name>]` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AcpAgentConfig {
+    /// Executable path or PATH lookup name.
+    pub command: String,
+    pub args: Vec<String>,
+    /// Environment injected at spawn time. Credential-carrying agents get
+    /// their secrets here, which is why values are never logged (ADR-012).
+    pub env: BTreeMap<String, String>,
+    /// Trust tier: `trusted` agents may keep their own tools, others have
+    /// command execution routed through the shell (ADR-011).
+    pub trusted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +124,7 @@ impl Default for CoshConfig {
             log_level: "warn".into(),
             ai_enabled: true,
             health: HealthConfig::default(),
+            acp: AcpConfig::default(),
             recommendations: RecommendationsConfig::default(),
             trusted_commands: Vec::new(),
             trusted_project_roots: Vec::new(),

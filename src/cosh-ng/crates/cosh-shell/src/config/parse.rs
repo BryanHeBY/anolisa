@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::language::apply_language_value;
 use super::readonly::{parse_disabled_rules, parse_runtime_spec, string_array};
-use super::{CoshConfig, HealthServiceConfig, HealthServiceExpectedState};
+use super::{AcpAgentConfig, CoshConfig, HealthServiceConfig, HealthServiceExpectedState};
 
 pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
     for line in content.lines() {
@@ -75,6 +76,70 @@ pub(super) fn parse_toml_config(content: &str, config: &mut CoshConfig) {
     }
     parse_shell_toml_config(&value, config);
     parse_health_toml_config(&value, config);
+    parse_acp_toml_config(&value, config);
+}
+
+/// Parses `[acp]` and its `[acp.agents.<name>]` entries.
+///
+/// Malformed entries are recorded and skipped rather than failing startup, so
+/// one bad agent cannot make the shell unusable.
+fn parse_acp_toml_config(value: &toml::Value, config: &mut CoshConfig) {
+    let Some(acp) = value.get("acp").and_then(toml::Value::as_table) else {
+        return;
+    };
+    if let Some(agent) = acp.get("agent").and_then(toml::Value::as_str) {
+        config.acp.agent = agent.to_string();
+    }
+    let Some(agents) = acp.get("agents").and_then(toml::Value::as_table) else {
+        return;
+    };
+    for (name, entry) in agents {
+        match parse_acp_agent(name, entry) {
+            Ok(agent) => {
+                config.acp.agents.insert(name.clone(), agent);
+            }
+            Err(error) => config.acp.errors.push(error),
+        }
+    }
+}
+
+fn parse_acp_agent(name: &str, entry: &toml::Value) -> Result<AcpAgentConfig, String> {
+    let table = entry
+        .as_table()
+        .ok_or_else(|| format!("acp.agents.{name} must be a table"))?;
+    let command = table
+        .get("command")
+        .and_then(toml::Value::as_str)
+        .filter(|command| !command.is_empty())
+        .ok_or_else(|| format!("acp.agents.{name}.command is required"))?
+        .to_string();
+    let args = match table.get("args") {
+        Some(args) => string_array(args, &format!("acp.agents.{name}.args"))?,
+        None => Vec::new(),
+    };
+    let mut env = BTreeMap::new();
+    if let Some(table) = table.get("env") {
+        let table = table
+            .as_table()
+            .ok_or_else(|| format!("acp.agents.{name}.env must be a table"))?;
+        for (key, value) in table {
+            // Only the key is named in the error: values may be secrets.
+            let value = value
+                .as_str()
+                .ok_or_else(|| format!("acp.agents.{name}.env.{key} must be a string"))?;
+            env.insert(key.clone(), value.to_string());
+        }
+    }
+    let trusted = table
+        .get("trusted")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    Ok(AcpAgentConfig {
+        command,
+        args,
+        env,
+        trusted,
+    })
 }
 
 fn parse_recommendations_toml_config(

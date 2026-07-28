@@ -46,6 +46,10 @@ pub struct AcpAdapter {
     pub agent_command: String,
     /// Agent launch arguments forwarded to the bridge.
     pub agent_args: Vec<String>,
+    /// Environment injected into the agent at spawn time; may hold secrets.
+    pub agent_env: BTreeMap<String, String>,
+    /// Whether the agent is trusted to keep its own execution tools.
+    pub agent_trusted: bool,
     /// Whether this adapter may start real bridge/agent processes.
     pub allow_spawn: bool,
 }
@@ -57,6 +61,8 @@ impl Default for AcpAdapter {
             agent_name: "cosh-core".to_string(),
             agent_command: discover_binary("COSH_CORE_PATH", "cosh-core"),
             agent_args: vec!["--acp".to_string()],
+            agent_env: BTreeMap::new(),
+            agent_trusted: false,
             allow_spawn: false,
         }
     }
@@ -90,6 +96,32 @@ impl AcpAdapter {
         }
     }
 
+    /// Applies `[acp]` configuration and enables real bridge spawning.
+    ///
+    /// An unknown or unset agent name keeps the built-in cosh-core defaults,
+    /// so a typo degrades to the shipped agent instead of failing startup;
+    /// the mismatch is reported by diagnostics.
+    pub fn with_config(mut self, config: &crate::config::AcpConfig) -> Self {
+        self.allow_spawn = true;
+        if config.agent.is_empty() {
+            return self;
+        }
+        let Some(agent) = config.agents.get(&config.agent) else {
+            tracing::warn!(
+                agent = %config.agent,
+                "acp.agent names no configured agent; using the built-in one"
+            );
+            return self;
+        };
+        self.agent_name = config.agent.clone();
+        self.agent_command = agent.command.clone();
+        self.agent_args = agent.args.clone();
+        // Values are copied without logging: they may be credentials.
+        self.agent_env = agent.env.clone();
+        self.agent_trusted = agent.trusted;
+        self
+    }
+
     fn initialize_line(&self) -> String {
         let cwd = std::env::current_dir()
             .map(|dir| dir.to_string_lossy().into_owned())
@@ -101,14 +133,15 @@ impl AcpAdapter {
                 "name": self.agent_name,
                 "command": self.agent_command,
                 "args": self.agent_args,
-                "env": {},
+                "env": self.agent_env,
             },
             "cwd": cwd,
             "mcp_servers": [],
-            // Advertise terminal delegation: the shell executes agent
-            // commands through the dual-lane executor, which keeps them on
-            // the audited path (ADR-011 trust tiers).
-            "capabilities": { "terminal": true },
+            // Terminal delegation is withheld only from trusted agents, which
+            // keep their own tools; everything else executes through the
+            // shell's dual-lane executor and stays on the audited path
+            // (ADR-011 trust tiers).
+            "capabilities": { "terminal": !self.agent_trusted },
             "locale": serde_json::Value::Null,
         });
         params.to_string()
@@ -528,6 +561,43 @@ mod tests {
         assert_eq!(value["method"], "initialize");
         assert_eq!(value["protocol_version"], 1);
         assert_eq!(value["agent"]["args"][0], "--acp");
+    }
+
+    #[test]
+    fn config_selects_the_named_agent_and_enables_spawning() {
+        let mut config = crate::config::AcpConfig {
+            agent: "claude".to_string(),
+            ..Default::default()
+        };
+        config.agents.insert(
+            "claude".to_string(),
+            crate::config::AcpAgentConfig {
+                command: "claude".to_string(),
+                args: vec!["--acp".to_string()],
+                env: BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "secret".to_string())]),
+                trusted: true,
+            },
+        );
+        let adapter = AcpAdapter::default().with_config(&config);
+        assert!(adapter.allow_spawn);
+        assert_eq!(adapter.agent_command, "claude");
+        assert!(adapter.agent_trusted);
+        let value: serde_json::Value =
+            serde_json::from_str(&adapter.initialize_line()).expect("json");
+        // A trusted agent keeps its own tools, so terminals are not offered.
+        assert_eq!(value["capabilities"]["terminal"], false);
+        assert_eq!(value["agent"]["env"]["ANTHROPIC_API_KEY"], "secret");
+    }
+
+    #[test]
+    fn unknown_agent_name_falls_back_to_the_builtin_agent() {
+        let config = crate::config::AcpConfig {
+            agent: "typo".to_string(),
+            ..Default::default()
+        };
+        let adapter = AcpAdapter::default().with_config(&config);
+        assert!(adapter.allow_spawn);
+        assert_eq!(adapter.agent_name, "cosh-core");
     }
 
     #[test]

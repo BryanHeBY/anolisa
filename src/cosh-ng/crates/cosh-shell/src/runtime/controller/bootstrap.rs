@@ -18,8 +18,9 @@ use crate::runtime::state::{AnalysisMode, InlineState};
 
 use super::{approval_mode_from_config, render_raw_inline_events};
 
-fn build_adapter(kind: AdapterKind) -> AdapterInstance {
+fn build_adapter(kind: AdapterKind, config: &crate::config::CoshConfig) -> AdapterInstance {
     match adapter_for_kind(kind) {
+        AdapterInstance::Acp(adapter) => AdapterInstance::Acp(adapter.with_config(&config.acp)),
         AdapterInstance::ClaudeCode(adapter) => {
             AdapterInstance::ClaudeCode(adapter.with_model_call(true))
         }
@@ -119,7 +120,7 @@ pub(crate) fn run_raw(
         .input_classifier
         .with_ai_enabled(cosh_config.ai_enabled);
 
-    let adapter = build_adapter(kind);
+    let adapter = build_adapter(kind, &cosh_config);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
     inline_state.shell_session_id = Some(config.session_id.clone());
     inline_state.audit = Some(crate::journal::audit::ShellAuditRecorder::initialize(
@@ -305,7 +306,10 @@ where
         }
     };
 
-    render_loop_from_events_with_adapter(&shell_output.shell.events, &build_adapter(kind))
+    render_loop_from_events_with_adapter(
+        &shell_output.shell.events,
+        &build_adapter(kind, &load_config()),
+    )
 }
 
 pub(crate) fn run_adapter_demo(adapter_name: &str) -> i32 {
@@ -315,7 +319,7 @@ pub(crate) fn run_adapter_demo(adapter_name: &str) -> i32 {
         return 2;
     };
     let events = demo_events();
-    render_loop_from_events_with_adapter(&events, &build_adapter(kind))
+    render_loop_from_events_with_adapter(&events, &build_adapter(kind, &load_config()))
 }
 
 fn render_loop_from_events(events: &[ShellEvent]) -> i32 {
