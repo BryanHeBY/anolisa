@@ -79,6 +79,7 @@ pub(crate) async fn drive(
     params: InitializeParams,
     mut shell_lines: tokio::io::Lines<BufReader<tokio::io::Stdin>>,
     terminals: std::sync::Arc<TerminalRegistry>,
+    pending: std::sync::Arc<crate::pending::PendingRequests>,
 ) -> Result<i32, agent_client_protocol::Error> {
     let request = acp::InitializeRequest::new(ProtocolVersion::V1)
         .client_capabilities(acp::ClientCapabilities::new().terminal(params.capabilities.terminal))
@@ -199,6 +200,7 @@ pub(crate) async fn drive(
                             &mut prompt_inflight,
                             &outcome_tx,
                             &terminals,
+                            &pending,
                             message,
                         )
                         .await?;
@@ -226,6 +228,7 @@ async fn handle_shell_message(
     prompt_inflight: &mut bool,
     outcome_tx: &mpsc::UnboundedSender<(String, PromptOutcome)>,
     terminals: &TerminalRegistry,
+    pending: &crate::pending::PendingRequests,
     message: ShellMessage,
 ) -> Result<(), agent_client_protocol::Error> {
     match message {
@@ -320,6 +323,46 @@ async fn handle_shell_message(
             signal,
         } => {
             terminals.record_exit(&terminal_id, exit_code, signal.as_deref());
+        }
+        ShellMessage::PermissionResponse {
+            request_id,
+            option_id,
+            cancelled,
+        } => {
+            pending.answer_permission(&request_id, option_id, cancelled);
+        }
+        ShellMessage::AuthResponse {
+            request_id,
+            method_id,
+            provider_type,
+            values,
+            persist,
+            cancelled,
+        } => {
+            // Values are relayed verbatim and never logged (ADR-012).
+            let answer = if cancelled {
+                serde_json::json!({ "cancelled": true })
+            } else {
+                serde_json::json!({
+                    "providerId": method_id,
+                    "providerType": provider_type,
+                    "values": values,
+                    "persist": persist,
+                })
+            };
+            pending.answer_extension(&request_id, answer);
+        }
+        ShellMessage::AskUserResponse {
+            request_id,
+            answer,
+            cancelled,
+        } => {
+            let answer = if cancelled {
+                serde_json::json!({ "cancelled": true })
+            } else {
+                serde_json::json!({ "answer": answer })
+            };
+            pending.answer_extension(&request_id, answer);
         }
         other => {
             // Only the variant name is logged: AuthResponse values may carry
@@ -453,7 +496,7 @@ fn translate_mcp_servers(specs: &[McpServerSpec]) -> Vec<acp::McpServer> {
 }
 
 /// Serializes a snake_case wire enum (StopReason, ToolKind, ...) to its token.
-fn enum_token<T: Serialize>(value: &T) -> String {
+pub(crate) fn enum_token<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -471,6 +514,7 @@ fn message_variant(message: &ShellMessage) -> &'static str {
         ShellMessage::Cancel { .. } => "cancel",
         ShellMessage::PermissionResponse { .. } => "permission_response",
         ShellMessage::AuthResponse { .. } => "auth_response",
+        ShellMessage::AskUserResponse { .. } => "ask_user_response",
         ShellMessage::TerminalCreated { .. } => "terminal_created",
         ShellMessage::TerminalOutput { .. } => "terminal_output",
         ShellMessage::TerminalExit { .. } => "terminal_exit",

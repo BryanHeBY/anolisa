@@ -100,6 +100,47 @@ pub struct AuthMethodInfo {
     pub description: Option<String>,
 }
 
+/// One credential field requested by an `_cosh/auth_challenge`.
+///
+/// Mirrored by hand rather than shared with cosh-core: the bridge must stay
+/// free of internal crate dependencies. `secret` fields must never be logged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthFieldInfo {
+    pub name: String,
+    pub label: String,
+    #[serde(default)]
+    pub hint: Option<String>,
+    #[serde(default)]
+    pub secret: bool,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+}
+
+/// One credential provider offered by an `_cosh/auth_challenge`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthProviderInfo {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub fields: Vec<AuthFieldInfo>,
+    #[serde(default)]
+    pub builtin_provider_type: Option<String>,
+    #[serde(default)]
+    pub builtin_base_url: Option<String>,
+    #[serde(default)]
+    pub builtin_default_model: Option<String>,
+}
+
+/// One choice offered by an `_cosh/ask_user` question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// Messages sent by cosh-shell to the bridge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
@@ -132,10 +173,24 @@ pub enum ShellMessage {
     AuthResponse {
         request_id: String,
         method_id: Option<String>,
+        /// Provider type the selected method maps to, when the agent needs it
+        /// to build its client (`openai_compat`, `aliyun`, ...).
+        #[serde(default)]
+        provider_type: Option<String>,
         /// Field values for `_cosh/auth_challenge`; may contain secrets and
         /// must never be logged.
         #[serde(default)]
         values: BTreeMap<String, String>,
+        /// Whether the agent may write these credentials to its own config.
+        #[serde(default)]
+        persist: Option<bool>,
+        #[serde(default)]
+        cancelled: bool,
+    },
+    AskUserResponse {
+        request_id: String,
+        #[serde(default)]
+        answer: Option<String>,
         #[serde(default)]
         cancelled: bool,
     },
@@ -220,7 +275,29 @@ pub enum BridgeMessage {
     },
     AuthRequired {
         request_id: String,
+        #[serde(default)]
         methods: Vec<AuthMethodInfo>,
+        /// Why credentials are being requested (`not_configured`, `invalid`,
+        /// `expired`); empty when the agent did not say.
+        #[serde(default)]
+        reason: String,
+        #[serde(default)]
+        error_message: Option<String>,
+        /// Credential providers and their fields, when the agent uses the
+        /// `_cosh/auth_challenge` extension instead of plain ACP auth methods.
+        #[serde(default)]
+        providers: Vec<AuthProviderInfo>,
+    },
+    AskUser {
+        session_id: String,
+        request_id: String,
+        question: String,
+        #[serde(default)]
+        options: Vec<QuestionOption>,
+        #[serde(default)]
+        allow_free_text: bool,
+        #[serde(default)]
+        multi_select: bool,
     },
     PromptCompleted {
         request_id: String,

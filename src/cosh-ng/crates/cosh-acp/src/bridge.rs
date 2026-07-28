@@ -25,6 +25,85 @@ use crate::session;
 /// Grace period between SIGTERM and SIGKILL when stopping the agent.
 const AGENT_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
+/// Namespace of cosh's ACP extension methods.
+const COSH_EXTENSION_PREFIX: &str = "_cosh/";
+
+/// Interactive credential challenge; the shell owns the credentials (ADR-012).
+const AUTH_CHALLENGE_METHOD: &str = "_cosh/auth_challenge";
+
+/// Free-text or multiple-choice question. Session-plane traffic by design:
+/// questions touch the UI, so they never travel on the MCP data plane.
+const ASK_USER_METHOD: &str = "_cosh/ask_user";
+
+/// Parks one `_cosh/*` request and republishes it for the shell to answer.
+fn emit_extension_request(
+    pending: &crate::pending::PendingRequests,
+    message: &agent_client_protocol::UntypedMessage,
+    responder: agent_client_protocol::Responder<serde_json::Value>,
+) {
+    let method = message.method().to_string();
+    // Only the method name is logged: auth challenges describe credentials.
+    tracing::debug!(method = %method, "cosh extension request received");
+    let params = message.params();
+    match method.as_str() {
+        AUTH_CHALLENGE_METHOD => {
+            let request_id = pending.park_extension(responder);
+            emit(&BridgeMessage::AuthRequired {
+                request_id,
+                methods: Vec::new(),
+                reason: string_field(params, "reason"),
+                error_message: optional_string_field(params, "errorMessage"),
+                providers: parse_field(params, "providers"),
+            });
+        }
+        ASK_USER_METHOD => {
+            let request_id = pending.park_extension(responder);
+            emit(&BridgeMessage::AskUser {
+                session_id: string_field(params, "sessionId"),
+                request_id,
+                question: string_field(params, "question"),
+                options: parse_field(params, "options"),
+                allow_free_text: bool_field(params, "allowFreeText"),
+                multi_select: bool_field(params, "multiSelect"),
+            });
+        }
+        _ => {
+            let _ = responder
+                .respond_with_error(agent_client_protocol::Error::method_not_found().data(method));
+        }
+    }
+}
+
+fn string_field(params: &serde_json::Value, name: &str) -> String {
+    optional_string_field(params, name).unwrap_or_default()
+}
+
+fn optional_string_field(params: &serde_json::Value, name: &str) -> Option<String> {
+    params
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn bool_field(params: &serde_json::Value, name: &str) -> bool {
+    params
+        .get(name)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Deserializes one field, dropping it when the agent sent an unusable shape.
+fn parse_field<T: serde::de::DeserializeOwned + Default>(
+    params: &serde_json::Value,
+    name: &str,
+) -> T {
+    params
+        .get(name)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
 /// Validates the first JSONL line as a version-compatible handshake.
 ///
 /// # Errors
@@ -161,9 +240,42 @@ pub async fn run() -> i32 {
     };
     let transport = session::agent_transport(agent_stdin, agent_stdout);
     let registry = std::sync::Arc::new(crate::terminal::TerminalRegistry::default());
+    let pending = std::sync::Arc::new(crate::pending::PendingRequests::default());
     let result = Client
         .builder()
         .name("cosh-acp")
+        .on_receive_request(
+            {
+                let pending = std::sync::Arc::clone(&pending);
+                async move |request: acp::RequestPermissionRequest, responder, _cx| {
+                    let session_id = request.session_id.to_string();
+                    let title = request
+                        .tool_call
+                        .fields
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| request.tool_call.tool_call_id.to_string());
+                    let options = request
+                        .options
+                        .iter()
+                        .map(|option| crate::protocol::PermissionOption {
+                            id: option.option_id.0.to_string(),
+                            label: option.name.clone(),
+                            kind: session::enum_token(&option.kind),
+                        })
+                        .collect();
+                    let request_id = pending.park_permission(responder);
+                    emit(&BridgeMessage::PermissionRequest {
+                        session_id,
+                        request_id,
+                        title,
+                        options,
+                    });
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .on_receive_request(
             {
                 let registry = std::sync::Arc::clone(&registry);
@@ -214,10 +326,49 @@ pub async fn run() -> i32 {
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(transport, async move |cx| {
-            session::drive(cx, params, lines, registry).await
+        .on_receive_dispatch(
+            {
+                let pending = std::sync::Arc::clone(&pending);
+                async move |dispatch: agent_client_protocol::Dispatch<
+                    agent_client_protocol::UntypedMessage,
+                    agent_client_protocol::UntypedMessage,
+                >,
+                            _cx| {
+                    // Registered last on purpose: an untyped message matches
+                    // every method, so anything outside `_cosh/` is declined
+                    // and left to the handlers that own it.
+                    if !dispatch.method().starts_with(COSH_EXTENSION_PREFIX) {
+                        return Ok(agent_client_protocol::Handled::No {
+                            message: dispatch,
+                            retry: false,
+                        });
+                    }
+                    match dispatch {
+                        agent_client_protocol::Dispatch::Request(message, responder) => {
+                            emit_extension_request(&pending, &message, responder);
+                            Ok(agent_client_protocol::Handled::Yes)
+                        }
+                        agent_client_protocol::Dispatch::Notification(message) => {
+                            tracing::debug!(
+                                method = message.method(),
+                                "ignoring unknown cosh extension notification"
+                            );
+                            Ok(agent_client_protocol::Handled::Yes)
+                        }
+                        agent_client_protocol::Dispatch::Response(result, router) => router
+                            .route_with_result(result)
+                            .map(|()| agent_client_protocol::Handled::Yes),
+                    }
+                }
+            },
+            agent_client_protocol::on_receive_dispatch!(),
+        )
+        .connect_with(transport, {
+            let pending = std::sync::Arc::clone(&pending);
+            async move |cx| session::drive(cx, params, lines, registry, pending).await
         })
         .await;
+    pending.fail_all("bridge connection closed");
     let exit_code = match result {
         Ok(code) => code,
         Err(error) => {
