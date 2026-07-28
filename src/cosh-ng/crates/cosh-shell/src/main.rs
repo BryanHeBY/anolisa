@@ -141,7 +141,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [fake|claude|co|qwen|cosh-core] [--shell bash|zsh] [--resume [session-id]]>"
+                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [acp|fake|claude|co|qwen|cosh-core] [--shell bash|zsh] [--resume [session-id]]>"
             );
             2
         }
