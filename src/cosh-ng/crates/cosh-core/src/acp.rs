@@ -22,6 +22,7 @@ use crate::cli::CliArgs;
 use crate::config::CoreConfig;
 
 mod sink;
+mod terminal;
 mod translate;
 
 use sink::LineSink;
@@ -66,11 +67,11 @@ pub async fn run(args: &CliArgs, config: CoreConfig) -> i32 {
                 let state = Arc::clone(&state);
                 async move |_request: acp::NewSessionRequest,
                             responder: Responder<acp::NewSessionResponse>,
-                            _cx: ConnectionTo<Client>| {
+                            cx: ConnectionTo<Client>| {
                     // The engine mints the session id; the responder is
                     // completed by the translator once it reports one.
                     state
-                        .begin_session(SessionResponder::New(responder), None)
+                        .begin_session(SessionResponder::New(responder), None, &cx)
                         .await;
                     Ok(())
                 }
@@ -82,10 +83,10 @@ pub async fn run(args: &CliArgs, config: CoreConfig) -> i32 {
                 let state = Arc::clone(&state);
                 async move |request: acp::LoadSessionRequest,
                             responder: Responder<acp::LoadSessionResponse>,
-                            _cx: ConnectionTo<Client>| {
+                            cx: ConnectionTo<Client>| {
                     let resume = request.session_id.to_string();
                     state
-                        .begin_session(SessionResponder::Load(responder), Some(resume))
+                        .begin_session(SessionResponder::Load(responder), Some(resume), &cx)
                         .await;
                     Ok(())
                 }
@@ -168,6 +169,9 @@ pub(crate) struct AcpState {
     pending_prompt: Mutex<Option<Responder<acp::PromptResponse>>>,
     /// Set by `session/cancel`, cleared when the turn result is reported.
     cancelled: AtomicBool,
+    /// Connection held until the session id is known, so the execution
+    /// delegate can be built with both halves it needs.
+    pending_delegate: Mutex<Option<ConnectionTo<Client>>>,
 }
 
 impl AcpState {
@@ -182,6 +186,7 @@ impl AcpState {
             pending_session: Mutex::new(None),
             pending_prompt: Mutex::new(None),
             cancelled: AtomicBool::new(false),
+            pending_delegate: Mutex::new(None),
         }
     }
 
@@ -207,12 +212,17 @@ impl AcpState {
     ///
     /// The responder is parked rather than answered here: the engine mints the
     /// session id, so the translator completes it when the id arrives.
-    async fn begin_session(&self, responder: SessionResponder, resume: Option<String>) {
+    async fn begin_session(
+        &self,
+        responder: SessionResponder,
+        resume: Option<String>,
+        cx: &ConnectionTo<Client>,
+    ) {
         if let Err(error) = self.park_session_responder(responder) {
             tracing::warn!("rejecting session request: {error}");
             return;
         }
-        if let Err(error) = self.start_engine(resume).await {
+        if let Err(error) = self.start_engine(resume, cx).await {
             self.fail_session(error);
         }
     }
@@ -256,14 +266,49 @@ impl AcpState {
         }
     }
 
+    /// Routes command execution to the client when it owns the terminals.
+    ///
+    /// A resumed session already knows its id; a new one does not, so the
+    /// delegate is installed from the translator once the engine reports one.
+    fn install_terminal_delegate(&self, cx: &ConnectionTo<Client>, session_id: Option<&str>) {
+        if !self.client_executes_commands() {
+            return;
+        }
+        if let Ok(mut slot) = self.pending_delegate.lock() {
+            *slot = Some(cx.clone());
+        }
+        if let Some(session_id) = session_id {
+            self.activate_terminal_delegate(session_id);
+        }
+    }
+
+    /// Installs the execution delegate once the session id is known.
+    pub(crate) fn activate_terminal_delegate(&self, session_id: &str) {
+        let Some(cx) = self.pending_delegate.lock().ok().and_then(|mut s| s.take()) else {
+            return;
+        };
+        let delegate = std::sync::Arc::new(terminal::AcpTerminalDelegate::new(
+            cx,
+            session_id.to_string(),
+        ));
+        if crate::tool::shell::install_delegate(delegate) {
+            tracing::info!("command execution delegated to the ACP client");
+        }
+    }
+
     /// Spawns the headless engine over a private JSONL duplex channel.
-    async fn start_engine(&self, resume: Option<String>) -> Result<(), acp::Error> {
+    async fn start_engine(
+        &self,
+        resume: Option<String>,
+        cx: &ConnectionTo<Client>,
+    ) -> Result<(), acp::Error> {
         let mut slot = self.engine.lock().await;
         if slot.is_some() {
             return Err(
                 acp::Error::invalid_request().data("this agent process already serves a session")
             );
         }
+        self.install_terminal_delegate(cx, resume.as_deref());
 
         let mut engine_args = self.args.clone();
         engine_args.acp = false;

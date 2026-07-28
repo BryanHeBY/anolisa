@@ -1,3 +1,6 @@
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
+
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::process::Command;
@@ -5,6 +8,32 @@ use tokio::process::Command;
 use crate::process::{output_with_timeout, OutputError};
 
 use super::{Tool, ToolContext, ToolKind, ToolResult};
+
+/// Executes shell commands on the agent's behalf.
+///
+/// Installed by `--acp` when the client declares the ACP terminal capability:
+/// the agent must then stop running commands itself so every command lands on
+/// the client's audited execution path (ADR-011 tier 1).
+#[async_trait]
+pub trait ShellDelegate: Send + Sync {
+    /// Runs one command and returns its combined result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable reason when the command could not be handed
+    /// over at all; a command that ran and failed is a successful delegation
+    /// with `is_error` set.
+    async fn run(&self, command: &str, cwd: &Path, timeout_ms: u64) -> Result<ToolResult, String>;
+}
+
+/// Process-wide because delegation is a property of how this process was
+/// launched, not of an individual tool call.
+static DELEGATE: OnceLock<Arc<dyn ShellDelegate>> = OnceLock::new();
+
+/// Installs the execution delegate. Returns false if one is already set.
+pub fn install_delegate(delegate: Arc<dyn ShellDelegate>) -> bool {
+    DELEGATE.set(delegate).is_ok()
+}
 
 pub struct ShellTool;
 
@@ -49,6 +78,10 @@ impl Tool for ShellTool {
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(30_000);
+
+        if let Some(delegate) = DELEGATE.get() {
+            return delegate.run(command, &ctx.cwd, timeout_ms).await;
+        }
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command).current_dir(&ctx.cwd);

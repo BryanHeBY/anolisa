@@ -54,6 +54,7 @@ async fn translate(
         OutputMessage::System { subtype, payload } => {
             if subtype == "init" {
                 if let Some(session_id) = payload.session_id.as_deref() {
+                    state.activate_terminal_delegate(session_id);
                     state.complete_session(session_id);
                 }
             }
