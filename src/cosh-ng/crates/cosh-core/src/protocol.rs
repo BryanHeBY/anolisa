@@ -8,7 +8,7 @@ use serde_json::Value;
 // Auth types (used by CoreControlRequest::AuthRequired)
 // =====================================================================
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuthReason {
     #[serde(rename = "not_configured")]
     NotConfigured,
@@ -18,7 +18,7 @@ pub enum AuthReason {
     Expired,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthField {
     pub name: String,
     pub label: String,
@@ -30,7 +30,7 @@ pub struct AuthField {
     pub placeholder: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthProvider {
     pub id: String,
     pub label: String,
@@ -161,7 +161,7 @@ pub struct HostExecutedShellResult {
 // Output messages (Core → Shell, written to stdout)
 // =====================================================================
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum OutputMessage {
     #[serde(rename = "system")]
@@ -231,27 +231,27 @@ pub enum OutputMessage {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreControlResponsePayload {
     pub subtype: String,
     pub request_id: String,
     pub response: CoreControlResponseBody,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreControlResponseBody {
     pub subtype: String,
     pub capabilities: CoreControlCapabilities,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreControlCapabilities {
     pub can_handle_can_use_tool: bool,
     pub can_handle_host_executed_shell_tool_result: bool,
     pub can_handle_shell_evidence_tool: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -272,18 +272,18 @@ pub struct SystemPayload {
     pub decision: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
     pub content: Vec<ContentBlock>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserOutputMessage {
     pub role: String,
     pub content: Vec<UserContentBlock>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
@@ -296,7 +296,7 @@ pub enum ContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum UserContentBlock {
     #[serde(rename = "tool_result")]
@@ -307,7 +307,7 @@ pub enum UserContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "subtype")]
 pub enum CoreControlRequest {
     #[serde(rename = "can_use_tool")]
@@ -358,14 +358,14 @@ pub enum CoreControlRequest {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskUserOption {
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEventPayload {
     #[serde(rename = "message_start")]
@@ -387,7 +387,7 @@ pub enum StreamEventPayload {
     MessageStop,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlockInfo {
     #[serde(rename = "text")]
@@ -398,7 +398,7 @@ pub enum ContentBlockInfo {
     ToolUse { id: String, name: String },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[allow(clippy::enum_variant_names)]
 pub enum ContentDelta {

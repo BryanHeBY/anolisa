@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self};
 use std::path::PathBuf;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -17,11 +17,36 @@ mod auth;
 
 use auth::request_auth;
 
-pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> {
+/// Runs the headless driver over the process stdio.
+pub async fn run(args: &CliArgs, config: CoreConfig) -> Result<i32, String> {
+    let writer = io::BufWriter::new(io::stdout());
+    let lines = BufReader::new(tokio::io::stdin()).lines();
+    run_with_io(args, config, writer, lines).await
+}
+
+/// Runs the headless driver over caller-supplied JSONL streams.
+///
+/// `--acp` reuses this with a private in-process channel so both modes share
+/// one turn engine, one approval path, and one session lifecycle.
+///
+/// # Errors
+///
+/// Returns a human-readable reason when the runtime cannot be built; per-turn
+/// failures are reported as protocol messages instead.
+pub async fn run_with_io<W, R>(
+    args: &CliArgs,
+    mut config: CoreConfig,
+    writer: W,
+    lines: tokio::io::Lines<R>,
+) -> Result<i32, String>
+where
+    W: io::Write,
+    R: AsyncBufReadExt + Unpin,
+{
+    let mut writer = writer;
+    let mut lines = lines;
     apply_cli_overrides(args, &mut config);
 
-    let stdout = io::stdout();
-    let mut writer = io::BufWriter::new(stdout.lock());
     let mut session = match SessionRuntime::initialize(args, &config) {
         Ok(session) => session,
         Err(error) => {
@@ -72,9 +97,6 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     for diagnostic in &snapshot.diagnostics {
         tracing::warn!(code = %diagnostic.code, "{}", diagnostic.message);
     }
-
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
 
     // --- Auth check: if no API key, request auth from Shell ---
     let mut buffered_lines: Vec<String> = Vec::new();
