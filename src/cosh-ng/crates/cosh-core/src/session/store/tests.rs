@@ -332,6 +332,28 @@ fn summaries_bound_untrusted_model_and_mismatched_workspace_metadata() {
 }
 
 #[test]
+fn lease_blocks_a_second_writer_but_not_our_own_commits() {
+    let temp = tempfile::tempdir().unwrap();
+    let holder = store(&temp);
+    let rival = store(&temp);
+    let mut session = new_session(&holder, "leased");
+    holder.persist(&mut session).unwrap();
+
+    holder.acquire_lease(&session.session_id).unwrap();
+    // The holder keeps committing: persist reuses the held lease instead of
+    // opening a second descriptor that would conflict with itself.
+    holder.persist(&mut session).unwrap();
+
+    let error = rival.acquire_lease(&session.session_id).unwrap_err();
+    assert_eq!(error.code(), "conflict");
+
+    holder.release_lease();
+    rival
+        .acquire_lease(&session.session_id)
+        .expect("lease is available once released");
+}
+
+#[test]
 fn stable_cursor_survives_deletion_of_previous_page() {
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);

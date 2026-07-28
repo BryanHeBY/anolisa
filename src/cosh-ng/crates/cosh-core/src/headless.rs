@@ -158,10 +158,25 @@ where
             );
         }
         let start = std::time::Instant::now();
-        let turn_result = engine
-            .handle_user_message(prompt, &mut lines, &mut writer)
-            .await;
-        let persist_result = session.persist(&engine);
+        // A lease conflict skips the turn entirely: another agent owns this
+        // transcript, so spending a provider call would be wasted work.
+        let lease = session.begin_turn();
+        let turn_result = match lease.as_ref() {
+            Ok(()) => {
+                engine
+                    .handle_user_message(prompt, &mut lines, &mut writer)
+                    .await
+            }
+            Err(_) => Ok(()),
+        };
+        let persist_result = match lease {
+            Ok(()) => {
+                let persisted = session.persist(&engine);
+                session.end_turn();
+                persisted
+            }
+            Err(error) => Err(error),
+        };
         match combine_turn_and_persist(turn_result, persist_result) {
             Ok(()) => {
                 let duration = start.elapsed();
@@ -415,10 +430,27 @@ where
             engine.metrics = TurnMetrics::default();
             let start = std::time::Instant::now();
 
-            let turn_result = engine
-                .handle_user_message(&message.content, lines, writer)
-                .await;
-            let persist_result = session.persist(engine);
+            // A lease conflict skips the turn entirely: another agent owns
+            // this transcript, so spending a provider call would be wasted
+            // work. It is reported as a persistence failure because that is
+            // exactly what the lease protects.
+            let lease = session.begin_turn();
+            let turn_result = match lease.as_ref() {
+                Ok(()) => {
+                    engine
+                        .handle_user_message(&message.content, lines, writer)
+                        .await
+                }
+                Err(_) => Ok(()),
+            };
+            let persist_result = match lease {
+                Ok(()) => {
+                    let persisted = session.persist(engine);
+                    session.end_turn();
+                    persisted
+                }
+                Err(error) => Err(error),
+            };
             match combine_turn_and_persist(turn_result, persist_result) {
                 Ok(()) => {
                     let duration = start.elapsed();
@@ -562,6 +594,27 @@ impl SessionRuntime {
         // the next commit cannot reuse an already published revision.
         self.record.compaction_revision = engine.compaction.revision();
         store.persist(&mut self.record)
+    }
+
+    /// Takes the single-writer lease for the turn that is about to run.
+    ///
+    /// A conflict means another agent process is mid-turn on this transcript,
+    /// which is reported to the caller rather than silently interleaved.
+    fn begin_turn(&self) -> Result<(), SessionError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        if !self.auto_persist {
+            return Ok(());
+        }
+        store.acquire_lease(&self.record.session_id)
+    }
+
+    /// Releases the turn lease so idle-boundary compaction can commit.
+    fn end_turn(&self) {
+        if let Some(store) = self.store.as_ref() {
+            store.release_lease();
+        }
     }
 
     fn resumable(&self) -> bool {

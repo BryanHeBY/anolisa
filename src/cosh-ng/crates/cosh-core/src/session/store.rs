@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
@@ -12,7 +13,7 @@ use crate::provider::Message;
 
 use super::io::{
     expand_persist_dir, io_error, now_ms, open_file_time_ms, read_bounded_open_session_file,
-    MAX_SESSION_FILE_BYTES,
+    SessionLock, MAX_SESSION_FILE_BYTES,
 };
 use super::listing::{
     collect_list_page, entry_is_after_cursor, format_list_cursor, parse_list_cursor,
@@ -43,6 +44,13 @@ pub struct SessionStore {
     scoped: ScopedStorage,
     legacy_dirs: Vec<LegacyDirectory>,
     workspace_scope: String,
+    /// Single-writer lease held across a turn, so a second agent cannot
+    /// interleave commits with ours (ADR-011).
+    ///
+    /// Deliberately turn-scoped rather than process-scoped: the compactor is
+    /// a legitimate second writer that runs at idle boundaries and
+    /// coordinates through the generation and revision preflight instead.
+    lease: Mutex<Option<(ProviderSessionId, SessionLock)>>,
 }
 
 impl SessionStore {
@@ -98,6 +106,7 @@ impl SessionStore {
             scoped,
             legacy_dirs,
             workspace_scope,
+            lease: Mutex::new(None),
         })
     }
 
@@ -130,6 +139,53 @@ impl SessionStore {
     /// Returns a typed validation, conflict, serialization, or I/O error.
     /// [`SessionError::Conflict`] also covers a stored compaction revision
     /// higher than the one being written.
+    /// Takes the single-writer lease for one session until it is released.
+    ///
+    /// Held across a turn so a second agent writing the same transcript fails
+    /// fast instead of interleaving commits. The compactor is intentionally
+    /// not covered: it runs at idle boundaries and coordinates through the
+    /// generation and revision preflight.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Conflict`] when another process already holds
+    /// the lease, or [`SessionError::Io`] when the lock file is unusable.
+    pub fn acquire_lease(&self, session_id: &ProviderSessionId) -> Result<(), SessionError> {
+        let Some(directory) = self.scoped.directory(true)? else {
+            return Err(io_error(
+                "create scoped session directory",
+                &self.base_dir,
+                io::Error::other("directory creation returned no descriptor"),
+            ));
+        };
+        let lock = self.scoped.acquire_lock(&directory, session_id)?;
+        let mut held = self
+            .lease
+            .lock()
+            .map_err(|_| SessionError::InvalidRequest {
+                message: "session lease state poisoned".to_string(),
+            })?;
+        *held = Some((session_id.clone(), lock));
+        Ok(())
+    }
+
+    /// Releases the single-writer lease, if one is held.
+    pub fn release_lease(&self) {
+        if let Ok(mut held) = self.lease.lock() {
+            held.take();
+        }
+    }
+
+    fn holds_lease(&self, session_id: &ProviderSessionId) -> bool {
+        self.lease
+            .lock()
+            .map(|held| {
+                held.as_ref()
+                    .is_some_and(|(held_id, _)| held_id == session_id)
+            })
+            .unwrap_or(false)
+    }
+
     pub fn persist(&self, session: &mut PersistedSession) -> Result<(), SessionError> {
         if session.schema_version != CURRENT_SCHEMA_VERSION {
             return Err(SessionError::IncompatibleVersion {
@@ -152,7 +208,12 @@ impl SessionStore {
                 io::Error::other("directory creation returned no descriptor"),
             ));
         };
-        let _lock = self.scoped.acquire_lock(&directory, &session.session_id)?;
+        // Reuse the held lease: flock is per open file description, so
+        // acquiring a second descriptor here would conflict with ourselves.
+        let _lock = match self.holds_lease(&session.session_id) {
+            true => None,
+            false => Some(self.scoped.acquire_lock(&directory, &session.session_id)?),
+        };
         let scoped_file = self.scoped.open_session(&directory, &session.session_id)?;
         let scoped_exists = scoped_file.is_some();
         let mut legacy = if scoped_exists {
