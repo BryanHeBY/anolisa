@@ -1,18 +1,18 @@
 use clap::{Parser, Subcommand};
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Manage configured MCP servers.
     Mcp(McpArgs),
 }
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
 pub struct McpArgs {
     #[command(subcommand)]
     pub command: McpCommand,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum McpCommand {
     /// List configured MCP servers without exposing credentials.
     List,
@@ -51,7 +51,7 @@ pub enum McpCommand {
     },
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "cosh-core",
     version,
@@ -63,6 +63,10 @@ pub struct CliArgs {
     /// Force headless JSONL mode (otherwise auto-detected via TTY)
     #[arg(long)]
     pub headless: bool,
+
+    /// Serve the Agent Client Protocol over stdio (agent role)
+    #[arg(long, conflicts_with = "headless")]
+    pub acp: bool,
 
     /// Override the active model from config.toml
     #[arg(long)]
@@ -161,7 +165,15 @@ pub struct CliArgs {
 
 impl CliArgs {
     pub fn is_headless(&self) -> bool {
-        self.headless || !atty::is(atty::Stream::Stdin)
+        !self.acp && (self.headless || !atty::is(atty::Stream::Stdin))
+    }
+
+    /// True when this process serves ACP over stdio.
+    ///
+    /// Checked before `is_headless`, which is TTY-derived and would otherwise
+    /// claim every piped launch.
+    pub fn is_acp(&self) -> bool {
+        self.acp
     }
 
     pub fn is_registry(&self) -> bool {

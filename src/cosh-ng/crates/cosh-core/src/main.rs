@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
+mod acp;
 mod audit;
 mod auth;
 mod cli;
@@ -161,6 +162,11 @@ async fn run() {
         registry::run(&args, config).await;
     } else if args.is_compact() {
         std::process::exit(compaction::run_compact_cli(&args, config).await);
+    } else if args.is_acp() {
+        let code = acp::run(&args, config).await;
+        if code != 0 {
+            std::process::exit(code);
+        }
     } else if args.is_headless() {
         match headless::run(&args, config).await {
             Ok(0) => {}

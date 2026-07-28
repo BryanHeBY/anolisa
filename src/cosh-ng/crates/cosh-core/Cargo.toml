@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# agent-client-protocol 2.0 requires 1.88; the workspace floor stays at 1.74.
+rust-version = "1.88"
 description = "Unified core component for cosh — agent core + interactive TUI + headless JSONL backend"
 
 [[bin]]
@@ -11,6 +13,7 @@ name = "cosh-core"
 path = "src/main.rs"
 
 [dependencies]
+agent-client-protocol.workspace = true
 clap.workspace = true
 atty = "0.2"
 cosh-types = { path = "../cosh-types" }

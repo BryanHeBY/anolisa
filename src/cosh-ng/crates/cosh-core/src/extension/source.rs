@@ -215,7 +215,9 @@ pub struct StoreLock {
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        // Qualified so the fs2 trait method is used rather than the
+        // inherent std one, which is newer than this crate's MSRV.
+        let _ = fs2::FileExt::unlock(&self.file);
     }
 }
 
