@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::adapter::{AdapterInstance, CoshCoreAdapter};
+use crate::adapter::AdapterInstance;
 use crate::runtime::prelude::{AuthProviderInfo, AuthResponse};
 
 /// A configured provider displayed by the provider-management panel.
@@ -111,8 +111,8 @@ impl From<CoreSavedProvider> for ExistingProvider {
     }
 }
 
-pub(super) fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAuthState, String> {
-    let value = cosh_core.registry_query("auth", "state", Value::Null)?;
+pub(super) fn load_core_auth_state(adapter: &AdapterInstance) -> Result<CoreAuthState, String> {
+    let value = adapter.registry_request("auth", "state", Value::Null)?;
     let state: RegistryAuthState =
         serde_json::from_value(value).map_err(|error| format!("invalid auth state: {error}"))?;
     let mut existing_providers: Vec<ExistingProvider> = state
@@ -136,20 +136,14 @@ pub(super) fn core_auth_activate(
     adapter: &AdapterInstance,
     provider_id: &str,
 ) -> Result<(), String> {
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
-    };
-    cosh_core
-        .registry_query("auth", "activate", json!({ "provider_id": provider_id }))
+    adapter
+        .registry_request("auth", "activate", json!({ "provider_id": provider_id }))
         .map(|_| ())
 }
 
 pub(super) fn core_auth_delete(adapter: &AdapterInstance, provider_id: &str) -> Result<(), String> {
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
-    };
-    cosh_core
-        .registry_query("auth", "delete", json!({ "provider_id": provider_id }))
+    adapter
+        .registry_request("auth", "delete", json!({ "provider_id": provider_id }))
         .map(|_| ())
 }
 
@@ -157,11 +151,8 @@ pub(super) fn core_auth_configure(
     adapter: &AdapterInstance,
     response: &AuthResponse,
 ) -> Result<(), String> {
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
-    };
-    cosh_core
-        .registry_query(
+    adapter
+        .registry_request(
             "auth",
             "configure",
             json!({

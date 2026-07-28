@@ -310,8 +310,8 @@ fn runtime_identity(adapter: &AdapterInstance, state: &InlineState) -> RuntimeId
             model: observed_model,
             provider_details_available: true,
         },
-        AdapterInstance::CoshCore(core) => {
-            match core.registry_query("auth", "state", serde_json::Value::Null) {
+        AdapterInstance::CoshCore(_) => {
+            match adapter.registry_request("auth", "state", serde_json::Value::Null) {
                 Ok(value) => core_identity_from_auth_state(&value, observed_model),
                 Err(_) => RuntimeIdentity {
                     provider_id: Some("cosh-core".to_string()),
@@ -320,14 +320,19 @@ fn runtime_identity(adapter: &AdapterInstance, state: &InlineState) -> RuntimeId
                 },
             }
         }
-        AdapterInstance::Acp(acp) => RuntimeIdentity {
-            provider_id: Some(format!("acp:{}", acp.agent_name)),
-            provider_type: Some("ACP".to_string()),
-            model: observed_model,
-            // Agent-side identity details arrive with the capability
-            // handshake in later stages (ADR-011).
-            provider_details_available: false,
-        },
+        AdapterInstance::Acp(acp) => {
+            // An ACP turn backed by cosh-core still reads its provider from
+            // the registry, which does not cross the bridge (ADR-012).
+            match adapter.registry_request("auth", "state", serde_json::Value::Null) {
+                Ok(value) => core_identity_from_auth_state(&value, observed_model),
+                Err(_) => RuntimeIdentity {
+                    provider_id: Some(format!("acp:{}", acp.agent_name)),
+                    provider_type: Some("ACP".to_string()),
+                    model: observed_model,
+                    provider_details_available: false,
+                },
+            }
+        }
     }
 }
 

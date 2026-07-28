@@ -48,10 +48,7 @@ pub(super) fn submit_delete_confirmation(
         .cloned()
         .ok_or_else(|| "provider selection is no longer valid".to_string())?;
     core_auth_delete(adapter, &existing.name)?;
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
-    };
-    let core_state = load_core_auth_state(cosh_core)?;
+    let core_state = load_core_auth_state(adapter)?;
     auth.existing_providers = core_state.existing_providers;
     // Re-derive the SysOM slot from the reloaded list: deleting the promoted RAM-role
     // provider must bring the shortcut back rather than relabel its replacement.

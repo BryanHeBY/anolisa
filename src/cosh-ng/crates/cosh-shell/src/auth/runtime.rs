@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::adapter::AdapterInstance;
+use crate::adapter::{AdapterInstance, AgentAdapter};
 use crate::auth::active_submission::finish_active_submission;
 use crate::auth::capture::matches_auth_capture;
 use crate::auth::completion::finish_auth_configuration;
@@ -132,7 +132,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     if state.auth.state.is_some() {
         return Ok(());
     }
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+    if !adapter.capabilities().registry {
         let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
         renderer.write_notice_panel(
             output,
@@ -140,15 +140,15 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
                 title: "Auth unavailable",
                 body: vec![
                     "Authentication is managed by cosh-core.".to_string(),
-                    "Switch to the cosh-core backend before running /auth.".to_string(),
+                    "Configure a cosh-core agent before running /auth.".to_string(),
                 ],
                 footer: None,
             },
         )?;
         return Ok(());
-    };
+    }
 
-    let core_state = match load_core_auth_state(cosh_core) {
+    let core_state = match load_core_auth_state(adapter) {
         Ok(state) => state,
         Err(message) => {
             let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
@@ -230,10 +230,7 @@ struct CoreAuthVerify {
 }
 
 fn core_auth_verify_aliyun_ecs(adapter: &AdapterInstance) -> Result<bool, String> {
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
-    };
-    let value = cosh_core.registry_query(
+    let value = adapter.registry_request(
         "auth",
         "verify",
         json!({
@@ -259,11 +256,8 @@ fn core_auth_prepare(
     adapter: &AdapterInstance,
     provider_type: &str,
 ) -> Result<CoreAuthPrepare, String> {
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
-    };
     let value =
-        cosh_core.registry_query("auth", "prepare", json!({ "provider_type": provider_type }))?;
+        adapter.registry_request("auth", "prepare", json!({ "provider_type": provider_type }))?;
     serde_json::from_value(value).map_err(|e| format!("invalid auth prepare response: {e}"))
 }
 
