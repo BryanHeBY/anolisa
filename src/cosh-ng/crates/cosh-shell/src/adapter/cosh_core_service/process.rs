@@ -233,6 +233,36 @@ pub(super) fn process_error(process: &PersistentProcess, message: &str) -> Strin
     }
 }
 
+// Consumes a pending deferred reload and replays it into the live core.
+// Shared by the pre-turn flush (idle-mutation case) and the end-of-turn
+// check (mutation during a running turn).
+pub(super) fn flush_pending_reload(
+    process: &mut PersistentProcess,
+    reload_pending: &Arc<AtomicBool>,
+    run_id: &str,
+    event_tx: &mpsc::Sender<Result<crate::types::AgentEvent, AdapterError>>,
+) {
+    if reload_pending.swap(false, Ordering::SeqCst) {
+        let deferred = RegistryCommand {
+            request_id: format!("deferred-reload-{}", std::process::id()),
+            domain: "extensions".to_string(),
+            action: "reload".to_string(),
+            params: Value::Null,
+            response_tx: mpsc::channel().0,
+        };
+        if let Err(error) = execute_registry(process, &deferred) {
+            super::super::claude::send_agent_event(
+                event_tx,
+                crate::types::AgentEvent::StatusChanged {
+                    run_id: run_id.to_string(),
+                    phase: "extension_reload_failed".to_string(),
+                    message: error.into_message(),
+                },
+            );
+        }
+    }
+}
+
 pub(super) fn execute_registry(
     process: &mut PersistentProcess,
     command: &RegistryCommand,

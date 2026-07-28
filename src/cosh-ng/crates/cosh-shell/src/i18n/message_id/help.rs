@@ -83,6 +83,20 @@ macro_rules! help_registry_ids {
     };
 }
 
+// Trailing segment (issue #1747): appended after all existing segments so
+// every pre-existing MessageId discriminant stays stable, per the
+// stable-runtime-api trailing-segment contract established in #1721.
+macro_rules! mcp_registry_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpSummaryMcp,
+            SlashMcpTitle,
+        );
+    };
+}
+
 macro_rules! slash_parse_error_ids {
     ($next:ident, $remaining:tt, $($ids:ident,)*) => {
         $next!(

@@ -123,10 +123,16 @@ mod tests {
         // The tool-argument status pair is a registered stable runtime
         // interface: pin the discriminants with fixed values so a segment
         // inserted ahead of them can never shift the tail unnoticed
-        // (new segments must append after multiline_entry_ids).
+        // (new segments must append after mcp_registry_ids).
         assert_eq!(MessageId::AgentStatusToolArguments as usize, 829);
         assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 830);
         assert_eq!(MessageId::HelpGroupPrompt as usize, 831);
+        // The #1747 trailing segment must stay appended after every earlier
+        // segment so pre-existing discriminants never shift.
+        assert_eq!(MessageId::HelpSummaryMcp as usize, 834);
+        assert_eq!(MessageId::SlashMcpTitle as usize, 835);
+        assert_eq!(MessageId::SlashMcpTitle as usize, MessageId::ALL.len() - 1);
+        assert_eq!(MessageId::HelpSummaryMcp as usize, MessageId::ALL.len() - 2);
     }
 
     #[test]

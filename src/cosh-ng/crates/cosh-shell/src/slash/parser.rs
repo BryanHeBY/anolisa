@@ -32,6 +32,7 @@ pub(super) enum SlashCommand<'a> {
     Unknown(&'a str),
     Extensions(&'a str),
     Skills(Option<&'a str>, Option<&'a str>),
+    Mcp(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Session(&'a str),
     Recommendations(Option<&'a str>, Option<&'a str>, Option<&'a str>),
 }
@@ -104,6 +105,12 @@ impl<'a> SlashCommand<'a> {
                 let arg = parts.next();
                 Some(Self::Skills(sub, arg))
             }
+            "/mcp" => {
+                let sub = parts.next();
+                let arg = parts.next();
+                let extra = parts.next();
+                Some(Self::Mcp(sub, arg, extra))
+            }
             "/session" => Some(Self::Session(
                 input.strip_prefix("/session").unwrap_or_default().trim(),
             )),
@@ -158,6 +165,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/stats"
             | "/extensions"
             | "/skills"
+            | "/mcp"
             | "/session"
             | "/new"
             | "/resume"
@@ -270,6 +278,8 @@ mod tests {
             "/health \"quick\"",
             "/stats \"model\"",
             "/recommendations \"on\"",
+            "/mcp connect \"my server\"",
+            "/mcp inspect 'my server'",
         ] {
             assert!(
                 matches!(
