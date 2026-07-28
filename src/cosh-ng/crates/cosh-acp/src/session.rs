@@ -139,7 +139,11 @@ pub(crate) async fn drive(
 
     let (outcome_tx, mut outcome_rx) = mpsc::unbounded::<(String, PromptOutcome)>();
     let mut active: Option<ActiveSession<'static, Agent>> = None;
-    let mut prompt_inflight = false;
+    // Request id of the turn in flight. The stop reason can arrive either on
+    // the session update stream or through the prompt response callback,
+    // depending on how the SDK routes the response, so whichever lands first
+    // completes the turn and clears this slot.
+    let mut inflight_request: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -152,7 +156,9 @@ pub(crate) async fn drive(
                 if active.is_some() =>
             {
                 match update {
-                    Ok(update) => translate_session_message(update).await?,
+                    Ok(update) => {
+                        translate_session_message(update, &mut inflight_request).await?;
+                    }
                     Err(error) => {
                         emit(&BridgeMessage::AgentFailed {
                             code: "session_stream_failed".to_string(),
@@ -161,18 +167,24 @@ pub(crate) async fn drive(
                             hint: None,
                         });
                         active = None;
-                        prompt_inflight = false;
+                        inflight_request = None;
                     }
                 }
             },
             outcome = outcome_rx.next() => {
                 if let Some((request_id, outcome)) = outcome {
-                    prompt_inflight = false;
+                    let still_inflight = inflight_request.as_deref() == Some(request_id.as_str());
+                    inflight_request = None;
                     match outcome {
-                        PromptOutcome::Stopped(reason) => emit(&BridgeMessage::PromptCompleted {
-                            request_id,
-                            stop_reason: enum_token(&reason),
-                        }),
+                        PromptOutcome::Stopped(reason) if still_inflight => {
+                            emit(&BridgeMessage::PromptCompleted {
+                                request_id,
+                                stop_reason: enum_token(&reason),
+                            });
+                        }
+                        // Already completed from the session stream; emitting
+                        // again would give the shell two terminal events.
+                        PromptOutcome::Stopped(_) => {}
                         PromptOutcome::Failed(message) => emit(&BridgeMessage::AgentFailed {
                             code: "prompt_failed".to_string(),
                             message,
@@ -197,7 +209,7 @@ pub(crate) async fn drive(
                             &cx,
                             &params,
                             &mut active,
-                            &mut prompt_inflight,
+                            &mut inflight_request,
                             &outcome_tx,
                             &terminals,
                             &pending,
@@ -225,7 +237,7 @@ async fn handle_shell_message(
     cx: &ConnectionTo<Agent>,
     params: &InitializeParams,
     active: &mut Option<ActiveSession<'static, Agent>>,
-    prompt_inflight: &mut bool,
+    inflight_request: &mut Option<String>,
     outcome_tx: &mpsc::UnboundedSender<(String, PromptOutcome)>,
     terminals: &TerminalRegistry,
     pending: &crate::pending::PendingRequests,
@@ -247,7 +259,7 @@ async fn handle_shell_message(
                         session_id: session.session_id().to_string(),
                     });
                     *active = Some(session);
-                    *prompt_inflight = false;
+                    *inflight_request = None;
                 }
                 Err(error) => emit(&BridgeMessage::AgentFailed {
                     code: "session_new_failed".to_string(),
@@ -273,7 +285,7 @@ async fn handle_shell_message(
                 emit(&prompt_rejected("prompt targets an unknown session"));
                 return Ok(());
             }
-            if *prompt_inflight {
+            if inflight_request.is_some() {
                 emit(&prompt_rejected("a prompt is already in flight"));
                 return Ok(());
             }
@@ -281,6 +293,9 @@ async fn handle_shell_message(
             meta.insert(APPROVAL_MODE_META_KEY.to_string(), approval_mode.into());
             let request = acp::PromptRequest::new(session_id, vec![text.into()]).meta(meta);
             let tx = outcome_tx.clone();
+            // Recorded before the request goes out so a fast reply cannot
+            // arrive while the slot is still empty.
+            *inflight_request = Some(request_id.clone());
             cx.send_request(request)
                 .on_receiving_result(async move |result| {
                     let outcome = match result {
@@ -290,7 +305,6 @@ async fn handle_shell_message(
                     let _ = tx.unbounded_send((request_id, outcome));
                     Ok(())
                 })?;
-            *prompt_inflight = true;
         }
         ShellMessage::Cancel { session_id } => {
             // Three-stage cancellation (ADR-011): notify the agent, tell the
@@ -385,6 +399,7 @@ async fn handle_shell_message(
 /// Translates one session update from the agent into bridge events.
 async fn translate_session_message(
     message: SessionMessage,
+    inflight_request: &mut Option<String>,
 ) -> Result<(), agent_client_protocol::Error> {
     match message {
         SessionMessage::SessionMessage(dispatch) => {
@@ -396,9 +411,14 @@ async fn translate_session_message(
                 .await
                 .otherwise_ignore()?;
         }
-        // Stop reasons flow through the prompt response callback because the
-        // bridge sends its own PromptRequest instead of ActiveSession's.
-        SessionMessage::StopReason(_) => {}
+        SessionMessage::StopReason(reason) => {
+            if let Some(request_id) = inflight_request.take() {
+                emit(&BridgeMessage::PromptCompleted {
+                    request_id,
+                    stop_reason: enum_token(&reason),
+                });
+            }
+        }
         _ => {}
     }
     Ok(())

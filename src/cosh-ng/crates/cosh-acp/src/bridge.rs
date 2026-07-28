@@ -334,30 +334,35 @@ pub async fn run() -> i32 {
                     agent_client_protocol::UntypedMessage,
                 >,
                             _cx| {
-                    // Registered last on purpose: an untyped message matches
-                    // every method, so anything outside `_cosh/` is declined
-                    // and left to the handlers that own it.
-                    if !dispatch.method().starts_with(COSH_EXTENSION_PREFIX) {
-                        return Ok(agent_client_protocol::Handled::No {
-                            message: dispatch,
-                            retry: false,
-                        });
-                    }
                     match dispatch {
-                        agent_client_protocol::Dispatch::Request(message, responder) => {
+                        // Responses must always be routed to the caller that
+                        // is waiting for them: declining one from the last
+                        // handler in the chain drops it silently.
+                        agent_client_protocol::Dispatch::Response(result, router) => router
+                            .route_with_result(result)
+                            .map(|()| agent_client_protocol::Handled::Yes),
+                        // Registered last on purpose: an untyped message
+                        // matches every method, so anything outside `_cosh/`
+                        // is declined and left to the handlers that own it.
+                        agent_client_protocol::Dispatch::Request(message, responder)
+                            if message.method().starts_with(COSH_EXTENSION_PREFIX) =>
+                        {
                             emit_extension_request(&pending, &message, responder);
                             Ok(agent_client_protocol::Handled::Yes)
                         }
-                        agent_client_protocol::Dispatch::Notification(message) => {
+                        agent_client_protocol::Dispatch::Notification(message)
+                            if message.method().starts_with(COSH_EXTENSION_PREFIX) =>
+                        {
                             tracing::debug!(
                                 method = message.method(),
                                 "ignoring unknown cosh extension notification"
                             );
                             Ok(agent_client_protocol::Handled::Yes)
                         }
-                        agent_client_protocol::Dispatch::Response(result, router) => router
-                            .route_with_result(result)
-                            .map(|()| agent_client_protocol::Handled::Yes),
+                        other => Ok(agent_client_protocol::Handled::No {
+                            message: other,
+                            retry: false,
+                        }),
                     }
                 }
             },
