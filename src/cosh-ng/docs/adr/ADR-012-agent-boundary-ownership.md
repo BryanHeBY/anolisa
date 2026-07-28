@@ -21,9 +21,40 @@ ADR-011 确立了 ACP 协议脊柱、`cosh-acp` 桥与双车道执行器。其�
 | 数据面 | MCP → unix socket | 幂等、可重试、UI 不可见、无 turn 耦合 | shell 取证工具、未来的只读 shell 状态 |
 | 会话面 | ACP（标准方法或 `_cosh/*` 扩展） | 触碰 UI、用户注意力或 turn 生命周期 | ask_user、auth、permission、terminal |
 
-不满足数据面标准的能力一律不得进入 MCP server，无论实现上多么方便。特别地，命令执行
-与自由文本提问永不进 MCP：MCP 工具调用绕过审批卡的顺序保证、无法无限期等待人类响应，
-且不受信 agent 借原生外观 UI 发起自由文本输入会构成钓鱼面。
+不满足数据面标准的能力一律不得进入 MCP server，无论实现上多么方便。特别地，自由文本
+提问永不进 MCP：不受信 agent 借原生外观 UI 发起自由文本输入会构成钓鱼面。
+
+### 命令执行的例外：`cosh_terminal` 工具
+
+命令执行是本判据唯一的有条件例外，理由是实测证伪了 ADR-011 的蜜罐前提。
+
+ACP 的 `terminal/*` 是 agent 主动调用的 client 侧 RPC，LLM 的工具列表完全由 agent 侧
+决定，client 无权注入。实测两个第三方 agent（qoder-cli 1.1.5、hermes-agent 0.18.2）：
+即便 `initialize` 声明了 `terminal: true`，两者都用自带 shell 工具执行、全程未发出任何
+`terminal/*` 调用；hermes 的 ACP 适配器（5282 行）中 `terminal/create` 出现 0 次，
+qoder-cli 的模型自述"我没有 terminal/create，只有 Bash"。所以"声明能力即引导 agent
+走受审计路径"没有落点：我们声明什么、定义什么 `_cosh/*` 扩展方法都不会被调用。
+
+ACP 规范中 client 唯一能改变 agent 工具列表的口子是 `session/new` 的 `mcpServers`
+字段——hermes 明确实现了它并据此重建工具列表。因此受审计执行要覆盖第三方 agent，只有
+一条通路：把执行作为 MCP 工具 `cosh_terminal` 注入。
+
+准入条件（全部必须满足，缺一即退回 Tier 3）：
+
+- 工具由 shell 自有的 socket 服务承载，不由 MCP proxy 实现任何策略。proxy 保持无状态。
+- 调用同步阻塞至审批与执行完成，审批卡由 shell 发起并保持"一条命令一张卡"不变量。
+  MCP 侧无限期等待的风险由超时上界与显式取消覆盖，不靠 agent 配合。
+- 命令走既有双车道执行器与安全门，与 `terminal/create` 完全同一条代码路径，不新增
+  第二套执行语义。
+- 审计记录仍以 shell 侧为权威，与 ACP 路径的记录形状一致。
+
+已知代价：MCP 调用不携带 ACP 的 session/turn 身份，关联 id 必须经工具参数与 spawn 时
+环境显式传入，比 `terminal/create` 天然带 `sessionId` 更脆。turn 取消需要 shell 侧按
+关联 id 主动终止在飞的 socket 请求，而不能依赖 ACP 的 `session/cancel` 传导。这两点是
+本例外的直接成本，接受它是为了让 Tier 2/3 agent 的执行进入审计视野。
+
+`terminal/create` 仍是首选路径：agent 支持它时优先使用，`cosh_terminal` 只对不支持
+委托的 agent 注入，避免同一 agent 出现两条执行入口。
 
 ### 取证：MCP 封装 + shell 自有 socket 服务
 

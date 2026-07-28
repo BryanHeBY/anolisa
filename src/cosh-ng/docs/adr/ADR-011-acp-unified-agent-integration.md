@@ -64,9 +64,19 @@ ACP 标准化的是协作而非约束，无法禁止 agent 本地执行。因此
 - Tier 3（警示）：其余 agent；启动 spec 注入该 agent 自身最严格的 permission/sandbox
   配置，UI 明示审计覆盖降级。
 
-配套机制：主动声明 terminal capability，让受审计路径成为 agent 最顺手的路径（蜜罐策
-略）；桥充当进程树哨兵（agent 出现 MCP proxy 之外的任何子进程即产生 `agent_local_exec`
-审计事件）；启动 spec 预留按 tier 配置的 OS 沙箱钩子，首期不实现。
+配套机制：
+
+- 受审计执行入口。原定的蜜罐策略——主动声明 terminal capability，让受审计路径成为
+  agent 最顺手的路径——已被实测证伪：LLM 的工具列表由 agent 侧决定，client 声明能力
+  不会让 agent 多出一个工具，实测的两个第三方 agent 均无 `terminal/*` 实现（证据见
+  ADR-012）。因此对不支持委托的 agent，改由 `session/new` 注入 MCP 工具
+  `cosh_terminal`，这是 ACP 中 client 唯一能改变 agent 工具列表的口子；
+  `terminal/create` 仍是支持它的 agent 的首选路径。
+- 进程树哨兵。桥观测 agent 的直接子进程，出现 MCP proxy 之外的进程即产生
+  `agent_local_exec` 审计事件。仅对 Tier 2/3 启用：cosh-core 本身就会 spawn hook、
+  扩展与压缩器，且其自有审计已记录所执行的命令，对它启用只会产生噪音。哨兵是告警
+  信号而非强制边界——短命命令可能落在采样间隔之间。
+- 启动 spec 预留按 tier 配置的 OS 沙箱钩子，首期不实现。
 
 ### 生命周期模型
 
