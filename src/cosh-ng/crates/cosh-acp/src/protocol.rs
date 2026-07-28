@@ -299,6 +299,13 @@ pub enum BridgeMessage {
         #[serde(default)]
         multi_select: bool,
     },
+    /// The agent spawned a child the bridge did not expect, so execution left
+    /// the audited path (ADR-011 trust tiers).
+    AgentLocalExec {
+        pid: u32,
+        /// Executable name only: arguments routinely carry paths and secrets.
+        command: String,
+    },
     PromptCompleted {
         request_id: String,
         stop_reason: String,

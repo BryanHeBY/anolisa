@@ -225,6 +225,9 @@ pub async fn run() -> i32 {
         }
     };
     tracing::info!(agent = %params.agent.name, "agent process started");
+    // Captured before the stdio moves into the transport; the sentinel needs
+    // the pid to watch the agent's children.
+    let agent_pid = agent.id();
 
     // Only the pipes move into the SDK transport; the child handle stays here
     // so custody (SIGTERM grace, kill on drop) survives SDK shutdown.
@@ -380,7 +383,7 @@ pub async fn run() -> i32 {
         )
         .connect_with(transport, {
             let pending = std::sync::Arc::clone(&pending);
-            async move |cx| session::drive(cx, params, lines, registry, pending).await
+            async move |cx| session::drive(cx, params, lines, registry, pending, agent_pid).await
         })
         .await;
     pending.fail_all("bridge connection closed");

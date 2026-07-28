@@ -28,6 +28,12 @@ use crate::terminal::TerminalRegistry;
 /// (ADR-011 lifecycle model; `_cosh/` is the cosh extension prefix).
 const APPROVAL_MODE_META_KEY: &str = "_cosh/approval_mode";
 
+/// How often the process-tree sentinel samples the agent's children.
+///
+/// Short-lived commands can slip between ticks; the sentinel is a Tier 2/3
+/// warning signal, not an enforcement boundary.
+const SENTINEL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// Result of one prompt turn, delivered back to the main loop.
 enum PromptOutcome {
     Stopped(acp::StopReason),
@@ -79,6 +85,7 @@ pub(crate) async fn drive(
     mut shell_lines: tokio::io::Lines<BufReader<tokio::io::Stdin>>,
     terminals: std::sync::Arc<TerminalRegistry>,
     pending: std::sync::Arc<crate::pending::PendingRequests>,
+    agent_pid: Option<u32>,
 ) -> Result<i32, agent_client_protocol::Error> {
     let request = acp::InitializeRequest::new(ProtocolVersion::V1)
         .client_capabilities(acp::ClientCapabilities::new().terminal(params.capabilities.terminal))
@@ -144,9 +151,21 @@ pub(crate) async fn drive(
     let mut active: Option<String> = None;
     // Request id of the turn in flight, cleared by the prompt response.
     let mut inflight_request: Option<String> = None;
+    let mut sentinel =
+        agent_pid.map(|pid| crate::sentinel::ProcessTreeSentinel::new(pid, &params.mcp_servers));
+    let mut sentinel_tick = tokio::time::interval(SENTINEL_INTERVAL);
 
     loop {
         tokio::select! {
+            _ = sentinel_tick.tick(), if sentinel.is_some() => {
+                // The precondition guards the expect.
+                for exec in sentinel.as_mut().expect("guarded by precondition").scan() {
+                    emit(&BridgeMessage::AgentLocalExec {
+                        pid: exec.pid,
+                        command: exec.command,
+                    });
+                }
+            },
             outcome = outcome_rx.next() => {
                 if let Some((request_id, outcome)) = outcome {
                     let still_inflight = inflight_request.as_deref() == Some(request_id.as_str());

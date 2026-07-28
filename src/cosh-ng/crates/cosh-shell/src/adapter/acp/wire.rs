@@ -73,6 +73,10 @@ pub(super) enum BridgeEvent {
     PromptCompleted {
         stop_reason: String,
     },
+    AgentLocalExec {
+        pid: u32,
+        command: String,
+    },
     TerminalCreate {
         terminal_id: String,
         command: String,
@@ -178,6 +182,13 @@ pub(super) fn map_bridge_event(
                 error: format!("[{code}, {recoverable_note}] {message}{hint_suffix}"),
             })
         }
+        // Tier 2/3 warning: the agent ran something itself, so that command
+        // never reached the shell's safety gate or audit record.
+        BridgeEvent::AgentLocalExec { pid, command } => Some(AgentEvent::StatusChanged {
+            run_id: run_id.to_string(),
+            phase: "agent_local_exec".to_string(),
+            message: format!("agent ran '{command}' itself (pid {pid}); not audited by the shell"),
+        }),
         BridgeEvent::Unknown => None,
     }
 }

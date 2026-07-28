@@ -13,6 +13,7 @@ mod bridge;
 mod mcp_shell;
 mod pending;
 mod protocol;
+mod sentinel;
 mod session;
 mod terminal;
 
