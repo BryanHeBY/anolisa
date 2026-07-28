@@ -1,4 +1,5 @@
 use super::*;
+use crate::adapter::AdapterInstance;
 pub(super) enum WriterCommand {
     Wake,
     Clear {
@@ -392,7 +393,7 @@ impl PersonalRuntimeWriter {
 
     pub(crate) fn current_ai_configured(
         &self,
-        adapter: &CoshCoreAdapter,
+        adapter: &AdapterInstance,
     ) -> Result<bool, PersonalRuntimeError> {
         resolve_auth_state_bounded(adapter)
     }
@@ -441,7 +442,7 @@ fn writer_command_error<T>(error: TrySendError<T>) -> PersonalRuntimeError {
     }
 }
 
-fn resolve_auth_state_bounded(adapter: &CoshCoreAdapter) -> Result<bool, PersonalRuntimeError> {
+fn resolve_auth_state_bounded(adapter: &AdapterInstance) -> Result<bool, PersonalRuntimeError> {
     let adapter = adapter.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::Builder::new()

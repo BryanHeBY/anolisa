@@ -1,7 +1,7 @@
-use crate::adapter::CoshCoreAdapter;
+use crate::adapter::AdapterInstance;
 
-pub(crate) fn current_ai_configured(adapter: &CoshCoreAdapter) -> Result<bool, String> {
-    let value = adapter.registry_query("auth", "state", serde_json::Value::Null)?;
+pub(crate) fn current_ai_configured(adapter: &AdapterInstance) -> Result<bool, String> {
+    let value = adapter.registry_request("auth", "state", serde_json::Value::Null)?;
     auth_state_is_configured(&value)
 }
 

@@ -233,10 +233,7 @@ fn recommendation_readiness(
     if state.personalization.ai_disabled {
         return RecommendationReadiness::AiDisabled;
     }
-    let AdapterInstance::CoshCore(core) = adapter else {
-        return RecommendationReadiness::CurrentAiUnavailable;
-    };
-    if !matches!(runtime.current_ai_configured(core), Ok(true)) {
+    if !matches!(runtime.current_ai_configured(adapter), Ok(true)) {
         return RecommendationReadiness::CurrentAiUnavailable;
     }
     if status.profile_generation > 0 || status.cached_candidates > 0 {
