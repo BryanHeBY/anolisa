@@ -15,8 +15,7 @@ use tokio::process::{ChildStdin, ChildStdout};
 
 use agent_client_protocol::schema::v1 as acp;
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, Lines, SessionMessage};
+use agent_client_protocol::{Agent, ConnectionTo, Lines};
 
 use crate::bridge::emit;
 use crate::protocol::{
@@ -138,39 +137,16 @@ pub(crate) async fn drive(
     });
 
     let (outcome_tx, mut outcome_rx) = mpsc::unbounded::<(String, PromptOutcome)>();
-    let mut active: Option<ActiveSession<'static, Agent>> = None;
-    // Request id of the turn in flight. The stop reason can arrive either on
-    // the session update stream or through the prompt response callback,
-    // depending on how the SDK routes the response, so whichever lands first
-    // completes the turn and clears this slot.
+    // Id of the session this bridge serves. Session updates arrive through a
+    // connection-level handler rather than an SDK `ActiveSession`, because the
+    // builder can only attach one to a freshly created session and the shell
+    // also needs to reload a committed session.
+    let mut active: Option<String> = None;
+    // Request id of the turn in flight, cleared by the prompt response.
     let mut inflight_request: Option<String> = None;
 
     loop {
         tokio::select! {
-            // Biased: drain queued session updates before the prompt outcome
-            // so prompt_completed never overtakes the deltas of its turn.
-            biased;
-            // The precondition guards the expect: the branch is never polled
-            // when `active` is None.
-            update = async { active.as_mut().expect("guarded by precondition").read_update().await },
-                if active.is_some() =>
-            {
-                match update {
-                    Ok(update) => {
-                        translate_session_message(update, &mut inflight_request).await?;
-                    }
-                    Err(error) => {
-                        emit(&BridgeMessage::AgentFailed {
-                            code: "session_stream_failed".to_string(),
-                            message: format!("session update stream failed: {error}"),
-                            recoverable: true,
-                            hint: None,
-                        });
-                        active = None;
-                        inflight_request = None;
-                    }
-                }
-            },
             outcome = outcome_rx.next() => {
                 if let Some((request_id, outcome)) = outcome {
                     let still_inflight = inflight_request.as_deref() == Some(request_id.as_str());
@@ -236,7 +212,7 @@ pub(crate) async fn drive(
 async fn handle_shell_message(
     cx: &ConnectionTo<Agent>,
     params: &InitializeParams,
-    active: &mut Option<ActiveSession<'static, Agent>>,
+    active: &mut Option<String>,
     inflight_request: &mut Option<String>,
     outcome_tx: &mpsc::UnboundedSender<(String, PromptOutcome)>,
     terminals: &TerminalRegistry,
@@ -247,18 +223,14 @@ async fn handle_shell_message(
         ShellMessage::SessionNew { request_id, cwd } => {
             let request = acp::NewSessionRequest::new(cwd)
                 .mcp_servers(translate_mcp_servers(&params.mcp_servers));
-            match cx
-                .build_session_from(request)
-                .block_task()
-                .start_session()
-                .await
-            {
-                Ok(session) => {
+            match cx.send_request(request).block_task().await {
+                Ok(response) => {
+                    let session_id = response.session_id.to_string();
                     emit(&BridgeMessage::SessionCreated {
                         request_id,
-                        session_id: session.session_id().to_string(),
+                        session_id: session_id.clone(),
                     });
-                    *active = Some(session);
+                    *active = Some(session_id);
                     *inflight_request = None;
                 }
                 Err(error) => emit(&BridgeMessage::AgentFailed {
@@ -266,6 +238,31 @@ async fn handle_shell_message(
                     message: format!("session/new failed: {error}"),
                     recoverable: true,
                     hint: None,
+                }),
+            }
+        }
+        ShellMessage::SessionLoad {
+            request_id,
+            session_id,
+        } => {
+            let request = acp::LoadSessionRequest::new(session_id.clone(), &params.cwd)
+                .mcp_servers(translate_mcp_servers(&params.mcp_servers));
+            match cx.send_request(request).block_task().await {
+                Ok(_) => {
+                    emit(&BridgeMessage::SessionLoaded {
+                        request_id,
+                        session_id: session_id.clone(),
+                    });
+                    *active = Some(session_id);
+                    *inflight_request = None;
+                }
+                // Recoverable: the shell retries with a fresh session, so a
+                // stale committed id cannot wedge the turn.
+                Err(error) => emit(&BridgeMessage::AgentFailed {
+                    code: "session_load_failed".to_string(),
+                    message: format!("session/load failed: {error}"),
+                    recoverable: true,
+                    hint: Some("start a fresh session instead".to_string()),
                 }),
             }
         }
@@ -281,7 +278,7 @@ async fn handle_shell_message(
                 ));
                 return Ok(());
             };
-            if session.session_id().to_string() != session_id {
+            if session != &session_id {
                 emit(&prompt_rejected("prompt targets an unknown session"));
                 return Ok(());
             }
@@ -396,36 +393,8 @@ async fn handle_shell_message(
     Ok(())
 }
 
-/// Translates one session update from the agent into bridge events.
-async fn translate_session_message(
-    message: SessionMessage,
-    inflight_request: &mut Option<String>,
-) -> Result<(), agent_client_protocol::Error> {
-    match message {
-        SessionMessage::SessionMessage(dispatch) => {
-            MatchDispatch::new(dispatch)
-                .if_notification(async |notification: acp::SessionNotification| {
-                    emit_session_update(notification);
-                    Ok(())
-                })
-                .await
-                .otherwise_ignore()?;
-        }
-        SessionMessage::StopReason(reason) => {
-            if let Some(request_id) = inflight_request.take() {
-                emit(&BridgeMessage::PromptCompleted {
-                    request_id,
-                    stop_reason: enum_token(&reason),
-                });
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 /// Emits the bridge event for one `session/update` notification.
-fn emit_session_update(notification: acp::SessionNotification) {
+pub(crate) fn emit_session_update(notification: acp::SessionNotification) {
     let session_id = notification.session_id.to_string();
     match notification.update {
         acp::SessionUpdate::AgentMessageChunk(chunk) => {

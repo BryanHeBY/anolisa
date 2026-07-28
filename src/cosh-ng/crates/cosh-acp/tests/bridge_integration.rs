@@ -36,6 +36,9 @@ while IFS= read -r line; do
     *'"method":"session/new"'*)
       printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"sess-1"}}\n' "$id"
       ;;
+    *'"method":"session/load"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
     *'"method":"session/prompt"'*)
       printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello back"}}}}\n'
       printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
@@ -116,7 +119,8 @@ fn acp_session_round_trip_streams_and_completes() {
     assert_eq!(completed["request_id"], "r1");
     assert_eq!(completed["stop_reason"], "end_turn");
 
-    // Messages beyond the current wiring stay visible as recoverable failures.
+    // Reloading the committed session is how the shell keeps context across
+    // turns without holding a bridge process open.
     bridge.send(
         &serde_json::json!({
             "method": "session_load",
@@ -125,10 +129,10 @@ fn acp_session_round_trip_streams_and_completes() {
         })
         .to_string(),
     );
-    let failed = bridge.next_event();
-    assert_eq!(failed["event"], "agent_failed");
-    assert_eq!(failed["code"], "not_implemented");
-    assert_eq!(failed["recoverable"], true);
+    let loaded = bridge.next_event();
+    assert_eq!(loaded["event"], "session_loaded");
+    assert_eq!(loaded["request_id"], "rq2");
+    assert_eq!(loaded["session_id"], "sess-1");
 
     bridge.send(&serde_json::json!({ "method": "shutdown" }).to_string());
     assert_eq!(bridge.wait_exit(), 0);

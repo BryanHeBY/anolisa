@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 use crate::command::BackgroundLane;
 use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
 
+mod run;
 mod terminal;
 mod wire;
 
-use self::terminal::{BridgeWriter, TerminalCreate};
-use self::wire::{map_bridge_event, session_new_line, BridgeEvent};
+use self::run::start_bridge_run;
 use super::claude::{send_agent_event, terminate_process};
 use super::prompt_from_request;
 use super::{
@@ -52,6 +52,12 @@ pub struct AcpAdapter {
     pub agent_trusted: bool,
     /// Whether this adapter may start real bridge/agent processes.
     pub allow_spawn: bool,
+    /// Agent session id committed by a completed turn.
+    ///
+    /// The shell reloads it on the next turn so the conversation continues,
+    /// even though each turn gets a fresh bridge process: continuity lives in
+    /// the agent's session store, not in a long-lived process (ADR-011).
+    pub session_id: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for AcpAdapter {
@@ -64,6 +70,7 @@ impl Default for AcpAdapter {
             agent_env: BTreeMap::new(),
             agent_trusted: false,
             allow_spawn: false,
+            session_id: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -167,6 +174,11 @@ impl AcpAdapter {
         .to_string()
     }
 
+    /// Detaches from the committed session so the next turn starts fresh.
+    pub(super) fn start_fresh_session(&self) -> super::FreshSessionOutcome {
+        super::detach_committed_session(&self.session_id)
+    }
+
     /// Starts a cancellable bridge turn.
     pub fn start_cancellable(
         &self,
@@ -213,309 +225,9 @@ impl AgentAdapter for AcpAdapter {
     }
 }
 
-fn start_bridge_run(
-    adapter: AcpAdapter,
-    request: AgentRequest,
-    mode: CoshApprovalMode,
-) -> AgentRunHandle {
-    let (sender, receiver) = mpsc::channel();
-    let (approval_tx, approval_rx) = mpsc::channel();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let child_pid = Arc::new(Mutex::new(None::<u32>));
-    let writer_slot: Arc<Mutex<Option<BridgeWriter>>> = Arc::new(Mutex::new(None));
-
-    let cancel_flag = Arc::clone(&cancelled);
-    let cancel_pid = Arc::clone(&child_pid);
-    let cancel_writer = Arc::clone(&writer_slot);
-    let cancel_session = request.session_id.clone();
-    let cancel = Arc::new(move || {
-        cancel_flag.store(true, Ordering::SeqCst);
-        // Stage 1: protocol-level cancel so the agent can stop cleanly and
-        // the bridge kills this session's live terminals (stage 2 happens
-        // shell-side when the reader observes the flag).
-        let sent = cancel_writer
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
-            .map(|writer| {
-                terminal::write_message(
-                    &writer,
-                    &serde_json::json!({ "method": "cancel", "session_id": cancel_session }),
-                );
-            })
-            .is_some();
-        // Stage 3: process escalation. Immediate when the protocol path is
-        // unavailable, otherwise after a short grace so a cooperative agent
-        // can still finish the turn with stop_reason=cancelled.
-        let pid = cancel_pid.lock().ok().and_then(|guard| *guard);
-        if let Some(pid) = pid {
-            if sent {
-                thread::spawn(move || {
-                    thread::sleep(std::time::Duration::from_secs(2));
-                    terminate_process(pid);
-                });
-            } else {
-                terminate_process(pid);
-            }
-        }
-    });
-
-    thread::spawn(move || {
-        let run_id = request.id.clone();
-        send_agent_event(
-            &sender,
-            AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "starting".to_string(),
-                message: format!("starting cosh-acp bridge (agent: {})", adapter.agent_name),
-            },
-        );
-
-        let mut child = match spawn_bridge(&adapter) {
-            Ok(child) => child,
-            Err(message) => {
-                let _ = sender.send(Err(AdapterError { message }));
-                return;
-            }
-        };
-        if let Ok(mut pid) = child_pid.lock() {
-            *pid = Some(child.id());
-        }
-        if cancelled.load(Ordering::SeqCst) {
-            terminate_process(child.id());
-        }
-
-        let outcome = drive_bridge(
-            &adapter,
-            &request,
-            mode,
-            &mut child,
-            &sender,
-            &approval_rx,
-            &writer_slot,
-            &cancelled,
-        );
-        if let Ok(mut slot) = writer_slot.lock() {
-            *slot = None;
-        }
-        let _ = child.wait();
-        if let Err(error) = outcome {
-            let _ = sender.send(Err(error));
-        }
-    });
-
-    AgentRunHandle {
-        receiver,
-        cancel,
-        approval_sender: Some(approval_tx),
-        question_answer_confirmation: None,
-        auth_sender: None,
-        control_capabilities: Arc::new(Mutex::new(
-            control_protocol::ControlProtocolCapabilities::default(),
-        )),
-        pending_provider_session: None,
-        cancellation_artifacts: ProviderCancellationArtifactStore::default(),
-    }
-}
-
-fn spawn_bridge(adapter: &AcpAdapter) -> Result<Child, String> {
-    Command::new(&adapter.program)
-        .arg("bridge")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            format!(
-                "failed to spawn cosh-acp bridge '{}': {error}",
-                adapter.program
-            )
-        })
-}
-/// Writes one protocol line, treating a write failure as a fatal turn error.
-fn write_bridge_line(writer: &BridgeWriter, line: &str) -> Result<(), AdapterError> {
-    let mut stdin = writer.lock().map_err(|_| AdapterError {
-        message: "bridge writer poisoned".to_string(),
-    })?;
-    writeln!(stdin, "{line}").map_err(|error| AdapterError {
-        message: format!("failed to write to bridge: {error}"),
-    })
-}
-
-/// Writes the handshake and prompt, then maps bridge events until a terminal
-/// event or stream end. Terminal lifecycle events route through the dual-lane
-/// executor in `acp/terminal.rs`.
-#[allow(clippy::too_many_arguments)]
-fn drive_bridge(
-    adapter: &AcpAdapter,
-    request: &AgentRequest,
-    mode: CoshApprovalMode,
-    child: &mut Child,
-    sender: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
-    approvals: &mpsc::Receiver<control_protocol::ApprovalResponse>,
-    writer_slot: &Arc<Mutex<Option<BridgeWriter>>>,
-    cancelled: &Arc<AtomicBool>,
-) -> Result<(), AdapterError> {
-    let stdin = child.stdin.take().ok_or_else(|| AdapterError {
-        message: "failed to capture bridge stdin".to_string(),
-    })?;
-    let stdout = child.stdout.take().ok_or_else(|| AdapterError {
-        message: "failed to capture bridge stdout".to_string(),
-    })?;
-    let writer: BridgeWriter = Arc::new(Mutex::new(stdin));
-    if let Ok(mut slot) = writer_slot.lock() {
-        *slot = Some(Arc::clone(&writer));
-    }
-
-    // Only the handshake goes out now: the bridge mints the session id, so
-    // session_new and prompt follow as its replies arrive.
-    write_bridge_line(&writer, &adapter.initialize_line())?;
-
-    // Background lane plus a pump that forwards its output/exit events to
-    // the bridge while the reader below may be blocked on stdout.
-    let lane = Arc::new(BackgroundLane::default());
-    let pump_stop = Arc::new(AtomicBool::new(false));
-    let pump = {
-        let lane = Arc::clone(&lane);
-        let writer = Arc::clone(&writer);
-        let stop = Arc::clone(&pump_stop);
-        thread::spawn(move || {
-            while !stop.load(Ordering::Acquire) {
-                terminal::pump_lane_events(&lane, &writer);
-                thread::sleep(terminal::LANE_PUMP_INTERVAL);
-            }
-            terminal::pump_lane_events(&lane, &writer);
-        })
-    };
-
-    let run_id = request.id.clone();
-    let mut terminal_seen = false;
-    let mut lanes_killed = false;
-    for line in BufReader::new(stdout).lines() {
-        if cancelled.load(Ordering::SeqCst) && !lanes_killed {
-            // Stage 2 of the three-stage cancellation: kill this run's
-            // background commands; the turn still ends via the bridge.
-            lane.kill_all();
-            lanes_killed = true;
-        }
-        let line = line.map_err(|error| AdapterError {
-            message: format!("failed to read bridge stream: {error}"),
-        })?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<BridgeEvent>(&line) {
-            Ok(BridgeEvent::TerminalCreate {
-                terminal_id,
-                command,
-                args,
-                env,
-                cwd,
-            }) => {
-                terminal::handle_terminal_create(
-                    &run_id,
-                    TerminalCreate {
-                        terminal_id,
-                        command,
-                        args,
-                        env: env.into_iter().collect(),
-                        cwd,
-                    },
-                    &writer,
-                    &lane,
-                    sender,
-                    approvals,
-                    cancelled,
-                );
-            }
-            Ok(BridgeEvent::TerminalKill { terminal_id })
-            | Ok(BridgeEvent::TerminalRelease { terminal_id }) => {
-                lane.kill(&terminal_id);
-            }
-            Ok(BridgeEvent::Initialized { protocol_version }) => {
-                send_agent_event(
-                    sender,
-                    AgentEvent::StatusChanged {
-                        run_id: run_id.clone(),
-                        phase: "connected".to_string(),
-                        message: format!("cosh-acp bridge ready (protocol v{protocol_version})"),
-                    },
-                );
-                write_bridge_line(&writer, &session_new_line())?;
-            }
-            Ok(BridgeEvent::SessionCreated { session_id }) => {
-                send_agent_event(
-                    sender,
-                    AgentEvent::StatusChanged {
-                        run_id: run_id.clone(),
-                        phase: "session".to_string(),
-                        message: format!("agent session {session_id} created"),
-                    },
-                );
-                write_bridge_line(
-                    &writer,
-                    &AcpAdapter::prompt_line(request, &session_id, mode),
-                )?;
-            }
-            Ok(BridgeEvent::PermissionRequest {
-                request_id,
-                title,
-                options,
-            }) => {
-                terminal::handle_permission_request(
-                    &run_id,
-                    &request_id,
-                    &title,
-                    &options
-                        .iter()
-                        .map(|option| (option.id.as_str(), option.kind.as_str()))
-                        .collect::<Vec<_>>(),
-                    &writer,
-                    sender,
-                    approvals,
-                    cancelled,
-                );
-            }
-            Ok(event) => {
-                if let Some(mapped) = map_bridge_event(&run_id, event, &mut terminal_seen) {
-                    send_agent_event(sender, mapped);
-                }
-                if terminal_seen {
-                    break;
-                }
-            }
-            Err(error) => {
-                tracing::warn!("ignoring malformed bridge event: {error}");
-            }
-        }
-    }
-    lane.kill_all();
-    pump_stop.store(true, Ordering::Release);
-    let _ = pump.join();
-    if !terminal_seen {
-        if cancelled.load(Ordering::SeqCst) {
-            send_agent_event(
-                sender,
-                AgentEvent::AgentCancelled {
-                    run_id,
-                    reason: "user requested cancellation".to_string(),
-                },
-            );
-        } else {
-            send_agent_event(
-                sender,
-                AgentEvent::AgentFailed {
-                    run_id,
-                    error: "bridge stream ended without a terminal event".to_string(),
-                },
-            );
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use super::wire::{map_bridge_event, BridgeEvent};
     use super::*;
     use crate::types::{AgentMode, CommandBlock, CommandStatus, OutputRefs};
 
@@ -598,6 +310,30 @@ mod tests {
         let adapter = AcpAdapter::default().with_config(&config);
         assert!(adapter.allow_spawn);
         assert_eq!(adapter.agent_name, "cosh-core");
+    }
+
+    #[test]
+    fn committed_session_is_reloaded_and_detachable() {
+        let adapter = AcpAdapter::default();
+        assert_eq!(adapter.session_id.lock().expect("lock").clone(), None);
+        *adapter.session_id.lock().expect("lock") = Some("agent-session".to_string());
+
+        let instance = AdapterInstance::Acp(adapter.clone());
+        assert_eq!(
+            instance.committed_session_id(),
+            Some("agent-session".to_string())
+        );
+        // Detaching must not delete the transcript, only stop reloading it.
+        adapter.start_fresh_session();
+        assert_eq!(instance.committed_session_id(), None);
+    }
+
+    #[test]
+    fn session_load_targets_the_committed_session() {
+        let line = super::wire::session_load_line("agent-session");
+        let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(value["method"], "session_load");
+        assert_eq!(value["session_id"], "agent-session");
     }
 
     #[test]

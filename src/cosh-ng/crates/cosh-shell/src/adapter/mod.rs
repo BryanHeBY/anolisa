@@ -393,9 +393,7 @@ impl AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
             Self::QwenCli(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
             Self::CoshCore(adapter) => adapter.committed_session_id(),
-            // Session commit tracking for the ACP bridge lands in S4/S5
-            // (shell-side session ledger, ADR-011).
-            Self::Acp(_) => None,
+            Self::Acp(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
             Self::Fake(_) => None,
         }
     }
@@ -408,9 +406,7 @@ impl AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.start_fresh_session(),
             Self::QwenCli(adapter) => adapter.start_fresh_session(),
             Self::CoshCore(adapter) => adapter.start_fresh_session(),
-            // The ACP adapter binds sessions per turn only until the ledger
-            // lands; there is nothing to detach yet.
-            Self::Acp(_) => FreshSessionOutcome::Unsupported,
+            Self::Acp(adapter) => adapter.start_fresh_session(),
             // The fake adapter never resumes a provider session, so there is
             // nothing to detach; report unsupported rather than faking success.
             Self::Fake(_) => FreshSessionOutcome::Unsupported,

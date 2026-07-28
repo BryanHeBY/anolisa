@@ -55,6 +55,9 @@ pub(super) enum BridgeEvent {
     SessionCreated {
         session_id: String,
     },
+    SessionLoaded {
+        session_id: String,
+    },
     PermissionRequest {
         request_id: String,
         title: String,
@@ -96,6 +99,16 @@ pub(super) enum BridgeEvent {
     #[serde(other)]
     Unknown,
 }
+/// Asks the bridge to reload a previously committed agent session.
+pub(super) fn session_load_line(session_id: &str) -> String {
+    serde_json::json!({
+        "method": "session_load",
+        "request_id": "shell-session-load",
+        "session_id": session_id,
+    })
+    .to_string()
+}
+
 /// Asks the bridge to create the agent session for this turn.
 pub(super) fn session_new_line() -> String {
     let cwd = std::env::current_dir()
@@ -118,6 +131,7 @@ pub(super) fn map_bridge_event(
         // they write back to the bridge instead of producing an event here.
         BridgeEvent::Initialized { .. }
         | BridgeEvent::SessionCreated { .. }
+        | BridgeEvent::SessionLoaded { .. }
         | BridgeEvent::PermissionRequest { .. } => None,
         BridgeEvent::TextDelta { text } => Some(AgentEvent::TextDelta {
             run_id: run_id.to_string(),

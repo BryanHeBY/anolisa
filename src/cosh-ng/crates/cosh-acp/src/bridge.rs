@@ -244,6 +244,16 @@ pub async fn run() -> i32 {
     let result = Client
         .builder()
         .name("cosh-acp")
+        .on_receive_notification(
+            async move |notification: acp::SessionNotification, _cx| {
+                // Session updates are handled at the connection level so both
+                // a freshly created and a reloaded session stream through the
+                // same path; the SDK's ActiveSession only covers the former.
+                session::emit_session_update(notification);
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
         .on_receive_request(
             {
                 let pending = std::sync::Arc::clone(&pending);
