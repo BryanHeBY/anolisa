@@ -4,9 +4,9 @@
 //! mirrored here by hand; `crates/cosh-acp/src/protocol.rs` is the source of
 //! truth for the contract (protocol v1, ADR-011).
 //!
-//! S1 scope: handshake, prompt dispatch, event mapping, cancellation, and
-//! bridge process custody. Terminal delegation, permissions, and auth land
-//! with the later migration stages.
+//! Scope: handshake, prompt dispatch, event mapping, cancellation, bridge
+//! process custody, and dual-lane terminal delegation (see `acp/terminal.rs`).
+//! Permissions beyond command approval and auth land with S4.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -17,8 +17,12 @@ use std::thread;
 
 use serde::{Deserialize, Serialize};
 
+use crate::command::BackgroundLane;
 use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
 
+mod terminal;
+
+use self::terminal::{BridgeWriter, TerminalCreate};
 use super::claude::{send_agent_event, terminate_process};
 use super::prompt_from_request;
 use super::{
@@ -118,6 +122,22 @@ enum BridgeEvent {
     PromptCompleted {
         stop_reason: String,
     },
+    TerminalCreate {
+        terminal_id: String,
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    TerminalKill {
+        terminal_id: String,
+    },
+    TerminalRelease {
+        terminal_id: String,
+    },
     AgentFailed {
         code: String,
         message: String,
@@ -154,7 +174,10 @@ impl AcpAdapter {
             },
             "cwd": cwd,
             "mcp_servers": [],
-            "capabilities": { "terminal": false },
+            // Advertise terminal delegation: the shell executes agent
+            // commands through the dual-lane executor, which keeps them on
+            // the audited path (ADR-011 trust tiers).
+            "capabilities": { "terminal": true },
             "locale": serde_json::Value::Null,
         });
         params.to_string()
@@ -228,15 +251,44 @@ fn start_bridge_run(
     mode: CoshApprovalMode,
 ) -> AgentRunHandle {
     let (sender, receiver) = mpsc::channel();
+    let (approval_tx, approval_rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let child_pid = Arc::new(Mutex::new(None::<u32>));
+    let writer_slot: Arc<Mutex<Option<BridgeWriter>>> = Arc::new(Mutex::new(None));
 
     let cancel_flag = Arc::clone(&cancelled);
     let cancel_pid = Arc::clone(&child_pid);
+    let cancel_writer = Arc::clone(&writer_slot);
+    let cancel_session = request.session_id.clone();
     let cancel = Arc::new(move || {
         cancel_flag.store(true, Ordering::SeqCst);
-        if let Some(pid) = cancel_pid.lock().ok().and_then(|guard| *guard) {
-            terminate_process(pid);
+        // Stage 1: protocol-level cancel so the agent can stop cleanly and
+        // the bridge kills this session's live terminals (stage 2 happens
+        // shell-side when the reader observes the flag).
+        let sent = cancel_writer
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .map(|writer| {
+                terminal::write_message(
+                    &writer,
+                    &serde_json::json!({ "method": "cancel", "session_id": cancel_session }),
+                );
+            })
+            .is_some();
+        // Stage 3: process escalation. Immediate when the protocol path is
+        // unavailable, otherwise after a short grace so a cooperative agent
+        // can still finish the turn with stop_reason=cancelled.
+        let pid = cancel_pid.lock().ok().and_then(|guard| *guard);
+        if let Some(pid) = pid {
+            if sent {
+                thread::spawn(move || {
+                    thread::sleep(std::time::Duration::from_secs(2));
+                    terminate_process(pid);
+                });
+            } else {
+                terminate_process(pid);
+            }
         }
     });
 
@@ -265,7 +317,19 @@ fn start_bridge_run(
             terminate_process(child.id());
         }
 
-        let outcome = drive_bridge(&adapter, &request, mode, &mut child, &sender, &cancelled);
+        let outcome = drive_bridge(
+            &adapter,
+            &request,
+            mode,
+            &mut child,
+            &sender,
+            &approval_rx,
+            &writer_slot,
+            &cancelled,
+        );
+        if let Ok(mut slot) = writer_slot.lock() {
+            *slot = None;
+        }
         let _ = child.wait();
         if let Err(error) = outcome {
             let _ = sender.send(Err(error));
@@ -275,7 +339,7 @@ fn start_bridge_run(
     AgentRunHandle {
         receiver,
         cancel,
-        approval_sender: None,
+        approval_sender: Some(approval_tx),
         question_answer_confirmation: None,
         auth_sender: None,
         control_capabilities: Arc::new(Mutex::new(
@@ -302,43 +366,68 @@ fn spawn_bridge(adapter: &AcpAdapter) -> Result<Child, String> {
 }
 
 /// Writes the handshake and prompt, then maps bridge events until a terminal
-/// event or stream end.
+/// event or stream end. Terminal lifecycle events route through the dual-lane
+/// executor in `acp/terminal.rs`.
+#[allow(clippy::too_many_arguments)]
 fn drive_bridge(
     adapter: &AcpAdapter,
     request: &AgentRequest,
     mode: CoshApprovalMode,
     child: &mut Child,
     sender: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
+    approvals: &mpsc::Receiver<control_protocol::ApprovalResponse>,
+    writer_slot: &Arc<Mutex<Option<BridgeWriter>>>,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<(), AdapterError> {
-    let mut stdin = child.stdin.take().ok_or_else(|| AdapterError {
+    let stdin = child.stdin.take().ok_or_else(|| AdapterError {
         message: "failed to capture bridge stdin".to_string(),
     })?;
     let stdout = child.stdout.take().ok_or_else(|| AdapterError {
         message: "failed to capture bridge stdout".to_string(),
     })?;
+    let writer: BridgeWriter = Arc::new(Mutex::new(stdin));
+    if let Ok(mut slot) = writer_slot.lock() {
+        *slot = Some(Arc::clone(&writer));
+    }
 
-    writeln!(stdin, "{}", adapter.initialize_line()).map_err(|error| AdapterError {
-        message: format!("failed to write initialize: {error}"),
-    })?;
-    writeln!(stdin, "{}", AcpAdapter::prompt_line(request, mode)).map_err(|error| {
-        AdapterError {
-            message: format!("failed to write prompt: {error}"),
-        }
-    })?;
+    for line in [
+        adapter.initialize_line(),
+        AcpAdapter::prompt_line(request, mode),
+    ] {
+        let mut stdin = writer.lock().map_err(|_| AdapterError {
+            message: "bridge writer poisoned".to_string(),
+        })?;
+        writeln!(stdin, "{line}").map_err(|error| AdapterError {
+            message: format!("failed to write to bridge: {error}"),
+        })?;
+    }
+
+    // Background lane plus a pump that forwards its output/exit events to
+    // the bridge while the reader below may be blocked on stdout.
+    let lane = Arc::new(BackgroundLane::default());
+    let pump_stop = Arc::new(AtomicBool::new(false));
+    let pump = {
+        let lane = Arc::clone(&lane);
+        let writer = Arc::clone(&writer);
+        let stop = Arc::clone(&pump_stop);
+        thread::spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                terminal::pump_lane_events(&lane, &writer);
+                thread::sleep(terminal::LANE_PUMP_INTERVAL);
+            }
+            terminal::pump_lane_events(&lane, &writer);
+        })
+    };
 
     let run_id = request.id.clone();
     let mut terminal_seen = false;
+    let mut lanes_killed = false;
     for line in BufReader::new(stdout).lines() {
-        if cancelled.load(Ordering::SeqCst) {
-            send_agent_event(
-                sender,
-                AgentEvent::AgentCancelled {
-                    run_id: run_id.clone(),
-                    reason: "user requested cancellation".to_string(),
-                },
-            );
-            return Ok(());
+        if cancelled.load(Ordering::SeqCst) && !lanes_killed {
+            // Stage 2 of the three-stage cancellation: kill this run's
+            // background commands; the turn still ends via the bridge.
+            lane.kill_all();
+            lanes_killed = true;
         }
         let line = line.map_err(|error| AdapterError {
             message: format!("failed to read bridge stream: {error}"),
@@ -347,12 +436,39 @@ fn drive_bridge(
             continue;
         }
         match serde_json::from_str::<BridgeEvent>(&line) {
+            Ok(BridgeEvent::TerminalCreate {
+                terminal_id,
+                command,
+                args,
+                env,
+                cwd,
+            }) => {
+                terminal::handle_terminal_create(
+                    &run_id,
+                    TerminalCreate {
+                        terminal_id,
+                        command,
+                        args,
+                        env: env.into_iter().collect(),
+                        cwd,
+                    },
+                    &writer,
+                    &lane,
+                    sender,
+                    approvals,
+                    cancelled,
+                );
+            }
+            Ok(BridgeEvent::TerminalKill { terminal_id })
+            | Ok(BridgeEvent::TerminalRelease { terminal_id }) => {
+                lane.kill(&terminal_id);
+            }
             Ok(event) => {
                 if let Some(mapped) = map_bridge_event(&run_id, event, &mut terminal_seen) {
                     send_agent_event(sender, mapped);
                 }
                 if terminal_seen {
-                    return Ok(());
+                    break;
                 }
             }
             Err(error) => {
@@ -360,14 +476,27 @@ fn drive_bridge(
             }
         }
     }
+    lane.kill_all();
+    pump_stop.store(true, Ordering::Release);
+    let _ = pump.join();
     if !terminal_seen {
-        send_agent_event(
-            sender,
-            AgentEvent::AgentFailed {
-                run_id,
-                error: "bridge stream ended without a terminal event".to_string(),
-            },
-        );
+        if cancelled.load(Ordering::SeqCst) {
+            send_agent_event(
+                sender,
+                AgentEvent::AgentCancelled {
+                    run_id,
+                    reason: "user requested cancellation".to_string(),
+                },
+            );
+        } else {
+            send_agent_event(
+                sender,
+                AgentEvent::AgentFailed {
+                    run_id,
+                    error: "bridge stream ended without a terminal event".to_string(),
+                },
+            );
+        }
     }
     Ok(())
 }
@@ -399,10 +528,23 @@ fn map_bridge_event(
         }),
         BridgeEvent::PromptCompleted { stop_reason } => {
             *terminal_seen = true;
-            Some(AgentEvent::AgentCompleted {
-                run_id: run_id.to_string(),
-                summary: format!("agent turn completed ({stop_reason})"),
-            })
+            if stop_reason == "cancelled" {
+                Some(AgentEvent::AgentCancelled {
+                    run_id: run_id.to_string(),
+                    reason: "agent confirmed cancellation".to_string(),
+                })
+            } else {
+                Some(AgentEvent::AgentCompleted {
+                    run_id: run_id.to_string(),
+                    summary: format!("agent turn completed ({stop_reason})"),
+                })
+            }
+        }
+        BridgeEvent::TerminalCreate { .. }
+        | BridgeEvent::TerminalKill { .. }
+        | BridgeEvent::TerminalRelease { .. } => {
+            // Routed by drive_bridge before mapping; unreachable here.
+            None
         }
         BridgeEvent::AgentFailed {
             code,

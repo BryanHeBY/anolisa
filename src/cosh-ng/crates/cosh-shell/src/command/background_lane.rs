@@ -51,10 +51,13 @@ pub(crate) struct LaneRequest {
 }
 
 /// Live background commands keyed by terminal id.
+///
+/// Channel endpoints sit behind mutexes so the lane is `Sync`: the adapter
+/// shares it between the bridge reader thread and the event pump thread.
 pub(crate) struct BackgroundLane {
     running: Arc<Mutex<HashMap<String, Child>>>,
-    events_tx: Sender<LaneEvent>,
-    events_rx: Receiver<LaneEvent>,
+    events_tx: Mutex<Sender<LaneEvent>>,
+    events_rx: Mutex<Receiver<LaneEvent>>,
 }
 
 impl Default for BackgroundLane {
@@ -62,8 +65,8 @@ impl Default for BackgroundLane {
         let (events_tx, events_rx) = channel();
         Self {
             running: Arc::new(Mutex::new(HashMap::new())),
-            events_tx,
-            events_rx,
+            events_tx: Mutex::new(events_tx),
+            events_rx: Mutex::new(events_rx),
         }
     }
 }
@@ -101,14 +104,19 @@ impl BackgroundLane {
             .expect("background lane poisoned")
             .insert(request.terminal_id.clone(), child);
 
+        let events_tx = self
+            .events_tx
+            .lock()
+            .expect("background lane poisoned")
+            .clone();
         for stream in [stdout.map(Readable::Out), stderr.map(Readable::Err)] {
             let Some(stream) = stream else { continue };
-            spawn_reader(stream, request.terminal_id.clone(), self.events_tx.clone());
+            spawn_reader(stream, request.terminal_id.clone(), events_tx.clone());
         }
         spawn_reaper(
             Arc::clone(&self.running),
             request.terminal_id.clone(),
-            self.events_tx.clone(),
+            events_tx,
         );
         Ok(())
     }
@@ -148,7 +156,11 @@ impl BackgroundLane {
 
     /// Drains the events produced since the last call.
     pub(crate) fn drain_events(&self) -> Vec<LaneEvent> {
-        self.events_rx.try_iter().collect()
+        self.events_rx
+            .lock()
+            .expect("background lane poisoned")
+            .try_iter()
+            .collect()
     }
 
     /// True while at least one delegated command is running.
