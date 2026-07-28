@@ -1064,9 +1064,10 @@ mod tests {
     async fn lifecycle_commands_manage_server_state() {
         let _lock = crate::state::TEST_STATE_LOCK.lock().unwrap();
         let states = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
+        // Only the states directory is redirected: overriding the process-wide
+        // HOME would break every concurrent test that resolves a home-relative
+        // path, and this test writes nothing outside the states directory.
         let _states_dir = EnvVarGuard::set("COSH_STATES_DIR", states.path());
-        let _home_dir = EnvVarGuard::set("HOME", home.path());
         let (_dir, server) = fake_server(
             r#"#!/bin/sh
 while IFS= read -r line; do

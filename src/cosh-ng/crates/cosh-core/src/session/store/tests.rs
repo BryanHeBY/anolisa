@@ -17,6 +17,15 @@ fn store(temp: &tempfile::TempDir) -> SessionStore {
         .unwrap()
 }
 
+/// Waits until the wall clock crosses a millisecond boundary.
+///
+/// `list` orders by file mtime truncated to milliseconds and breaks ties on
+/// the random session id, so two sessions persisted inside the same
+/// millisecond would order unpredictably.
+fn separate_mtime_millisecond() {
+    std::thread::sleep(std::time::Duration::from_millis(2));
+}
+
 fn new_session(store: &SessionStore, prompt: &str) -> PersistedSession {
     PersistedSession::new(
         ProviderSessionId::new(),
@@ -258,9 +267,8 @@ fn summaries_are_newest_first_and_derive_metadata() {
     let store = store(&temp);
     let mut older = new_session(&store, "first prompt");
     store.persist(&mut older).unwrap();
+    separate_mtime_millisecond();
     let mut newer = new_session(&store, "second prompt");
-    store.persist(&mut newer).unwrap();
-    newer.updated_at_ms = older.updated_at_ms.saturating_add(10);
     store.persist(&mut newer).unwrap();
 
     let (summaries, cursor) = store.list(10, None).unwrap();
@@ -329,9 +337,8 @@ fn stable_cursor_survives_deletion_of_previous_page() {
     let store = store(&temp);
     let mut older = new_session(&store, "older");
     store.persist(&mut older).unwrap();
+    separate_mtime_millisecond();
     let mut newer = new_session(&store, "newer");
-    store.persist(&mut newer).unwrap();
-    newer.updated_at_ms = older.updated_at_ms.saturating_add(10);
     store.persist(&mut newer).unwrap();
 
     let (first_page, cursor) = store.list(1, None).unwrap();
