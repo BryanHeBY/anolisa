@@ -244,25 +244,25 @@ pub async fn run() -> i32 {
     let transport = session::agent_transport(agent_stdin, agent_stdout);
     let registry = std::sync::Arc::new(crate::terminal::TerminalRegistry::default());
     let pending = std::sync::Arc::new(crate::pending::PendingRequests::default());
-    // Set while `session/load` is in flight. Agents replay the transcript as
-    // session updates when a session is reloaded, and replayed history must
-    // not be rendered as this turn's output.
-    let replaying = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Set while a prompt is in flight. A session update that arrives when we
+    // asked for nothing is not turn output: agents replay the transcript after
+    // answering `session/load`, and that history is already on the shell's
+    // screen. Gating on the request rather than on the load keeps the rule
+    // true no matter when the replay lands.
+    let prompt_inflight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let result = Client
         .builder()
         .name("cosh-acp")
         .on_receive_notification(
             {
-                let replaying = std::sync::Arc::clone(&replaying);
+                let prompt_inflight = std::sync::Arc::clone(&prompt_inflight);
                 async move |notification: acp::SessionNotification, _cx| {
                     // Session updates are handled at the connection level so
                     // both a freshly created and a reloaded session stream
                     // through the same path; the SDK's ActiveSession only
                     // covers the former.
-                    if replaying.load(std::sync::atomic::Ordering::Acquire) {
-                        // Transcript replay from `session/load`: the shell
-                        // already has this history on screen.
-                        tracing::trace!("dropping replayed session update");
+                    if !prompt_inflight.load(std::sync::atomic::Ordering::Acquire) {
+                        tracing::trace!("dropping unsolicited session update");
                         return Ok(());
                     }
                     session::emit_session_update(notification);
@@ -291,11 +291,21 @@ pub async fn run() -> i32 {
                             kind: session::enum_token(&option.kind),
                         })
                         .collect();
+                    let kind = request
+                        .tool_call
+                        .fields
+                        .kind
+                        .as_ref()
+                        .map(session::enum_token)
+                        .unwrap_or_default();
+                    let raw_input = request.tool_call.fields.raw_input.clone();
                     let request_id = pending.park_permission(responder);
                     emit(&BridgeMessage::PermissionRequest {
                         session_id,
                         request_id,
                         title,
+                        kind,
+                        raw_input,
                         options,
                     });
                     Ok(())
@@ -398,7 +408,16 @@ pub async fn run() -> i32 {
         .connect_with(transport, {
             let pending = std::sync::Arc::clone(&pending);
             async move |cx| {
-                session::drive(cx, params, lines, registry, pending, agent_pid, replaying).await
+                session::drive(
+                    cx,
+                    params,
+                    lines,
+                    registry,
+                    pending,
+                    agent_pid,
+                    prompt_inflight,
+                )
+                .await
             }
         })
         .await;

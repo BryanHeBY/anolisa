@@ -37,9 +37,10 @@ while IFS= read -r line; do
       printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"sess-1"}}\n' "$id"
       ;;
     *'"method":"session/load"'*)
-      # Agents replay the transcript when a session is reloaded.
-      printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"REPLAYED HISTORY"}}}}\n'
+      # Real agents replay the transcript *after* answering the load, which is
+      # why suppression cannot be scoped to the load request itself.
       printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"REPLAYED HISTORY"}}}}\n'
       ;;
     *'"method":"session/prompt"'*)
       printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello back"}}}}\n'
@@ -138,8 +139,15 @@ fn acp_session_round_trip_streams_and_completes() {
     assert_eq!(loaded["request_id"], "rq2");
     assert_eq!(loaded["session_id"], "sess-1");
 
+    // Nothing further may reach the shell: the replayed transcript arrives
+    // after the load response, so it can only be recognized by the absence of
+    // an in-flight prompt.
     bridge.send(&serde_json::json!({ "method": "shutdown" }).to_string());
-    assert_eq!(bridge.wait_exit(), 0);
+    let trailing = bridge.drain_events();
+    assert!(
+        !trailing.iter().any(|event| event["event"] == "text_delta"),
+        "replayed history must not be forwarded: {trailing:?}"
+    );
     assert_process_gone(agent_pid);
     let _ = std::fs::remove_file(script);
     let _ = std::fs::remove_file(pid_file);

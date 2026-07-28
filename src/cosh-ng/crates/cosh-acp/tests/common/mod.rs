@@ -87,6 +87,27 @@ impl BridgeHarness {
         serde_json::from_str(&line).expect("bridge event is JSON")
     }
 
+    /// Drains every event the bridge emits until its stream ends.
+    ///
+    /// Used to assert that something was *not* emitted, which a single
+    /// `next_event` cannot show once the expected event arrives first.
+    pub fn drain_events(mut self) -> Vec<serde_json::Value> {
+        self.stdin.take();
+        let mut events = Vec::new();
+        loop {
+            let mut line = String::new();
+            match self.stdout.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if let Ok(event) = serde_json::from_str(line.trim()) {
+                        events.push(event);
+                    }
+                }
+            }
+        }
+        events
+    }
+
     pub fn close_stdin(&mut self) {
         self.stdin.take();
     }

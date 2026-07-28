@@ -86,7 +86,7 @@ pub(crate) async fn drive(
     terminals: std::sync::Arc<TerminalRegistry>,
     pending: std::sync::Arc<crate::pending::PendingRequests>,
     agent_pid: Option<u32>,
-    replaying: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    prompt_inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<i32, agent_client_protocol::Error> {
     let request = acp::InitializeRequest::new(ProtocolVersion::V1)
         .client_capabilities(acp::ClientCapabilities::new().terminal(params.capabilities.terminal))
@@ -172,6 +172,8 @@ pub(crate) async fn drive(
                 if let Some((request_id, outcome)) = outcome {
                     let still_inflight = inflight_request.as_deref() == Some(request_id.as_str());
                     inflight_request = None;
+                    // The turn is over, so anything further is unsolicited.
+                    prompt_inflight.store(false, std::sync::atomic::Ordering::Release);
                     match outcome {
                         PromptOutcome::Stopped(reason) if still_inflight => {
                             emit(&BridgeMessage::PromptCompleted {
@@ -211,7 +213,7 @@ pub(crate) async fn drive(
                                 outcome_tx: &outcome_tx,
                                 terminals: &terminals,
                                 pending: &pending,
-                                replaying: &replaying,
+                                prompt_inflight: &prompt_inflight,
                             },
                             message,
                         )
@@ -243,8 +245,9 @@ struct SessionContext<'a> {
     outcome_tx: &'a mpsc::UnboundedSender<(String, PromptOutcome)>,
     terminals: &'a TerminalRegistry,
     pending: &'a crate::pending::PendingRequests,
-    /// Set while a session is loading, so replayed history is dropped.
-    replaying: &'a std::sync::atomic::AtomicBool,
+    /// Mirrors `inflight_request` for the session update handler, which runs
+    /// outside this loop and must drop anything unsolicited.
+    prompt_inflight: &'a std::sync::atomic::AtomicBool,
 }
 
 async fn handle_shell_message(
@@ -259,7 +262,7 @@ async fn handle_shell_message(
         outcome_tx,
         terminals,
         pending,
-        replaying,
+        prompt_inflight,
     } = ctx;
     match message {
         ShellMessage::SessionNew { request_id, cwd } => {
@@ -289,12 +292,7 @@ async fn handle_shell_message(
         } => {
             let request = acp::LoadSessionRequest::new(session_id.clone(), &params.cwd)
                 .mcp_servers(translate_mcp_servers(&params.mcp_servers));
-            // Drop the transcript the agent replays while loading; only output
-            // produced after the load belongs to the coming turn.
-            replaying.store(true, std::sync::atomic::Ordering::Release);
-            let loaded = cx.send_request(request).block_task().await;
-            replaying.store(false, std::sync::atomic::Ordering::Release);
-            match loaded {
+            match cx.send_request(request).block_task().await {
                 Ok(_) => {
                     emit(&BridgeMessage::SessionLoaded {
                         request_id,
@@ -338,8 +336,10 @@ async fn handle_shell_message(
             let request = acp::PromptRequest::new(session_id, vec![text.into()]).meta(meta);
             let tx = outcome_tx.clone();
             // Recorded before the request goes out so a fast reply cannot
-            // arrive while the slot is still empty.
+            // arrive while the slot is still empty, and so the update handler
+            // starts forwarding exactly at the turn boundary.
             *inflight_request = Some(request_id.clone());
+            prompt_inflight.store(true, std::sync::atomic::Ordering::Release);
             cx.send_request(request)
                 .on_receiving_result(async move |result| {
                     let outcome = match result {
