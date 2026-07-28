@@ -1,8 +1,12 @@
 #[allow(dead_code)]
+pub(crate) mod background_lane;
+#[allow(dead_code)]
 pub(crate) mod exit_classify;
 #[allow(dead_code)]
 pub(crate) mod failure_semantics;
 
+#[allow(unused_imports)]
+pub(crate) use background_lane::{BackgroundLane, LaneEvent, LaneRequest};
 #[allow(unused_imports)]
 pub(crate) use exit_classify::{
     classify_executed_command_outcome, classify_exit, classify_shell_handoff_command_outcome,
