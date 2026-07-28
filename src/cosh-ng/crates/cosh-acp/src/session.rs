@@ -151,8 +151,9 @@ pub(crate) async fn drive(
     let mut active: Option<String> = None;
     // Request id of the turn in flight, cleared by the prompt response.
     let mut inflight_request: Option<String> = None;
-    let mut sentinel =
-        agent_pid.map(|pid| crate::sentinel::ProcessTreeSentinel::new(pid, &params.mcp_servers));
+    let mut sentinel = agent_pid
+        .filter(|_| params.sentinel)
+        .map(|pid| crate::sentinel::ProcessTreeSentinel::new(pid, &params.mcp_servers));
     let mut sentinel_tick = tokio::time::interval(SENTINEL_INTERVAL);
 
     loop {

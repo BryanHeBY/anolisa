@@ -422,6 +422,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             mcp_servers: Vec::new(),
             capabilities: Default::default(),
+            sentinel: false,
             locale: None,
         })))
         .expect("serialize")

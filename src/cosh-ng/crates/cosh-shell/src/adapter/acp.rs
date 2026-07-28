@@ -149,6 +149,10 @@ impl AcpAdapter {
             // shell's dual-lane executor and stays on the audited path
             // (ADR-011 trust tiers).
             "capabilities": { "terminal": !self.agent_trusted },
+            // Only third-party agents are watched: cosh-core spawns hooks,
+            // extensions, and the compactor as a matter of course, and its own
+            // audit already records the commands it runs (ADR-011 tiers).
+            "sentinel": !self.agent_is_cosh_core(),
             "locale": serde_json::Value::Null,
         });
         params.to_string()
@@ -174,13 +178,21 @@ impl AcpAdapter {
         .to_string()
     }
 
-    /// True when the configured agent is cosh-core, which serves the registry
-    /// control plane over its own side channel (ADR-012).
-    pub(super) fn serves_registry(&self) -> bool {
+    /// True when the configured agent is the built-in cosh-core agent.
+    ///
+    /// It serves the registry control plane over its own side channel
+    /// (ADR-012) and records the commands it runs, so it needs neither the
+    /// registry fallback nor the process-tree sentinel.
+    pub(super) fn agent_is_cosh_core(&self) -> bool {
         self.agent_args.iter().any(|arg| arg == "--acp")
             && std::path::Path::new(&self.agent_command)
                 .file_name()
                 .is_some_and(|name| name == "cosh-core")
+    }
+
+    /// True when the registry control plane is reachable for this agent.
+    pub(super) fn serves_registry(&self) -> bool {
+        self.agent_is_cosh_core()
     }
 
     /// Detaches from the committed session so the next turn starts fresh.
@@ -309,6 +321,29 @@ mod tests {
         // A trusted agent keeps its own tools, so terminals are not offered.
         assert_eq!(value["capabilities"]["terminal"], false);
         assert_eq!(value["agent"]["env"]["ANTHROPIC_API_KEY"], "secret");
+    }
+
+    #[test]
+    fn builtin_agent_is_not_watched_but_a_third_party_one_is() {
+        let builtin: serde_json::Value =
+            serde_json::from_str(&AcpAdapter::default().initialize_line()).expect("json");
+        assert_eq!(builtin["sentinel"], false);
+
+        let mut config = crate::config::AcpConfig {
+            agent: "other".to_string(),
+            ..Default::default()
+        };
+        config.agents.insert(
+            "other".to_string(),
+            crate::config::AcpAgentConfig {
+                command: "some-agent".to_string(),
+                ..Default::default()
+            },
+        );
+        let third_party: serde_json::Value =
+            serde_json::from_str(&AcpAdapter::default().with_config(&config).initialize_line())
+                .expect("json");
+        assert_eq!(third_party["sentinel"], true);
     }
 
     #[test]

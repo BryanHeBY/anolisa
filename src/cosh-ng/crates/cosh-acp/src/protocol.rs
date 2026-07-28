@@ -78,6 +78,13 @@ pub struct InitializeParams {
     pub mcp_servers: Vec<McpServerSpec>,
     #[serde(default)]
     pub capabilities: ClientCapabilities,
+    /// Whether to watch the agent's children for unaudited execution.
+    ///
+    /// Only meaningful for Tier 2/3 agents: cosh-core legitimately spawns
+    /// hooks, extensions, and the compactor, and its own audit records the
+    /// commands it runs, so watching it would be pure noise (ADR-011).
+    #[serde(default)]
+    pub sentinel: bool,
     #[serde(default)]
     pub locale: Option<String>,
 }
@@ -356,6 +363,7 @@ mod tests {
             },
             cwd: "/tmp".to_string(),
             mcp_servers: vec![],
+            sentinel: false,
             capabilities: ClientCapabilities { terminal: true },
             locale: Some("zh-CN".to_string()),
         })))
