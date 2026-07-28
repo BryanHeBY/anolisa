@@ -13,6 +13,7 @@ mod bridge;
 mod mcp_shell;
 mod protocol;
 mod session;
+mod terminal;
 
 use clap::{Parser, Subcommand};
 

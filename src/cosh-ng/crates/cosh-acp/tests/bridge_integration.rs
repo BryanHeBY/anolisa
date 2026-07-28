@@ -5,14 +5,12 @@
 //! session/new / prompt streaming round-trip, not-implemented fallback,
 //! shutdown, and agent process custody (no orphans after bridge exit).
 
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::{Duration, Instant};
+mod common;
 
-fn bridge_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_cosh-acp")
-}
+use common::{
+    assert_process_gone, initialize_line, read_agent_pid, write_agent_script, BridgeHarness,
+};
+use std::path::PathBuf;
 
 /// Writes a fake agent script that records its PID and then blocks without
 /// ever answering ACP; used for custody tests around a hung agent.
@@ -49,124 +47,17 @@ done
     write_agent_script(label, script)
 }
 
-fn write_agent_script(label: &str, content: &str) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir();
-    let pid_file = dir.join(format!("cosh-acp-test-{label}-{}.pid", std::process::id()));
-    let script = dir.join(format!("cosh-acp-test-{label}-{}.sh", std::process::id()));
-    std::fs::write(&script, content).expect("write fake agent");
-    let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
-    use std::os::unix::fs::PermissionsExt;
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&script, permissions).expect("chmod fake agent");
-    (script, pid_file)
-}
-
-fn initialize_line(version: u32, agent_command: &str, pid_file: &std::path::Path) -> String {
-    serde_json::json!({
-        "method": "initialize",
-        "protocol_version": version,
-        "agent": {
-            "name": "fake",
-            "command": agent_command,
-            "args": [],
-            "env": { "AGENT_PID_FILE": pid_file.to_string_lossy() },
-        },
-        "cwd": std::env::temp_dir().to_string_lossy(),
-        "mcp_servers": [],
-        "capabilities": { "terminal": false },
-        "locale": null,
-    })
-    .to_string()
-}
-
-struct BridgeHarness {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
-}
-
-impl BridgeHarness {
-    fn spawn() -> Self {
-        let mut child = Command::new(bridge_binary())
-            .arg("bridge")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn cosh-acp bridge");
-        let stdin = child.stdin.take();
-        let stdout = BufReader::new(child.stdout.take().expect("bridge stdout"));
-        Self {
-            child,
-            stdin,
-            stdout,
-        }
-    }
-
-    fn send(&mut self, line: &str) {
-        let stdin = self.stdin.as_mut().expect("bridge stdin open");
-        writeln!(stdin, "{line}").expect("write to bridge");
-        stdin.flush().expect("flush bridge stdin");
-    }
-
-    fn next_event(&mut self) -> serde_json::Value {
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).expect("read bridge event");
-        assert!(!line.is_empty(), "bridge stream ended unexpectedly");
-        serde_json::from_str(&line).expect("bridge event is JSON")
-    }
-
-    fn close_stdin(&mut self) {
-        self.stdin.take();
-    }
-
-    fn wait_exit(mut self) -> i32 {
-        self.close_stdin();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(status) = self.child.try_wait().expect("try_wait bridge") {
-                return status.code().unwrap_or(-1);
-            }
-            assert!(Instant::now() < deadline, "bridge did not exit in time");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-}
-
-fn read_agent_pid(pid_file: &std::path::Path) -> i32 {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(content) = std::fs::read_to_string(pid_file) {
-            if let Ok(pid) = content.trim().parse() {
-                return pid;
-            }
-        }
-        assert!(Instant::now() < deadline, "fake agent never reported a pid");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn assert_process_gone(pid: i32) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let proc_path = PathBuf::from(format!("/proc/{pid}"));
-    loop {
-        if !proc_path.exists() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "agent process {pid} is still alive after bridge exit"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 #[test]
 fn acp_session_round_trip_streams_and_completes() {
     let (script, pid_file) = write_acp_agent("roundtrip");
     let mut bridge = BridgeHarness::spawn();
 
-    bridge.send(&initialize_line(1, &script.to_string_lossy(), &pid_file));
+    bridge.send(&initialize_line(
+        1,
+        &script.to_string_lossy(),
+        &pid_file,
+        false,
+    ));
     let initialized = bridge.next_event();
     assert_eq!(initialized["event"], "initialized");
     assert_eq!(initialized["protocol_version"], 1);
@@ -225,7 +116,7 @@ fn acp_session_round_trip_streams_and_completes() {
     assert_eq!(completed["request_id"], "r1");
     assert_eq!(completed["stop_reason"], "end_turn");
 
-    // Messages beyond the S1 wiring stay visible as recoverable failures.
+    // Messages beyond the current wiring stay visible as recoverable failures.
     bridge.send(
         &serde_json::json!({
             "method": "session_load",
@@ -251,7 +142,12 @@ fn version_mismatch_fails_closed() {
     let (script, pid_file) = write_hung_agent("version");
     let mut bridge = BridgeHarness::spawn();
 
-    bridge.send(&initialize_line(99, &script.to_string_lossy(), &pid_file));
+    bridge.send(&initialize_line(
+        99,
+        &script.to_string_lossy(),
+        &pid_file,
+        false,
+    ));
     let error = bridge.next_event();
     assert_eq!(error["event"], "agent_failed");
     assert_eq!(error["code"], "protocol_error");
@@ -270,7 +166,12 @@ fn stdin_eof_takes_the_agent_down() {
     let (script, pid_file) = write_acp_agent("eof");
     let mut bridge = BridgeHarness::spawn();
 
-    bridge.send(&initialize_line(1, &script.to_string_lossy(), &pid_file));
+    bridge.send(&initialize_line(
+        1,
+        &script.to_string_lossy(),
+        &pid_file,
+        false,
+    ));
     let initialized = bridge.next_event();
     assert_eq!(initialized["event"], "initialized");
     let agent_pid = read_agent_pid(&pid_file);
@@ -287,7 +188,12 @@ fn stdin_eof_during_acp_initialize_takes_hung_agent_down() {
     let (script, pid_file) = write_hung_agent("hung");
     let mut bridge = BridgeHarness::spawn();
 
-    bridge.send(&initialize_line(1, &script.to_string_lossy(), &pid_file));
+    bridge.send(&initialize_line(
+        1,
+        &script.to_string_lossy(),
+        &pid_file,
+        false,
+    ));
     // The agent never answers ACP initialize; the shell going away must still
     // take bridge and agent down instead of hanging on the pending request.
     let agent_pid = read_agent_pid(&pid_file);
@@ -306,6 +212,7 @@ fn missing_agent_binary_reports_recoverable_failure() {
         1,
         "/nonexistent/cosh-acp-test-agent",
         &pid_file,
+        false,
     ));
     let failed = bridge.next_event();
     assert_eq!(failed["event"], "agent_failed");

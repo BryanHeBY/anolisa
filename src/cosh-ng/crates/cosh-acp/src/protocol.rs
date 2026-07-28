@@ -200,7 +200,11 @@ pub enum BridgeMessage {
         #[serde(default)]
         args: Vec<String>,
         #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default)]
         cwd: Option<String>,
+        #[serde(default)]
+        output_byte_limit: Option<u64>,
     },
     TerminalKill {
         terminal_id: String,

@@ -12,6 +12,7 @@ use std::io::Write;
 use std::process::Stdio;
 use std::time::Duration;
 
+use agent_client_protocol::schema::v1 as acp;
 use agent_client_protocol::Client;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -159,11 +160,62 @@ pub async fn run() -> i32 {
         return 1;
     };
     let transport = session::agent_transport(agent_stdin, agent_stdout);
+    let registry = std::sync::Arc::new(crate::terminal::TerminalRegistry::default());
     let result = Client
         .builder()
         .name("cosh-acp")
+        .on_receive_request(
+            {
+                let registry = std::sync::Arc::clone(&registry);
+                async move |request: acp::CreateTerminalRequest, responder, _cx| {
+                    registry.create(request, responder);
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let registry = std::sync::Arc::clone(&registry);
+                async move |request: acp::TerminalOutputRequest, responder, _cx| {
+                    registry.output(&request, responder);
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let registry = std::sync::Arc::clone(&registry);
+                async move |request: acp::WaitForTerminalExitRequest, responder, _cx| {
+                    registry.wait_for_exit(&request, responder);
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let registry = std::sync::Arc::clone(&registry);
+                async move |request: acp::KillTerminalRequest, responder, _cx| {
+                    registry.kill(&request, responder);
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let registry = std::sync::Arc::clone(&registry);
+                async move |request: acp::ReleaseTerminalRequest, responder, _cx| {
+                    registry.release(&request, responder);
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .connect_with(transport, async move |cx| {
-            session::drive(cx, params, lines).await
+            session::drive(cx, params, lines, registry).await
         })
         .await;
     let exit_code = match result {

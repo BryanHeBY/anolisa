@@ -3,9 +3,9 @@
 //!
 //! The bridge keeps process custody in `bridge.rs`; this module only borrows
 //! the agent's stdio for the JSON-RPC transport. One prompt turn is in flight
-//! at a time, matching the shell adapter contract. Permission, auth, and
-//! terminal delegation land in later migration stages (ADR-011 S3/S4) and are
-//! answered with a recoverable `not_implemented` failure until then.
+//! at a time, matching the shell adapter contract. Terminal delegation is
+//! bookkept in `terminal.rs`; permission and auth land in S4 (ADR-011) and
+//! are answered with a recoverable `not_implemented` failure until then.
 
 use futures::channel::mpsc;
 use futures::StreamExt;
@@ -23,6 +23,7 @@ use crate::protocol::{
     parse_shell_message, AgentCapabilities, AuthMethodInfo, BridgeMessage, InitializeParams,
     McpServerSpec, ShellMessage, PROTOCOL_VERSION,
 };
+use crate::terminal::TerminalRegistry;
 
 /// Meta key carrying the per-turn approval mode on `session/prompt`
 /// (ADR-011 lifecycle model; `_cosh/` is the cosh extension prefix).
@@ -77,6 +78,7 @@ pub(crate) async fn drive(
     cx: ConnectionTo<Agent>,
     params: InitializeParams,
     mut shell_lines: tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+    terminals: std::sync::Arc<TerminalRegistry>,
 ) -> Result<i32, agent_client_protocol::Error> {
     let request = acp::InitializeRequest::new(ProtocolVersion::V1)
         .client_capabilities(acp::ClientCapabilities::new().terminal(params.capabilities.terminal))
@@ -196,6 +198,7 @@ pub(crate) async fn drive(
                             &mut active,
                             &mut prompt_inflight,
                             &outcome_tx,
+                            &terminals,
                             message,
                         )
                         .await?;
@@ -222,6 +225,7 @@ async fn handle_shell_message(
     active: &mut Option<ActiveSession<'static, Agent>>,
     prompt_inflight: &mut bool,
     outcome_tx: &mpsc::UnboundedSender<(String, PromptOutcome)>,
+    terminals: &TerminalRegistry,
     message: ShellMessage,
 ) -> Result<(), agent_client_protocol::Error> {
     match message {
@@ -286,7 +290,36 @@ async fn handle_shell_message(
             *prompt_inflight = true;
         }
         ShellMessage::Cancel { session_id } => {
-            cx.send_notification(acp::CancelNotification::new(session_id))?;
+            // Three-stage cancellation (ADR-011): notify the agent, tell the
+            // shell to kill this session's live terminals; the process-group
+            // SIGTERM/SIGKILL stage stays with bridge shutdown custody.
+            cx.send_notification(acp::CancelNotification::new(session_id.clone()))?;
+            for terminal_id in terminals.active_terminal_ids(&session_id) {
+                emit(&BridgeMessage::TerminalKill { terminal_id });
+            }
+        }
+        ShellMessage::TerminalCreated { terminal_id } => {
+            terminals.confirm_created(&terminal_id);
+        }
+        ShellMessage::TerminalDenied {
+            terminal_id,
+            reason,
+        } => {
+            terminals.deny(&terminal_id, &reason);
+        }
+        ShellMessage::TerminalOutput {
+            terminal_id,
+            chunk,
+            truncated,
+        } => {
+            terminals.append_output(&terminal_id, &chunk, truncated);
+        }
+        ShellMessage::TerminalExit {
+            terminal_id,
+            exit_code,
+            signal,
+        } => {
+            terminals.record_exit(&terminal_id, exit_code, signal.as_deref());
         }
         other => {
             // Only the variant name is logged: AuthResponse values may carry
