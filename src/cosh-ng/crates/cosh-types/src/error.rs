@@ -45,7 +45,11 @@ pub struct CoshError {
     pub recoverable: bool,
     pub hint: Option<String>,
     pub subsystem: String,
-    pub details: Option<serde_json::Value>,
+    /// Boxed to keep `CoshError` small: it is the `Err` type of nearly every
+    /// platform signature, and `serde_json::Value` is wide — wider still when a
+    /// dependency enables `serde_json/preserve_order`, which switches the map to
+    /// `IndexMap` for the whole workspace. `Box` is wire-transparent.
+    pub details: Option<Box<serde_json::Value>>,
 }
 
 impl CoshError {
@@ -66,7 +70,7 @@ impl CoshError {
     }
 
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
-        self.details = Some(details);
+        self.details = Some(Box::new(details));
         self
     }
 

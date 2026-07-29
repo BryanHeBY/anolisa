@@ -67,7 +67,9 @@ pub enum InputMessage {
     },
 
     #[serde(rename = "control_response")]
-    ControlResponse { response: ControlResponsePayload },
+    ControlResponse {
+        response: Box<ControlResponsePayload>,
+    },
 
     #[serde(rename = "registry_request")]
     RegistryRequest {
