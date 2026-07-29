@@ -150,6 +150,7 @@ impl AcpAdapter {
     pub fn with_config(mut self, config: &crate::config::AcpConfig) -> Self {
         self.allow_spawn = true;
         if config.agent.is_empty() {
+            tracing::info!("acp.agent is empty, using built-in cosh-core");
             return self;
         }
         let Some(agent) = config.agents.get(&config.agent) else {
@@ -159,6 +160,13 @@ impl AcpAdapter {
             );
             return self;
         };
+        tracing::info!(
+            agent_name = %config.agent,
+            command = %agent.command,
+            args = ?agent.args,
+            trusted = agent.trusted,
+            "applying ACP agent config"
+        );
         self.agent_name = config.agent.clone();
         self.agent_command = agent.command.clone();
         self.agent_args = agent.args.clone();

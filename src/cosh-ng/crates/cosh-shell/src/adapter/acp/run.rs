@@ -75,6 +75,15 @@ pub(super) fn start_bridge_run(
 
     thread::spawn(move || {
         let run_id = request.id.clone();
+        tracing::info!(
+            agent_name = %adapter.agent_name,
+            agent_command = %adapter.agent_command,
+            agent_args = ?adapter.agent_args,
+            agent_trusted = adapter.agent_trusted,
+            injects_mcp = adapter.injects_shell_mcp(),
+            bridge_program = %adapter.program,
+            "starting ACP bridge turn"
+        );
         send_agent_event(
             &sender,
             AgentEvent::StatusChanged {
@@ -85,8 +94,12 @@ pub(super) fn start_bridge_run(
         );
 
         let mut child = match spawn_bridge(&adapter) {
-            Ok(child) => child,
+            Ok(child) => {
+                tracing::info!(pid = child.id(), "bridge process spawned");
+                child
+            }
             Err(message) => {
+                tracing::warn!(%message, "failed to spawn bridge");
                 let _ = sender.send(Err(AdapterError { message }));
                 return;
             }
@@ -223,6 +236,7 @@ fn drive_bridge(
     // Only the handshake goes out now: the bridge mints the session id, so
     // session_new and prompt follow as its replies arrive.
     let init_line = adapter.initialize_line(mcp_servers);
+    tracing::info!(%init_line, "sending initialize to bridge");
     write_bridge_line(&writer, &init_line)?;
 
     // Background lane plus a pump that forwards its output/exit events to
@@ -262,6 +276,7 @@ fn drive_bridge(
         if line.trim().is_empty() {
             continue;
         }
+        tracing::info!(%line, "bridge event");
         match serde_json::from_str::<BridgeEvent>(&line) {
             Ok(BridgeEvent::TerminalCreate {
                 terminal_id,
@@ -310,6 +325,7 @@ fn drive_bridge(
             }
             Ok(BridgeEvent::SessionLoaded { session_id })
             | Ok(BridgeEvent::SessionCreated { session_id }) => {
+                tracing::info!(%session_id, "agent session ready, sending prompt");
                 send_agent_event(
                     sender,
                     AgentEvent::StatusChanged {
@@ -363,7 +379,7 @@ fn drive_bridge(
                 }
             }
             Err(error) => {
-                tracing::warn!("ignoring malformed bridge event: {error}");
+                tracing::warn!(%line, %error, "malformed bridge event");
             }
         }
     }
@@ -372,6 +388,7 @@ fn drive_bridge(
     let _ = pump.join();
     if !terminal_seen {
         if cancelled.load(Ordering::SeqCst) {
+            tracing::warn!("bridge stream ended: cancelled by user");
             send_agent_event(
                 sender,
                 AgentEvent::AgentCancelled {
@@ -380,6 +397,7 @@ fn drive_bridge(
                 },
             );
         } else {
+            tracing::warn!("bridge stream ended without a terminal event");
             send_agent_event(
                 sender,
                 AgentEvent::AgentFailed {
