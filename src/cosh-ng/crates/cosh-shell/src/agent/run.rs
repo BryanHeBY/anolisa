@@ -361,7 +361,11 @@ fn start_agent_run_with_queue_policy<W: Write>(
     finalize_agent_request_skill_context(&mut request, state.startup_health.report.as_ref());
     enforce_insight_context_budget(&mut request);
     annotate_continuation_user_approval_mode(&mut request, state.approval_mode);
-    let provider_mode = provider_mode_for_agent_run(&request, state.approval_mode);
+    let provider_mode = provider_mode_for_agent_run(
+        &request,
+        state.approval_mode,
+        adapter.capabilities().control_protocol,
+    );
     let handle = adapter.start_cancellable(request.clone(), provider_mode);
     record_started_agent_request(state, &request);
     let now = Instant::now();

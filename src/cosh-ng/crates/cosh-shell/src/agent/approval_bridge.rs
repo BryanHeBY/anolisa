@@ -64,7 +64,12 @@ pub(crate) fn render_trusted_tool<W: Write>(
             render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
         }
-        if handle_shell_request_policy(state, run_request, &request) {
+        if handle_shell_request_policy(
+            state,
+            run_request,
+            &request,
+            adapter.capabilities().control_protocol,
+        ) {
             render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
         }
@@ -164,7 +169,12 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             }
             continue;
         }
-        if handle_shell_request_policy(state, run_request, &request) {
+        if handle_shell_request_policy(
+            state,
+            run_request,
+            &request,
+            adapter.capabilities().control_protocol,
+        ) {
             return Ok(true);
         }
 
@@ -313,8 +323,9 @@ fn handle_shell_request_policy(
     state: &InlineState,
     run_request: Option<&AgentRequest>,
     request: &RuntimeApprovalRequest,
+    control_protocol: bool,
 ) -> bool {
-    match shell_request_policy_decision(state, run_request, request) {
+    match shell_request_policy_decision(state, run_request, request, control_protocol) {
         ShellRequestPolicyDecision::Continue => false,
         ShellRequestPolicyDecision::DenyAnalysisOnly => {
             deny_shell_tool_during_analysis_continuation(state, request);
@@ -331,11 +342,15 @@ fn shell_request_policy_decision(
     state: &InlineState,
     run_request: Option<&AgentRequest>,
     request: &RuntimeApprovalRequest,
+    control_protocol: bool,
 ) -> ShellRequestPolicyDecision {
     if !request_is_executable_bash_tool(request) {
         return ShellRequestPolicyDecision::Continue;
     }
-    if run_request_is_analysis_only_continuation(run_request) {
+    // Only legacy control-protocol adapters treat the continuation as the end of
+    // the turn's shell budget; an ACP turn keeps executing commands after the
+    // foreground handoff.
+    if control_protocol && run_request_is_analysis_only_continuation(run_request) {
         return ShellRequestPolicyDecision::DenyAnalysisOnly;
     }
     if duplicate_host_executed_shell_result_delivered(state, request) {
@@ -757,14 +772,14 @@ mod tests {
         );
 
         assert_eq!(
-            shell_request_policy_decision(&state, None, &request),
+            shell_request_policy_decision(&state, None, &request, true),
             ShellRequestPolicyDecision::DenyDuplicateHostExecuted
         );
 
         let mut next_run_request = request;
         next_run_request.run_id = "run-2".to_string();
         assert_eq!(
-            shell_request_policy_decision(&state, None, &next_run_request),
+            shell_request_policy_decision(&state, None, &next_run_request, true),
             ShellRequestPolicyDecision::Continue
         );
     }
@@ -780,8 +795,40 @@ mod tests {
         );
 
         assert_eq!(
-            shell_request_policy_decision(&state, None, &request),
+            shell_request_policy_decision(&state, None, &request, true),
             ShellRequestPolicyDecision::DenyAnalysisOnly
+        );
+    }
+
+    #[test]
+    fn control_protocol_continuation_denies_further_shell_requests() {
+        let state = InlineState::default();
+        let run_request = analysis_only_request();
+        let request = shell_request(
+            ProviderShellRequestKind::ControlPermission,
+            Some("ctrl-1"),
+            Some("toolu-1"),
+        );
+
+        assert_eq!(
+            shell_request_policy_decision(&state, Some(&run_request), &request, true),
+            ShellRequestPolicyDecision::DenyAnalysisOnly
+        );
+    }
+
+    #[test]
+    fn acp_continuation_allows_further_shell_requests() {
+        let state = InlineState::default();
+        let run_request = analysis_only_request();
+        let request = shell_request(
+            ProviderShellRequestKind::ControlPermission,
+            Some("ctrl-1"),
+            Some("toolu-1"),
+        );
+
+        assert_eq!(
+            shell_request_policy_decision(&state, Some(&run_request), &request, false),
+            ShellRequestPolicyDecision::Continue
         );
     }
 
@@ -795,7 +842,7 @@ mod tests {
         );
 
         assert_eq!(
-            shell_request_policy_decision(&state, None, &request),
+            shell_request_policy_decision(&state, None, &request, true),
             ShellRequestPolicyDecision::Continue
         );
     }

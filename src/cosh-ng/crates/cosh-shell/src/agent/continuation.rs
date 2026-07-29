@@ -15,11 +15,16 @@ pub(crate) fn run_request_is_analysis_only_continuation(
     run_request.is_some_and(crate::types::request_is_analysis_only_continuation)
 }
 
+/// Provider mode for one run. Legacy control-protocol adapters get one
+/// foreground handoff per turn, so their analysis-only continuation is pinned
+/// to Recommend; ACP keeps the user's mode because its turn may still raise
+/// approval cards for further commands.
 pub(crate) fn provider_mode_for_agent_run(
     request: &AgentRequest,
     shell_mode: CoshApprovalMode,
+    control_protocol: bool,
 ) -> CoshApprovalMode {
-    if run_request_is_analysis_only_continuation(Some(request)) {
+    if control_protocol && run_request_is_analysis_only_continuation(Some(request)) {
         CoshApprovalMode::Recommend
     } else {
         shell_mode
@@ -265,14 +270,29 @@ mod tests {
         request.context_hints = vec![SHELL_HANDOFF_CONTINUATION_HINT.to_string()];
 
         assert_eq!(
-            provider_mode_for_agent_run(&request, CoshApprovalMode::Auto),
+            provider_mode_for_agent_run(&request, CoshApprovalMode::Auto, true),
             CoshApprovalMode::Recommend
         );
 
         request.context_hints.clear();
         assert_eq!(
-            provider_mode_for_agent_run(&request, CoshApprovalMode::Auto),
+            provider_mode_for_agent_run(&request, CoshApprovalMode::Auto, true),
             CoshApprovalMode::Auto
+        );
+    }
+
+    #[test]
+    fn acp_continuation_keeps_user_approval_mode() {
+        let mut request = test_request();
+        request.context_hints = vec![SHELL_HANDOFF_CONTINUATION_HINT.to_string()];
+
+        assert_eq!(
+            provider_mode_for_agent_run(&request, CoshApprovalMode::Auto, false),
+            CoshApprovalMode::Auto
+        );
+        assert_eq!(
+            provider_mode_for_agent_run(&request, CoshApprovalMode::Trust, false),
+            CoshApprovalMode::Trust
         );
     }
 

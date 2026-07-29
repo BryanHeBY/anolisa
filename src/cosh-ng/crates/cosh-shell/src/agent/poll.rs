@@ -67,11 +67,16 @@ fn poll_active_agent_run_with_policy<W: Write>(
             .as_ref()
             .is_some_and(active_run_has_unrendered_interaction);
         let shell_handoff_in_progress = state.control.shell_handoff().has_active_handoff();
-        let deny_shell_during_recovery =
+        let analysis_only_recovery_pending =
             state.agent_run.active.as_ref().is_some_and(|active_run| {
                 run_request_is_analysis_only_continuation(Some(&active_run.request))
             });
-        let analysis_only_recovery_pending = deny_shell_during_recovery;
+        // Legacy control-protocol adapters expect a single foreground handoff per
+        // turn, so a follow-up shell request there means the provider ignored the
+        // injected evidence. ACP drives many commands per turn and must not be
+        // denied.
+        let deny_shell_during_recovery =
+            adapter.capabilities().control_protocol && analysis_only_recovery_pending;
         let provider_native_shell_tool_call_pending = adapter.capabilities().control_protocol
             && state
                 .agent_run
