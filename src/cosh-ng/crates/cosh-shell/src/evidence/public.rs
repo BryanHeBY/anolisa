@@ -2,9 +2,14 @@ pub mod context_window;
 mod model;
 mod output_text;
 mod redaction;
+pub(crate) mod service;
 
 pub(crate) use model::{evidence_capture_status_for_block, EvidenceCaptureStatus};
-pub(crate) use output_text::redact_sensitive_output;
+pub(crate) use output_text::{clean_terminal_control_sequences, redact_sensitive_output};
+pub(crate) use service::{
+    data_response, error_response, truncate_utf8, EvidenceService, RunCommandExecutor,
+    EVIDENCE_SOCKET_ENV, EVIDENCE_TOKEN_ENV,
+};
 
 pub use context_window::{
     build_context_window, build_related_history_index, context_blocks_from_entries,

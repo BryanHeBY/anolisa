@@ -24,6 +24,9 @@ const EVIDENCE_WIRE_VERSION: u64 = 1;
 const SOCKET_ENV: &str = "COSH_EVIDENCE_SOCKET";
 const TOKEN_ENV: &str = "COSH_EVIDENCE_TOKEN";
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// `cosh_terminal` may block on an approval card (up to 600s) plus command
+/// execution, so its round trip gets a deliberately loose ceiling.
+const TERMINAL_IO_TIMEOUT: Duration = Duration::from_secs(660);
 
 /// Runs the proxy until stdin EOF or the shell socket goes away.
 pub fn run() -> i32 {
@@ -148,6 +151,25 @@ fn tool_definitions() -> Value {
                 "additionalProperties": false,
             },
         },
+        {
+            "name": "cosh_terminal",
+            "description": "Run one shell command on the user's audited terminal. The command is shown to the user on an approval card before it runs and recorded in the shell audit log; output is redacted before it is returned. Use this for shell command execution so the user can observe what runs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command line to execute.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory for the command.",
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": false,
+            },
+        },
     ])
 }
 
@@ -159,7 +181,7 @@ fn call_tool(socket_path: &str, token: &str, params: &Value) -> (Value, bool) {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     if !matches!(
         name,
-        "list_shell_commands" | "read_command_output" | "get_command_context"
+        "list_shell_commands" | "read_command_output" | "get_command_context" | "cosh_terminal"
     ) {
         return (tool_error(format!("unknown tool: {name}")), false);
     }
@@ -167,14 +189,24 @@ fn call_tool(socket_path: &str, token: &str, params: &Value) -> (Value, bool) {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let method = if name == "cosh_terminal" {
+        "run_command"
+    } else {
+        name
+    };
     let request = json!({
         "v": EVIDENCE_WIRE_VERSION,
         "token": token,
-        "method": name,
+        "method": method,
         "params": arguments,
     });
 
-    let response = match evidence_round_trip(socket_path, &request) {
+    let timeout = if name == "cosh_terminal" {
+        TERMINAL_IO_TIMEOUT
+    } else {
+        SOCKET_IO_TIMEOUT
+    };
+    let response = match evidence_round_trip(socket_path, &request, timeout) {
         Ok(response) => response,
         Err(error) => {
             return (
@@ -197,10 +229,14 @@ fn call_tool(socket_path: &str, token: &str, params: &Value) -> (Value, bool) {
     }
 }
 
-fn evidence_round_trip(socket_path: &str, request: &Value) -> std::io::Result<Value> {
+fn evidence_round_trip(
+    socket_path: &str,
+    request: &Value,
+    timeout: Duration,
+) -> std::io::Result<Value> {
     let mut stream = UnixStream::connect(socket_path)?;
-    stream.set_read_timeout(Some(SOCKET_IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     writeln!(stream, "{request}")?;
     stream.flush()?;
     let mut line = String::new();
@@ -257,7 +293,8 @@ mod tests {
             [
                 "list_shell_commands",
                 "read_command_output",
-                "get_command_context"
+                "get_command_context",
+                "cosh_terminal"
             ]
         );
         for tool in tools.as_array().expect("array") {

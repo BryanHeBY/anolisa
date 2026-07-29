@@ -18,12 +18,15 @@ use std::thread;
 use serde::{Deserialize, Serialize};
 
 use crate::command::BackgroundLane;
+use crate::evidence::service::EvidenceService;
 use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
 
+mod exec;
 mod run;
 mod terminal;
 mod wire;
 
+use self::exec::mcp_run_command_executor;
 use self::run::start_bridge_run;
 use super::claude::{send_agent_event, terminate_process};
 use super::prompt_from_request;
@@ -35,8 +38,25 @@ use super::{
 /// Internal JSONL protocol version this adapter speaks.
 pub(super) const ACP_BRIDGE_PROTOCOL_VERSION: u32 = 1;
 
+/// Preamble prepended to the prompt for agents that keep their own execution
+/// tools, steering them to the `cosh_terminal` MCP tool so command execution
+/// stays on the shell's audited, user-visible path (ADR-012).
+const COSH_TERMINAL_STEERING: &str = "Shell command execution is observable in this session: call the `cosh_terminal` MCP tool (server `cosh-shell`) for shell commands. Each call is shown to the user on an approval card before it runs and recorded in the shell audit log, so prefer it over any built-in execution tool when you need to run a shell command.";
+
+/// Shell-side mirror of the bridge `McpServerSpec` (ADR-012). cosh-shell has
+/// no internal crate deps, so the wire shape is mirrored here by hand.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ShellMcpServer {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
 /// Adapter that delegates Agent turns to an ACP agent via the cosh-acp bridge.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AcpAdapter {
     /// cosh-acp executable path.
     pub program: String,
@@ -58,6 +78,24 @@ pub struct AcpAdapter {
     /// even though each turn gets a fresh bridge process: continuity lives in
     /// the agent's session store, not in a long-lived process (ADR-011).
     pub session_id: Arc<Mutex<Option<String>>>,
+    /// Evidence Service persisted across turns so the socket and token stay
+    /// stable. Per-turn creation left a gap between drop and re-bind where the
+    /// MCP server proxy could find the socket missing (ADR-012).
+    pub(crate) evidence: Arc<Mutex<Option<EvidenceService>>>,
+}
+
+impl std::fmt::Debug for AcpAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcpAdapter")
+            .field("program", &self.program)
+            .field("agent_name", &self.agent_name)
+            .field("agent_command", &self.agent_command)
+            .field("agent_args", &self.agent_args)
+            .field("agent_trusted", &self.agent_trusted)
+            .field("allow_spawn", &self.allow_spawn)
+            .field("session_id", &self.session_id)
+            .finish()
+    }
 }
 
 impl Default for AcpAdapter {
@@ -71,6 +109,7 @@ impl Default for AcpAdapter {
             agent_trusted: false,
             allow_spawn: false,
             session_id: Arc::new(Mutex::new(None)),
+            evidence: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -129,7 +168,7 @@ impl AcpAdapter {
         self
     }
 
-    fn initialize_line(&self) -> String {
+    fn initialize_line(&self, mcp_servers: &[ShellMcpServer]) -> String {
         let cwd = std::env::current_dir()
             .map(|dir| dir.to_string_lossy().into_owned())
             .unwrap_or_else(|_| ".".to_string());
@@ -143,7 +182,7 @@ impl AcpAdapter {
                 "env": self.agent_env,
             },
             "cwd": cwd,
-            "mcp_servers": [],
+            "mcp_servers": mcp_servers,
             // Terminal delegation is withheld only from trusted agents, which
             // keep their own tools; everything else executes through the
             // shell's dual-lane executor and stays on the audited path
@@ -158,21 +197,49 @@ impl AcpAdapter {
         params.to_string()
     }
 
+    /// True when the shell's MCP server should be advertised to the agent.
+    ///
+    /// cosh-core has its own execution tools and audited registry; injecting
+    /// the shell MCP server would only duplicate work. Third-party agents get
+    /// the evidence/execution surface so all paths stay observable.
+    pub(super) fn injects_shell_mcp(&self) -> bool {
+        !self.agent_is_cosh_core()
+    }
+
+    /// True when the prompt should steer the agent toward `cosh_terminal`.
+    ///
+    /// We steer only agents that are not trusted and not the built-in core,
+    /// because trusted agents are expected to keep their own tools (and their
+    /// own observability contract). The `cosh_terminal` tool is still present
+    /// in the server if they choose to use it.
+    pub(super) fn steers_to_cosh_terminal(&self) -> bool {
+        !self.agent_trusted && !self.agent_is_cosh_core()
+    }
+
     /// Builds the prompt message for the session the bridge just created.
     ///
     /// The session id comes from the agent, not from the shell: the shell's
     /// own session id names a terminal session, not an agent transcript.
-    fn prompt_line(request: &AgentRequest, session_id: &str, mode: CoshApprovalMode) -> String {
+    fn prompt_line(
+        &self,
+        request: &AgentRequest,
+        session_id: &str,
+        mode: CoshApprovalMode,
+    ) -> String {
         let approval_mode = match mode {
             CoshApprovalMode::Recommend => "strict",
             CoshApprovalMode::Auto => "auto",
             CoshApprovalMode::Trust => "trust",
         };
+        let mut text = prompt_from_request(request);
+        if self.steers_to_cosh_terminal() {
+            text = format!("{COSH_TERMINAL_STEERING}\n\n{text}");
+        }
         serde_json::json!({
             "method": "prompt",
             "request_id": request.id,
             "session_id": session_id,
-            "text": prompt_from_request(request),
+            "text": text,
             "approval_mode": approval_mode,
         })
         .to_string()
@@ -290,7 +357,7 @@ mod tests {
     #[test]
     fn initialize_line_declares_protocol_v1() {
         let adapter = AcpAdapter::default();
-        let line = adapter.initialize_line();
+        let line = adapter.initialize_line(&[]);
         let value: serde_json::Value = serde_json::from_str(&line).expect("json");
         assert_eq!(value["method"], "initialize");
         assert_eq!(value["protocol_version"], 1);
@@ -317,7 +384,7 @@ mod tests {
         assert_eq!(adapter.agent_command, "claude");
         assert!(adapter.agent_trusted);
         let value: serde_json::Value =
-            serde_json::from_str(&adapter.initialize_line()).expect("json");
+            serde_json::from_str(&adapter.initialize_line(&[])).expect("json");
         // A trusted agent keeps its own tools, so terminals are not offered.
         assert_eq!(value["capabilities"]["terminal"], false);
         assert_eq!(value["agent"]["env"]["ANTHROPIC_API_KEY"], "secret");
@@ -326,7 +393,7 @@ mod tests {
     #[test]
     fn builtin_agent_is_not_watched_but_a_third_party_one_is() {
         let builtin: serde_json::Value =
-            serde_json::from_str(&AcpAdapter::default().initialize_line()).expect("json");
+            serde_json::from_str(&AcpAdapter::default().initialize_line(&[])).expect("json");
         assert_eq!(builtin["sentinel"], false);
 
         let mut config = crate::config::AcpConfig {
@@ -340,9 +407,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let third_party: serde_json::Value =
-            serde_json::from_str(&AcpAdapter::default().with_config(&config).initialize_line())
-                .expect("json");
+        let third_party: serde_json::Value = serde_json::from_str(
+            &AcpAdapter::default()
+                .with_config(&config)
+                .initialize_line(&[]),
+        )
+        .expect("json");
         assert_eq!(third_party["sentinel"], true);
     }
 
@@ -383,7 +453,8 @@ mod tests {
 
     #[test]
     fn prompt_line_carries_approval_mode() {
-        let line = AcpAdapter::prompt_line(&request(), "agent-session", CoshApprovalMode::Trust);
+        let line =
+            AcpAdapter::default().prompt_line(&request(), "agent-session", CoshApprovalMode::Trust);
         let value: serde_json::Value = serde_json::from_str(&line).expect("json");
         assert_eq!(value["method"], "prompt");
         assert_eq!(value["approval_mode"], "trust");

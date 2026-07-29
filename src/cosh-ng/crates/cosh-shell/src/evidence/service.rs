@@ -43,12 +43,20 @@ const DEFAULT_OUTPUT_BYTES: usize = 12 * 1024;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const CONTEXT_NEIGHBOR_COUNT: usize = 2;
 
+/// Handler for `run_command` requests (the `cosh_terminal` MCP tool).
+///
+/// Installed per agent turn by the ACP adapter; it owns lane choice, the
+/// safety gate, the approval card, and audit (ADR-012 execution exception).
+/// Takes the request params and returns a complete wire response.
+pub(crate) type RunCommandExecutor = Arc<dyn Fn(&Value) -> Value + Send + Sync>;
+
 /// Running evidence service; dropping it stops the listener and removes the
 /// socket, which also revokes the session token (ADR-012).
 pub(crate) struct EvidenceService {
     socket_path: PathBuf,
     token: String,
     blocks: Arc<Mutex<Vec<CommandBlock>>>,
+    executor: Arc<Mutex<Option<RunCommandExecutor>>>,
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -83,20 +91,23 @@ impl EvidenceService {
 
         let token = generate_token()?;
         let blocks = Arc::new(Mutex::new(Vec::new()));
+        let executor = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread = std::thread::Builder::new()
             .name("cosh-evidence".to_string())
             .spawn({
                 let token = token.clone();
                 let blocks = Arc::clone(&blocks);
+                let executor = Arc::clone(&executor);
                 let shutdown = Arc::clone(&shutdown);
-                move || accept_loop(&listener, &token, &blocks, &shutdown)
+                move || accept_loop(&listener, &token, blocks, executor, &shutdown)
             })?;
 
         Ok(Self {
             socket_path,
             token,
             blocks,
+            executor,
             shutdown,
             thread: Some(thread),
         })
@@ -115,6 +126,20 @@ impl EvidenceService {
     pub(crate) fn update_blocks(&self, blocks: Vec<CommandBlock>) {
         if let Ok(mut guard) = self.blocks.lock() {
             *guard = blocks;
+        }
+    }
+
+    /// Returns a handle to the internal blocks list so the `run_command`
+    /// executor can append blocks for commands it executes (ADR-012).
+    pub(crate) fn blocks_handle(&self) -> Arc<Mutex<Vec<CommandBlock>>> {
+        Arc::clone(&self.blocks)
+    }
+
+    /// Installs the executor backing `run_command` for the current turn.
+    /// Passing `None` clears it so requests fail closed after the turn ends.
+    pub(crate) fn set_executor(&self, executor: Option<RunCommandExecutor>) {
+        if let Ok(mut guard) = self.executor.lock() {
+            *guard = executor;
         }
     }
 }
@@ -139,12 +164,21 @@ fn generate_token() -> std::io::Result<String> {
 fn accept_loop(
     listener: &UnixListener,
     token: &str,
-    blocks: &Mutex<Vec<CommandBlock>>,
+    blocks: Arc<Mutex<Vec<CommandBlock>>>,
+    executor: Arc<Mutex<Option<RunCommandExecutor>>>,
     shutdown: &AtomicBool,
 ) {
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
-            Ok((stream, _)) => handle_connection(stream, token, blocks),
+            Ok((stream, _)) => {
+                let token = token.to_string();
+                let blocks = Arc::clone(&blocks);
+                let executor = Arc::clone(&executor);
+                std::thread::Builder::new()
+                    .name("cosh-evidence-conn".to_string())
+                    .spawn(move || handle_connection(stream, &token, &blocks, &executor))
+                    .ok();
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(ACCEPT_POLL_INTERVAL);
             }
@@ -156,7 +190,12 @@ fn accept_loop(
     }
 }
 
-fn handle_connection(stream: UnixStream, token: &str, blocks: &Mutex<Vec<CommandBlock>>) {
+fn handle_connection(
+    stream: UnixStream,
+    token: &str,
+    blocks: &Mutex<Vec<CommandBlock>>,
+    executor: &Mutex<Option<RunCommandExecutor>>,
+) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
 
@@ -189,7 +228,8 @@ fn handle_connection(stream: UnixStream, token: &str, blocks: &Mutex<Vec<Command
     }
 
     let snapshot = blocks.lock().map(|guard| guard.clone()).unwrap_or_default();
-    let response = handle_request_line(&line, token, &snapshot);
+    let executor_ref = executor.lock().ok().and_then(|guard| guard.clone());
+    let response = handle_request_line(&line, token, &snapshot, executor_ref.as_ref());
     respond(&stream, &response);
 }
 
@@ -210,17 +250,31 @@ fn respond(mut stream: &UnixStream, response: &Value) {
     }
 }
 
-fn error_response(code: &str, message: &str) -> Value {
+pub(crate) fn error_response(code: &str, message: &str) -> Value {
     json!({ "ok": false, "error": { "code": code, "message": message } })
 }
 
-fn data_response(data: Value) -> Value {
+pub(crate) fn data_response(data: Value) -> Value {
     json!({ "ok": true, "data": data })
+}
+
+/// Runs `run_command` through the installed executor, or fails closed when
+/// no turn is active.
+pub(crate) fn run_command_with(params: &Value, executor: Option<&RunCommandExecutor>) -> Value {
+    let Some(executor) = executor else {
+        return error_response("run_command_unavailable", "no agent turn is active");
+    };
+    executor(params)
 }
 
 /// Parses and answers one request line. Pure so tests can cover the
 /// authorization and redaction contract without a socket.
-pub(crate) fn handle_request_line(line: &str, token: &str, blocks: &[CommandBlock]) -> Value {
+pub(crate) fn handle_request_line(
+    line: &str,
+    token: &str,
+    blocks: &[CommandBlock],
+    executor: Option<&RunCommandExecutor>,
+) -> Value {
     let Ok(request) = serde_json::from_str::<Value>(line) else {
         return error_response("bad_request", "request is not valid JSON");
     };
@@ -239,6 +293,7 @@ pub(crate) fn handle_request_line(line: &str, token: &str, blocks: &[CommandBloc
         "list_shell_commands" => list_shell_commands(&params, blocks),
         "read_command_output" => read_command_output(&params, blocks),
         "get_command_context" => get_command_context(&params, blocks),
+        "run_command" => run_command_with(&params, executor),
         _ => error_response("bad_request", "unknown method"),
     }
 }
@@ -318,7 +373,7 @@ fn read_command_output(params: &Value, blocks: &[CommandBlock]) -> Value {
     }))
 }
 
-fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
+pub(crate) fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
     if value.len() <= max_bytes {
         return (value.to_string(), false);
     }
@@ -402,7 +457,7 @@ mod tests {
             request_line("wrong-token", "list_shell_commands", json!({})),
             json!({ "v": EVIDENCE_WIRE_VERSION, "method": "list_shell_commands" }).to_string(),
         ] {
-            let response = handle_request_line(&line, "good-token", &blocks);
+            let response = handle_request_line(&line, "good-token", &blocks, None);
             assert_eq!(response["ok"], false, "{response}");
             assert_eq!(response["error"]["code"], "unauthorized", "{response}");
             assert!(response.get("data").is_none(), "{response}");
@@ -413,17 +468,28 @@ mod tests {
     fn wrong_wire_version_is_rejected_before_token_check() {
         let line =
             json!({ "v": 99, "token": "good-token", "method": "list_shell_commands" }).to_string();
-        let response = handle_request_line(&line, "good-token", &[]);
+        let response = handle_request_line(&line, "good-token", &[], None);
         assert_eq!(response["error"]["code"], "bad_request", "{response}");
     }
 
     #[test]
     fn malformed_and_unknown_requests_are_bad_requests() {
-        let response = handle_request_line("not json", "good-token", &[]);
+        let response = handle_request_line("not json", "good-token", &[], None);
         assert_eq!(response["error"]["code"], "bad_request", "{response}");
-        let line = request_line("good-token", "run_command", json!({}));
-        let response = handle_request_line(&line, "good-token", &[]);
+        let line = request_line("good-token", "run_shell", json!({}));
+        let response = handle_request_line(&line, "good-token", &[], None);
         assert_eq!(response["error"]["code"], "bad_request", "{response}");
+    }
+
+    #[test]
+    fn run_command_fails_closed_without_an_executor() {
+        let line = request_line("tok", "run_command", json!({ "command": "echo hi" }));
+        let response = handle_request_line(&line, "tok", &[], None);
+        assert_eq!(response["ok"], false, "{response}");
+        assert_eq!(
+            response["error"]["code"], "run_command_unavailable",
+            "{response}"
+        );
     }
 
     #[test]
@@ -434,7 +500,7 @@ mod tests {
             None,
         )];
         let line = request_line("tok", "list_shell_commands", json!({}));
-        let response = handle_request_line(&line, "tok", &blocks);
+        let response = handle_request_line(&line, "tok", &blocks, None);
         assert_eq!(response["ok"], true, "{response}");
         let command = response["data"]["commands"][0]["command"]
             .as_str()
@@ -450,7 +516,7 @@ mod tests {
             .map(|index| test_block(&format!("c{index}"), &format!("echo {index}"), None))
             .collect();
         let line = request_line("tok", "list_shell_commands", json!({ "limit": 2 }));
-        let response = handle_request_line(&line, "tok", &blocks);
+        let response = handle_request_line(&line, "tok", &blocks, None);
         let commands = response["data"]["commands"].as_array().expect("commands");
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0]["id"], "c3");
@@ -471,7 +537,7 @@ mod tests {
             Some(output_path.to_string_lossy().to_string()),
         )];
         let line = request_line("tok", "read_command_output", json!({ "id": "c1" }));
-        let response = handle_request_line(&line, "tok", &blocks);
+        let response = handle_request_line(&line, "tok", &blocks, None);
         let text = response["data"]["text"].as_str().expect("text");
         assert!(!text.contains("super-secret-value"), "{text}");
         assert!(text.contains("plain line"), "{text}");
@@ -482,7 +548,7 @@ mod tests {
             "read_command_output",
             json!({ "id": "c1", "max_bytes": 4 }),
         );
-        let response = handle_request_line(&line, "tok", &blocks);
+        let response = handle_request_line(&line, "tok", &blocks, None);
         assert_eq!(response["data"]["truncated"], true);
 
         let _ = std::fs::remove_file(&output_path);
@@ -493,13 +559,13 @@ mod tests {
     fn read_output_without_capture_reports_unavailable() {
         let blocks = vec![test_block("c1", "echo hi", None)];
         let line = request_line("tok", "read_command_output", json!({ "id": "c1" }));
-        let response = handle_request_line(&line, "tok", &blocks);
+        let response = handle_request_line(&line, "tok", &blocks, None);
         assert_eq!(
             response["error"]["code"], "output_unavailable",
             "{response}"
         );
         let line = request_line("tok", "read_command_output", json!({ "id": "nope" }));
-        let response = handle_request_line(&line, "tok", &blocks);
+        let response = handle_request_line(&line, "tok", &blocks, None);
         assert_eq!(response["error"]["code"], "not_found", "{response}");
     }
 
@@ -509,7 +575,7 @@ mod tests {
             .map(|index| test_block(&format!("c{index}"), &format!("echo {index}"), None))
             .collect();
         let line = request_line("tok", "get_command_context", json!({ "id": "c2" }));
-        let response = handle_request_line(&line, "tok", &blocks);
+        let response = handle_request_line(&line, "tok", &blocks, None);
         assert_eq!(response["data"]["command"]["id"], "c2");
         let before = response["data"]["before"].as_array().expect("before");
         let after = response["data"]["after"].as_array().expect("after");

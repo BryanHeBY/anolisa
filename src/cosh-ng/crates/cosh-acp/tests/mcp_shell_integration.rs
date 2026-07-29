@@ -170,7 +170,8 @@ fn mcp_round_trip_with_valid_token() {
         [
             "list_shell_commands",
             "read_command_output",
-            "get_command_context"
+            "get_command_context",
+            "cosh_terminal"
         ]
     );
 

@@ -13,6 +13,7 @@
 //! (and through it the agent) sees one uniform terminal lifecycle regardless
 //! of which lane ran the command.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::process::ChildStdin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,6 +59,73 @@ impl TerminalCreate {
         }
     }
 }
+
+/// Shared approval-card dispatcher.
+///
+/// Both the ACP terminal path and the `cosh_terminal` MCP executor raise
+/// approval cards concurrently: the bridge reader cannot drain the approval
+/// receiver while it is blocked on stdout, so a single owner routes answers
+/// by `request_id`. Late answers to a previous card are returned to a mailbox
+/// keyed by id so the rightful waiter can still collect them.
+pub(super) struct ApprovalRouter {
+    receiver: Mutex<mpsc::Receiver<ApprovalResponse>>,
+    mailbox: Mutex<HashMap<String, ApprovalResponse>>,
+}
+
+impl ApprovalRouter {
+    pub(super) fn new(receiver: mpsc::Receiver<ApprovalResponse>) -> Self {
+        Self {
+            receiver: Mutex::new(receiver),
+            mailbox: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Waits for the answer matching `request_id`, or `None` on cancellation
+    /// or a closed channel. Answers for other cards are buffered.
+    pub(super) fn wait(
+        &self,
+        request_id: &str,
+        cancelled: &AtomicBool,
+    ) -> Option<ApprovalDecision> {
+        let deadline = std::time::Instant::now() + APPROVAL_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            if cancelled.load(Ordering::SeqCst) {
+                return Some(ApprovalDecision::Deny {
+                    message: "turn cancelled before approval".to_string(),
+                });
+            }
+            if let Some(response) = self
+                .mailbox
+                .lock()
+                .ok()
+                .and_then(|mut box_| box_.remove(request_id))
+            {
+                return Some(response.decision);
+            }
+            if let Ok(receiver) = self.receiver.lock() {
+                match receiver.recv_timeout(APPROVAL_POLL) {
+                    Ok(response) if response.request_id == request_id => {
+                        return Some(response.decision);
+                    }
+                    Ok(response) => {
+                        if let Ok(mut mailbox) = self.mailbox.lock() {
+                            mailbox.insert(response.request_id.clone(), response);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+                }
+            } else {
+                std::thread::sleep(APPROVAL_POLL);
+            }
+        }
+        None
+    }
+}
+
+/// Re-exported so `acp/exec.rs` can name the executor type without reaching
+/// across module boundaries.
+pub(super) use crate::evidence::service::RunCommandExecutor;
 
 /// Writes one protocol message to the bridge.
 pub(super) fn write_message(writer: &BridgeWriter, message: &serde_json::Value) {
@@ -165,7 +233,7 @@ pub(super) fn handle_terminal_create(
     writer: &BridgeWriter,
     lane: &BackgroundLane,
     events: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
-    approvals: &mpsc::Receiver<ApprovalResponse>,
+    router: &ApprovalRouter,
     cancelled: &Arc<AtomicBool>,
 ) {
     let command_line = create.command_line();
@@ -181,7 +249,7 @@ pub(super) fn handle_terminal_create(
                 &command_line,
                 &reason,
                 events,
-                approvals,
+                router,
                 cancelled,
             );
             match decision {
@@ -240,7 +308,7 @@ fn request_approval(
     command_line: &str,
     reason: &str,
     events: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
-    approvals: &mpsc::Receiver<ApprovalResponse>,
+    router: &ApprovalRouter,
     cancelled: &Arc<AtomicBool>,
 ) -> Option<ApprovalDecision> {
     let request_id = format!("acp-terminal-{terminal_id}");
@@ -256,38 +324,7 @@ fn request_approval(
     if sent.is_err() {
         return None;
     }
-    await_decision(&request_id, approvals, cancelled)
-}
-
-/// Waits for the card answer that matches `request_id`.
-fn await_decision(
-    request_id: &str,
-    approvals: &mpsc::Receiver<ApprovalResponse>,
-    cancelled: &Arc<AtomicBool>,
-) -> Option<ApprovalDecision> {
-    let deadline = std::time::Instant::now() + APPROVAL_TIMEOUT;
-    while std::time::Instant::now() < deadline {
-        if cancelled.load(Ordering::SeqCst) {
-            return Some(ApprovalDecision::Deny {
-                message: "turn cancelled before approval".to_string(),
-            });
-        }
-        match approvals.recv_timeout(APPROVAL_POLL) {
-            Ok(response) => {
-                // Late answers to a previous card must not decide this one.
-                if response.request_id == request_id {
-                    return Some(response.decision);
-                }
-                tracing::debug!(
-                    request_id = %response.request_id,
-                    "ignoring approval for a different terminal"
-                );
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
-        }
-    }
-    None
+    router.wait(&request_id, cancelled)
 }
 
 /// Raises the shell's approval card for an agent permission request and
@@ -343,7 +380,7 @@ pub(super) fn handle_permission_request(
     options: &[(&str, &str)],
     writer: &BridgeWriter,
     events: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
-    approvals: &mpsc::Receiver<ApprovalResponse>,
+    router: &ApprovalRouter,
     cancelled: &Arc<AtomicBool>,
 ) {
     let PermissionRequest {
@@ -367,7 +404,7 @@ pub(super) fn handle_permission_request(
         permission_response(writer, request_id, None);
         return;
     }
-    let option_id = match await_decision(&card_id, approvals, cancelled) {
+    let option_id = match router.wait(&card_id, cancelled) {
         Some(ApprovalDecision::Allow) => pick_option(options, ALLOW_KINDS),
         Some(ApprovalDecision::Deny { .. }) => pick_option(options, REJECT_KINDS),
         // No answer and host-executed replay are both "the user did not pick

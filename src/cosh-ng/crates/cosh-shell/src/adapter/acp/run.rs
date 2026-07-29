@@ -6,21 +6,24 @@
 //! with it (ADR-011).
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use crate::command::BackgroundLane;
-use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
+use crate::evidence::service::{EvidenceService, EVIDENCE_SOCKET_ENV, EVIDENCE_TOKEN_ENV};
+use crate::types::{AgentEvent, AgentRequest, CommandBlock, CoshApprovalMode};
 
 use super::super::claude::{send_agent_event, terminate_process};
 use super::super::{
     control_protocol, AdapterError, AgentRunHandle, ProviderCancellationArtifactStore,
 };
-use super::terminal::{self, BridgeWriter, TerminalCreate};
+use super::exec::mcp_run_command_executor;
+use super::terminal::{self, ApprovalRouter, BridgeWriter, TerminalCreate};
 use super::wire::{map_bridge_event, session_load_line, session_new_line, BridgeEvent};
-use super::AcpAdapter;
+use super::{AcpAdapter, ShellMcpServer};
 
 pub(super) fn start_bridge_run(
     adapter: AcpAdapter,
@@ -29,6 +32,7 @@ pub(super) fn start_bridge_run(
 ) -> AgentRunHandle {
     let (sender, receiver) = mpsc::channel();
     let (approval_tx, approval_rx) = mpsc::channel();
+    let router = Arc::new(ApprovalRouter::new(approval_rx));
     let cancelled = Arc::new(AtomicBool::new(false));
     let child_pid = Arc::new(Mutex::new(None::<u32>));
     let writer_slot: Arc<Mutex<Option<BridgeWriter>>> = Arc::new(Mutex::new(None));
@@ -94,16 +98,55 @@ pub(super) fn start_bridge_run(
             terminate_process(child.id());
         }
 
+        // Evidence Service persists across turns so the socket and token stay
+        // stable: the MCP server proxy spawned by the agent can always reach
+        // the socket (ADR-012). First turn starts it; later turns reuse it.
+        let mcp_servers = match adapter.evidence.lock() {
+            Ok(mut slot) => {
+                if slot.is_none() {
+                    *slot = EvidenceService::start(&request.session_id).ok();
+                }
+                let mcp = build_mcp_servers(&adapter, slot.as_ref());
+                if let Some(service) = slot.as_ref() {
+                    service.update_blocks(evidence_blocks(&request));
+                    let blocks_handle = service.blocks_handle();
+                    let output_dir = service
+                        .socket_path()
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join("output-refs");
+                    service.set_executor(Some(mcp_run_command_executor(
+                        &run_id,
+                        &request.session_id,
+                        blocks_handle,
+                        output_dir,
+                        sender.clone(),
+                        Arc::clone(&router),
+                        Arc::clone(&cancelled),
+                    )));
+                }
+                mcp
+            }
+            Err(_) => Vec::new(),
+        };
+
         let outcome = drive_bridge(
             &adapter,
             &request,
             mode,
+            &mcp_servers,
             &mut child,
             &sender,
-            &approval_rx,
+            &router,
             &writer_slot,
             &cancelled,
         );
+        // Clear the per-turn executor but keep the service alive for reuse.
+        if let Ok(slot) = adapter.evidence.lock() {
+            if let Some(service) = slot.as_ref() {
+                service.set_executor(None);
+            }
+        }
         if let Ok(mut slot) = writer_slot.lock() {
             *slot = None;
         }
@@ -159,9 +202,10 @@ fn drive_bridge(
     adapter: &AcpAdapter,
     request: &AgentRequest,
     mode: CoshApprovalMode,
+    mcp_servers: &[ShellMcpServer],
     child: &mut Child,
     sender: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
-    approvals: &mpsc::Receiver<control_protocol::ApprovalResponse>,
+    router: &ApprovalRouter,
     writer_slot: &Arc<Mutex<Option<BridgeWriter>>>,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<(), AdapterError> {
@@ -178,7 +222,8 @@ fn drive_bridge(
 
     // Only the handshake goes out now: the bridge mints the session id, so
     // session_new and prompt follow as its replies arrive.
-    write_bridge_line(&writer, &adapter.initialize_line())?;
+    let init_line = adapter.initialize_line(mcp_servers);
+    write_bridge_line(&writer, &init_line)?;
 
     // Background lane plus a pump that forwards its output/exit events to
     // the bridge while the reader below may be blocked on stdout.
@@ -237,7 +282,7 @@ fn drive_bridge(
                     &writer,
                     &lane,
                     sender,
-                    approvals,
+                    router,
                     cancelled,
                 );
             }
@@ -273,10 +318,7 @@ fn drive_bridge(
                         message: format!("agent session {session_id} ready"),
                     },
                 );
-                write_bridge_line(
-                    &writer,
-                    &AcpAdapter::prompt_line(request, &session_id, mode),
-                )?;
+                write_bridge_line(&writer, &adapter.prompt_line(request, &session_id, mode))?;
                 bound_session = Some(session_id);
             }
             Ok(BridgeEvent::PermissionRequest {
@@ -300,7 +342,7 @@ fn drive_bridge(
                         .collect::<Vec<_>>(),
                     &writer,
                     sender,
-                    approvals,
+                    router,
                     cancelled,
                 );
             }
@@ -348,4 +390,46 @@ fn drive_bridge(
         }
     }
     Ok(())
+}
+
+/// Builds the MCP server list for the handshake. The `cosh-shell` server is
+/// injected only when the adapter wants the shell MCP surface (ADR-012): it
+/// exposes the evidence tools and `cosh_terminal` to agents that do not bring
+/// their own audited execution path.
+fn build_mcp_servers(
+    adapter: &AcpAdapter,
+    evidence: Option<&EvidenceService>,
+) -> Vec<ShellMcpServer> {
+    let Some(service) = evidence else {
+        return Vec::new();
+    };
+    if !adapter.injects_shell_mcp() {
+        return Vec::new();
+    }
+    vec![ShellMcpServer {
+        name: "cosh-shell".to_string(),
+        command: adapter.program.clone(),
+        args: vec!["mcp-shell".to_string()],
+        env: std::collections::BTreeMap::from([
+            (
+                EVIDENCE_SOCKET_ENV.to_string(),
+                service.socket_path().to_string_lossy().into_owned(),
+            ),
+            (EVIDENCE_TOKEN_ENV.to_string(), service.token().to_string()),
+        ]),
+    }]
+}
+
+/// Assembles the command-history snapshot served to evidence clients for one
+/// turn: the request's context blocks plus the current command block, deduped
+/// by id so a block present in both is not double-counted.
+fn evidence_blocks(request: &AgentRequest) -> Vec<CommandBlock> {
+    let mut blocks: Vec<CommandBlock> = request.context_blocks.clone();
+    if !blocks
+        .iter()
+        .any(|block| block.id == request.command_block.id)
+    {
+        blocks.push(request.command_block.clone());
+    }
+    blocks
 }
