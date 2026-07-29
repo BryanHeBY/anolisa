@@ -23,11 +23,13 @@ use super::prompt_replay::{
 };
 
 mod input_events;
+mod input_readiness;
 mod pty_emit;
 mod terminal_recovery;
 mod terminal_size;
 
-use input_events::drain_raw_input_events;
+use input_events::{candidate_display_columns, drain_raw_input_events};
+use input_readiness::RawInputReadinessProbe;
 use pty_emit::resolve_pty_emit;
 #[cfg(test)]
 use pty_emit::restore_prompt_display_before_handoff;
@@ -80,6 +82,13 @@ where
     let mut last_pty_output: Option<Instant> = None;
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
     let mut pending_prompt_restore = None;
+    let mut input_readiness = RawInputReadinessProbe::from_env();
+    // #1932 F4: ask the outer terminal to report modifier-carrying editing
+    // keys (modifyOtherKeys level 1, e.g. Shift+Enter -> CSI 27;2;13~).
+    // Written on the ordered output path after startup rendering settled;
+    // unsupporting terminals ignore it, RawModeGuard withdraws it on exit.
+    output.write_all(b"\x1b[>4;1m")?;
+    output.flush()?;
     loop {
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
@@ -139,18 +148,43 @@ where
                 Ok(n) => {
                     last_pty_output = Some(Instant::now());
                     parser.feed(&buffer[..n])?;
+                    // Relay-side events sent before a PTY write (e.g. the
+                    // synthetic prompt-repaint arm) must land before the
+                    // display cuts produced by that write's echo are
+                    // handled: re-drain here, the top-of-loop drain alone
+                    // loses that ordering inside this read loop (#1932).
+                    drain_raw_input_events(
+                        input_events,
+                        parser,
+                        output,
+                        prompt,
+                        &mut native_candidate_echoed_len,
+                        &mut prompt_replay,
+                    )?;
                     for (cut, cut_kind) in parser.drain_intervention_display_cuts() {
+                        let cut = cut.min(parser.display.len());
                         // Only a real prompt boundary (precmd) confirms the
                         // shell finished responding to the relay writes seen
                         // so far; an intercepted line's remaining response is
                         // just the prompt repaint replay dedup strips.
                         match cut_kind {
                             DisplayCutKind::PromptBoundary => {
-                                prompt_replay.observe_prompt_boundary()
+                                prompt_replay.observe_prompt_boundary();
+                                // #1932: the soft-newline upgrade submitted a
+                                // synthetic empty line for this boundary; its
+                                // accept echo is visually blank, so drop it
+                                // instead of surfacing a stray blank line.
+                                if parser.take_synthetic_prompt_repaint()
+                                    && cut > display_start
+                                    && candidate_display_columns(
+                                        &parser.display[display_start..cut],
+                                    ) == 0
+                                {
+                                    display_start = cut;
+                                }
                             }
                             DisplayCutKind::Intercept => prompt_replay.observe_intercept_cut(),
                         }
-                        let cut = cut.min(parser.display.len());
                         if !hold_shell_output && cut > display_start {
                             write_display_slice(
                                 parser,
@@ -337,6 +371,7 @@ where
             )?;
             output.flush()?;
         }
+        input_readiness.acknowledge_if_ready(output, input_mode)?;
         // The PTY is drained (WouldBlock) at this point: write off
         // submissions a foreground program consumed once the shell has
         // painted a prompt after the last boundary and idles at it. A bare

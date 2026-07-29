@@ -21,10 +21,14 @@ pub fn prompt_from_request_with_evidence_policy(
     allow_output_requests: bool,
 ) -> String {
     let trigger = trigger_evidence_prompt(request, access, allow_output_requests);
-    let runtime = runtime_frame_prompt(request, access, allow_output_requests);
-    let hook = hook_finding_prompt(request);
-    let prompt = bound_provider_context(trigger, runtime, hook, request);
-    redact_sensitive_text(&prompt).0
+    let runtime = redact_sensitive_text(&runtime_frame_prompt(
+        request,
+        access,
+        allow_output_requests,
+    ))
+    .0;
+    let hook = redact_sensitive_text(&hook_finding_prompt(request)).0;
+    bound_provider_context(trigger, runtime, hook, request)
 }
 
 fn bound_provider_context(
@@ -562,9 +566,11 @@ fn history_access_instruction(
 
 pub fn provider_language_hint(language: crate::Language) -> &'static str {
     match language {
-        crate::Language::EnUs => "Respond in English unless the user explicitly asks otherwise.",
+        crate::Language::EnUs => {
+            "If the user explicitly asks for replies in a specific language, use that language. Otherwise reply in the language of the user's message. When the user's message has no clear natural language (for example, it only carries command output or evidence), respond in English by default."
+        }
         crate::Language::ZhCn => {
-            "Respond in Simplified Chinese unless the user explicitly asks otherwise."
+            "If the user explicitly asks for replies in a specific language, use that language. Otherwise reply in the language of the user's message. When the user's message has no clear natural language (for example, it only carries command output or evidence), respond in Simplified Chinese by default."
         }
     }
 }

@@ -3,7 +3,23 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash 命令",
-        MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}.",
+        MessageId::HelpFooter => {
+            "模式: {mode}. 策略: {strategy}. Shift+Enter / Alt+Enter 在 prompt 内插入换行；以 ?? 开头可多行组稿。"
+        }
+        MessageId::PromptSoftNewlineTip => {
+            "提示：以 ?? 开头可组稿多行 prompt（Shift+Enter 换行）。"
+        }
+        MessageId::PromptDraftTitle => "Prompt 草稿",
+        MessageId::PromptDraftFooterEditing => {
+            "Enter 发送 · Shift+Enter 换行 · Esc 取消"
+        }
+        MessageId::PromptDraftFooterSubmitted => "已发送给 Agent",
+        MessageId::PromptDraftFooterCancelled => "草稿已取消",
+        MessageId::HelpGroupPrompt => "Prompt",
+        MessageId::HelpSummaryDraft => "打开多行 Prompt 草稿卡（?? 回车等效）",
+        MessageId::PromptMultilineEntryHint => {
+            "多行提问可输入 ?? 后回车，或使用 /draft 打开草稿卡"
+        }
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",
@@ -63,13 +79,14 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "渲染降级: 启动 cosh-shell 前设置 COSH_SHELL_RENDER=plain。"
         }
         MessageId::SlashInfoConfigFooter => {
-            "使用 /config language [auto|en-US|zh-CN]。保存的语言会在下次启动时生效。"
+            "使用 /config language [auto|en-US|zh-CN]。设置立即生效；Agent 回复跟随你的提问语言。"
         }
         MessageId::HelpGroupSessions => "会话",
         MessageId::HelpSummarySession => "查找、恢复和清理智能体会话",
         MessageId::HelpGroupRegistry => "Registry",
         MessageId::HelpSummaryExtensions => "列出/管理 cosh-core 扩展",
         MessageId::HelpSummarySkills => "列出/查看 cosh-core 技能",
+        MessageId::HelpSummaryMcp => "管理 MCP 服务器",
         MessageId::HelpGroupStatus => "状态",
         MessageId::HelpSummaryStatus => "显示版本、服务商、模型和运行状态",
         MessageId::HelpSummaryStats => "显示模型和工具的会话统计",
@@ -113,6 +130,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::SlashExtensionsTitle => "扩展",
         MessageId::SlashSkillsTitle => "技能",
+        MessageId::SlashMcpTitle => "MCP 服务器",
         MessageId::SlashRegistryUnavailable => "此功能需要 cosh-core 后端支持。",
         MessageId::SlashHooksShellSection => "Shell Hooks",
         MessageId::SlashHooksAgentSection => "Agent Hooks",

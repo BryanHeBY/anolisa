@@ -108,6 +108,11 @@ pub(crate) struct InlineState {
     pub(crate) pending_prompt_suggestion_bindings: HashMap<String, PendingInputGhostBinding>,
     pub(crate) shown_shell_rewrite_guidance: bool,
     pub(crate) shown_agent_prompt_guidance: bool,
+    /// Multi-line prompt entry discoverability (#1721 tip, #1932 hint).
+    pub(crate) prompt_entry_hints: crate::runtime::prompt_draft::PromptEntryHints,
+    /// #1721 D13: active multi-line prompt draft card, if any.
+    pub(crate) prompt_draft: Option<crate::runtime::prompt_draft::PromptDraftCardState>,
+    pub(crate) prompt_draft_seq: u64,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,

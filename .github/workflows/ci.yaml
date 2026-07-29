@@ -654,7 +654,7 @@ jobs:
         run: |
           cd src/agentsight
           cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/optimize\.rs)'
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/optimize\.rs|src/local/)'
 
       - name: Generate coverage summary
         if: always()
@@ -904,6 +904,16 @@ jobs:
         with:
           workspaces: src/anolisa
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate npm packaging
+        run: |
+          cd src/anolisa
+          node npm/tests/platforms.test.js
+          node npm/scripts/package-npm.js --validate
+
       - name: Check formatting
         run: |
           cd src/anolisa
@@ -993,10 +1003,9 @@ jobs:
 
       - name: Run process and PTY integration tests
         env:
-          # Raw CLI PTY tests are wait-bound, not CPU-bound; probe a wider
-          # shared gate on CI runners. Revert this env to fall back to the
-          # in-tree default (8) if timing flakes regress.
-          COSH_RAW_CLI_TEST_PARALLELISM: '16'
+          # Libtest still schedules 16 workers, while the harness gate bounds
+          # live PTY sessions to avoid oversubscribing loaded CI runners.
+          COSH_RAW_CLI_TEST_PARALLELISM: '8'
         run: |
           cd src/cosh-ng
           scripts/run-test-gates.sh integration

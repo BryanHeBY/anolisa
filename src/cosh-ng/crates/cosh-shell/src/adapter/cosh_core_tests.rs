@@ -291,6 +291,18 @@ fn prepare_invocation_prompt_includes_cosh_shell_contract() {
 }
 
 #[test]
+fn prepare_invocation_prompt_preserves_user_provided_secret() {
+    let secret = "api_key=sk-cosh-shell-runtime-secret";
+    let mut request = test_request();
+    request.user_input = Some(format!("write this exact value: {secret}"));
+
+    let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Auto);
+
+    assert!(inv.prompt.contains(secret), "{}", inv.prompt);
+    assert!(!inv.prompt.contains("<redacted>"), "{}", inv.prompt);
+}
+
+#[test]
 fn prepare_invocation_prompt_uses_shell_output_tool_mode() {
     let mut request = test_request();
     let mut context = request.command_block.clone();
@@ -901,6 +913,102 @@ fn busy_external_mutation_reloads_live_core_at_safe_point() {
         .expect("query live registry after deferred reload");
     assert_eq!(live["transport"], "live");
     assert_eq!(live["reloads"], 1);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mcp_mutation_reloads_live_core_at_safe_point() {
+    let (script, root) = persistent_mock_paths("mcp-deferred-reload");
+    let gate = root.join("gate");
+    let started = root.join("started");
+    write_persistent_mock(&script, &gate, &started);
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let run = adapter.start_cancellable(test_request(), CoshApprovalMode::Auto);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        started.exists(),
+        "persistent mock did not enter the busy turn"
+    );
+
+    adapter.note_mcp_mutation();
+    std::fs::write(&gate, "continue").expect("release persistent mock turn");
+    let events = collect_cancellable_run(&run);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+
+    let live = adapter
+        .registry_query("extensions", "info", serde_json::Value::Null)
+        .expect("query live registry after deferred mcp reload");
+    assert_eq!(live["transport"], "live");
+    assert_eq!(live["reloads"], 1);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn idle_mcp_mutation_reloads_before_the_next_turn_starts() {
+    let (script, root) = persistent_mock_paths("mcp-idle-reload");
+    // Embeds the reload counter into every turn result so the assertion can
+    // prove ordering: the reload must be consumed before the next user
+    // message reaches the mock, not merely at the end of that turn.
+    let source = r#"#!/bin/sh
+turns=0
+reloads=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      turns=$((turns + 1))
+      printf '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"result":"done-r%s"}\n' "$reloads"
+      ;;
+    *'"type":"registry_request"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'"action":"reload"'*) reloads=$((reloads + 1));;
+      esac
+      printf '{"type":"registry_response","request_id":"%s","success":true,"data":{"turns":%s,"reloads":%s,"transport":"live"}}\n' "$request_id" "$turns" "$reloads"
+      ;;
+    *'"subtype":"shutdown"'*) exit 0;;
+  esac
+done
+"#;
+    std::fs::write(&script, source).expect("write idle-reload cosh-core mock");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("idle-reload cosh-core mock metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod idle-reload cosh-core mock");
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let first =
+        collect_cancellable_run(&adapter.start_cancellable(test_request(), CoshApprovalMode::Auto));
+    assert!(
+        first.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. } if text == "done-r0"
+        )),
+        "{first:?}"
+    );
+
+    adapter.note_mcp_mutation();
+
+    let mut second_request = test_request();
+    second_request.id = "test-2".to_string();
+    let second =
+        collect_cancellable_run(&adapter.start_cancellable(second_request, CoshApprovalMode::Auto));
+    assert!(
+        second.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. } if text == "done-r1"
+        )),
+        "reload must land before the next turn's user message: {second:?}"
+    );
     drop(adapter);
     let _ = std::fs::remove_dir_all(root);
 }

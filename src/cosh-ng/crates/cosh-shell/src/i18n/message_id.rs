@@ -88,4 +88,8 @@ collect_message_ids!([
     activity_untracked_ids,
     approval_turn_consent_ids,
     status_query_ids,
+    prompt_soft_newline_ids,
+    tool_argument_status_ids,
+    multiline_entry_ids,
+    mcp_registry_ids,
 ],);

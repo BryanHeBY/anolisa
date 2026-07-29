@@ -49,6 +49,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/draft",
+            usage: "/draft",
+            summary_id: MessageId::HelpSummaryDraft,
+            group: Some("Prompt"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/health",
             usage: "/health",
             summary_id: MessageId::HelpSummaryHealth,
@@ -84,9 +92,9 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             name: "/auth",
             usage: "/auth",
             summary_id: MessageId::HelpSummaryAuth,
-            group: None,
+            group: Some("Config"),
             scope: "config",
-            state: SlashCommandState::Contextual,
+            state: SlashCommandState::Public,
         },
         SlashCommandSpec {
             name: "/config",
@@ -206,6 +214,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             summary_id: MessageId::HelpSummarySkills,
             group: Some("Registry"),
             scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/mcp",
+            usage: "/mcp [list|connect|inspect|refresh|disconnect|login|logout] [name]",
+            summary_id: MessageId::HelpSummaryMcp,
+            group: Some("Registry"),
+            scope: "config",
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
@@ -371,6 +387,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(visible.contains(&"/config language [auto|en-US|zh-CN]"));
+        assert!(visible.contains(&"/auth"));
         assert!(visible.contains(&"/status"));
         assert!(visible.contains(&"/stats [model|tools]"));
         assert!(visible
@@ -391,16 +408,18 @@ mod tests {
     }
 
     #[test]
-    fn recommendations_is_public_local_config_control() {
-        let spec = slash_command_registry()
-            .iter()
-            .find(|spec| spec.name == "/recommendations")
-            .expect("recommendations spec");
+    fn recommendations_and_auth_are_public_config_controls() {
+        for name in ["/recommendations", "/auth"] {
+            let spec = slash_command_registry()
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("public config control spec");
 
-        assert_eq!(spec.group, Some("Config"));
-        assert_eq!(spec.scope, "config");
-        assert_eq!(spec.state, SlashCommandState::Public);
-        assert!(exact_slash_control_commands().any(|name| name == "/recommendations"));
+            assert_eq!(spec.group, Some("Config"), "{name}");
+            assert_eq!(spec.scope, "config", "{name}");
+            assert_eq!(spec.state, SlashCommandState::Public, "{name}");
+            assert!(exact_slash_control_commands().any(|candidate| candidate == name));
+        }
     }
 
     #[test]
@@ -495,6 +514,39 @@ mod tests {
                 registry.contains(token),
                 "shell marker has unregistered slash token {token}"
             );
+        }
+
+        // Shell routing of exact slash submissions (issue #1718) is only
+        // safe when the shell side can intercept every routed token, so
+        // both bash case lists (_cosh_should_intercept_unknown and
+        // _cosh_is_slash_control_candidate) must each carry the full
+        // registry set, not merely the bash+zsh union checked above.
+        // Case-arm lines end with `)` and every alternative starts with
+        // `/`, which keeps slash-leading comment lines out of the match.
+        let bash_case_lines = include_str!("../shell_host/marker/bash.rs")
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.ends_with(')')
+                    && line
+                        .trim_end_matches(')')
+                        .split('|')
+                        .all(|token| token.trim().starts_with('/'))
+            })
+            .filter(|line| line.contains('|'))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bash_case_lines.len(),
+            2,
+            "expected exactly the two bash slash case lists"
+        );
+        for line in bash_case_lines {
+            let tokens = line
+                .trim_end_matches(')')
+                .split('|')
+                .map(str::trim)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(tokens, registry, "bash case list diverged from registry");
         }
     }
 }

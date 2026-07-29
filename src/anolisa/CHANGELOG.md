@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-07-28
+
+### Added
+
+- The `@anolisa/cli` npm package now supports macOS arm64 and selects the
+  matching native binary during installation.
+- Tokenless adapters now support Qwencode while keeping the Cosh extension
+  independent from shared hook assets.
+
+### Fixed
+
+- Raw installs now refuse to provision a system package reserved by another
+  pending RPM install and direct the user to `anolisa repair`, preventing
+  components from claiming or later removing each other's dependencies.
+- `cosh-ng` RPM installations now retain the `cosh-ng` component identity.
+  Unambiguous legacy records and recovery journals stored as `cosh` are
+  repaired so lifecycle commands target the correct component.
+- Failed raw updates and repairs now restore file permissions and capabilities
+  during rollback, keeping restored binaries executable.
+- Enabling the Tokenless Qoder adapter now resolves shared hook paths in the
+  cached plugin, preventing matching tool calls from failing because of broken
+  hook commands.
+
+## [0.2.12] - 2026-07-27
+
+### Changed
+
+- Commands that act on an installed component now report an absent target as
+  `NOT_INSTALLED` instead of `INVALID_ARGUMENT`, so a caller can tell "there was
+  nothing to act on" from "the invocation was wrong" without parsing the error
+  message. The code reports state absence only, and does not indicate whether
+  the name was valid. Affects `uninstall`, `update`, `repair`, `forget`,
+  `restart`, and `adapter`; the exit code stays 2
+  ([#1915](https://github.com/alibaba/anolisa/pull/1915)).
+
+### Fixed
+
+- Adapter status now ignores empty or incomplete stale source directories and
+  reports missing bundles as degraded; raw uninstalls prune empty directories
+  so another installation scope cannot be shadowed
+  ([#1850](https://github.com/alibaba/anolisa/pull/1850)).
+- Raw install dry-runs now validate component conflicts before execution,
+  keeping preview results aligned with real installs. Repositories without
+  lightweight sidecar metadata warn that conflict validation was skipped
+  ([#1898](https://github.com/alibaba/anolisa/pull/1898)).
+
 ## [0.2.11] - 2026-07-24
 
 ### Added
@@ -662,6 +708,41 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.13] - 2026-07-28
+
+### 新增
+
+- `@anolisa/cli` npm 软件包现支持 macOS arm64，并在安装时选择匹配的原生二进制。
+- Tokenless adapter 现支持 Qwencode，同时保持 Cosh extension 与共享 hook 资源相互独立。
+
+### 修复
+
+- raw 安装现拒绝 provision 被另一个 pending RPM 安装占用的系统软件包，并引导用户运行
+  `anolisa repair`，避免组件相互占用或在后续移除对方的依赖。
+- `cosh-ng` RPM 安装现保留 `cosh-ng` 组件身份。以 `cosh` 保存且可明确识别的旧记录和
+  recovery journal 会被修复，使 lifecycle 命令操作正确的组件。
+- raw 更新和修复失败后的回滚现会恢复文件权限和 capability，确保恢复的二进制仍可执行。
+- 启用 Tokenless Qoder adapter 时，现会解析缓存 plugin 中的共享 hook 路径，避免匹配的 tool call 因 hook 命令路径错误而失败。
+
+## [0.2.12] - 2026-07-27
+
+### 变更
+
+- 对已安装组件执行操作的命令在目标缺失时现报告 `NOT_INSTALLED`，不再报告
+  `INVALID_ARGUMENT`，调用方无需解析错误消息即可区分“没有可操作的目标”和“调用方式错误”。
+  该错误码仅表示状态缺失，不表示组件名称是否有效；影响 `uninstall`、`update`、`repair`、
+  `forget`、`restart` 和 `adapter`，退出码仍为 2
+  ([#1915](https://github.com/alibaba/anolisa/pull/1915))。
+
+### 修复
+
+- adapter 状态检查现忽略空的或不完整的过期源目录，并将缺失 bundle 报告为 degraded；
+  raw 卸载会清理空目录，避免遮蔽其他安装 scope
+  ([#1850](https://github.com/alibaba/anolisa/pull/1850))。
+- raw 安装 dry-run 现会在执行前校验组件冲突，使预览结果与实际安装保持一致。仓库缺少
+  轻量 sidecar 元数据时会提示已跳过冲突校验
+  ([#1898](https://github.com/alibaba/anolisa/pull/1898))。
 
 ## [0.2.11] - 2026-07-24
 

@@ -33,8 +33,8 @@ use super::{
     ProviderCancellationArtifactStore,
 };
 use process::{
-    control_request, execute_registry, process_error, reset_process, send_json, spawn_process,
-    spawn_response_writer, stop_process, user_message, PersistentProcess,
+    control_request, execute_registry, flush_pending_reload, process_error, reset_process,
+    send_json, spawn_process, spawn_response_writer, stop_process, user_message, PersistentProcess,
 };
 
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
@@ -410,6 +410,11 @@ fn run_turn(
         )?;
         process.initialized = true;
     }
+    // Consume a reload noted while the core sat idle before the next user
+    // message goes out; otherwise the coming turn would still run on the
+    // stale snapshot and only reload afterwards. The end-of-turn check stays
+    // for mutations that land while a turn is in flight.
+    flush_pending_reload(process, reload_pending, &command.run_id, &command.event_tx);
     let session_id = process.session_id.clone();
     send_json(
         &process.stdin,
@@ -666,25 +671,7 @@ fn run_turn(
     let terminal_events =
         terminal_events_for_session_commit(&command.run_id, terminal_events, commit_outcome);
 
-    if reload_pending.swap(false, Ordering::SeqCst) {
-        let deferred = RegistryCommand {
-            request_id: format!("deferred-reload-{}", std::process::id()),
-            domain: "extensions".to_string(),
-            action: "reload".to_string(),
-            params: Value::Null,
-            response_tx: mpsc::channel().0,
-        };
-        if let Err(error) = execute_registry(process, &deferred) {
-            send_agent_event(
-                &command.event_tx,
-                AgentEvent::StatusChanged {
-                    run_id: command.run_id.clone(),
-                    phase: "extension_reload_failed".to_string(),
-                    message: error.into_message(),
-                },
-            );
-        }
-    }
+    flush_pending_reload(process, reload_pending, &command.run_id, &command.event_tx);
     for event in terminal_events {
         send_agent_event(&command.event_tx, event);
     }

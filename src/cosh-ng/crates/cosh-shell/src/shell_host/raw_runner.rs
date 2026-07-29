@@ -10,8 +10,8 @@ use nix::libc;
 
 use crate::input::InputClassifier;
 use crate::raw_input::{
-    spawn_raw_action_relay, spawn_raw_input_relay, RawInputEvent, RawInputMode, RawObserverAction,
-    RawRelayAction, UserPtyInputGeneration,
+    spawn_raw_action_relay, spawn_raw_input_relay, MainPromptGate, RawInputEvent, RawInputMode,
+    RawObserverAction, RawRelayAction, UserPtyInputGeneration,
 };
 use crate::types::ShellEvent;
 
@@ -69,7 +69,8 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        |master, _, input_events, input_classifier, input_mode, input_generation| {
+        config.slash_via_shell,
+        |master, _, input_events, input_classifier, input_mode, input_generation, gate, routed| {
             spawn_raw_input_relay(
                 input,
                 master,
@@ -77,6 +78,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -100,7 +103,8 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        |master, _, input_events, input_classifier, input_mode, input_generation| {
+        false,
+        |master, _, input_events, input_classifier, input_mode, input_generation, gate, routed| {
             spawn_raw_input_relay(
                 input,
                 master,
@@ -108,6 +112,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -139,7 +145,15 @@ where
         |_, _| Ok(RawObserverAction::Continue),
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
+        false,
+        |master,
+         child_pid,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         gate,
+         routed| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -148,6 +162,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -174,7 +190,15 @@ where
         },
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
+        config.slash_via_shell,
+        |master,
+         child_pid,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         gate,
+         routed| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -183,6 +207,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -205,7 +231,15 @@ where
         event_observer,
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
+        config.slash_via_shell,
+        |master,
+         child_pid,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         gate,
+         routed| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -214,6 +248,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -226,6 +262,7 @@ fn run_raw_relay_with_driver<W, F, D>(
     mut event_observer: F,
     input_classifier: InputClassifier,
     action_watchdog: Option<Duration>,
+    slash_via_shell: bool,
     spawn_driver: D,
 ) -> io::Result<ShellHostOutput>
 where
@@ -238,6 +275,8 @@ where
         InputClassifier,
         Arc<Mutex<RawInputMode>>,
         UserPtyInputGeneration,
+        MainPromptGate,
+        bool,
     ) -> JoinHandle<io::Result<()>>,
 {
     let mut session = start_session(config)?;
@@ -261,6 +300,16 @@ where
     let (input_event_sender, input_event_receiver) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let input_generation = UserPtyInputGeneration::default();
+    // #1721 D16: prompt_ready raises the gate on the output side; submits
+    // and preexec lower it, keeping CJK drafts off PS2/heredoc continuations.
+    let main_prompt_gate = MainPromptGate::default();
+    session
+        .parser
+        .set_main_prompt_gate(main_prompt_gate.clone());
+    // Slash-via-shell routing (issue #1718) needs a markered native session
+    // so the prompt gate can prove bash is at its prompt; everything else
+    // keeps the Rust intercept path.
+    let slash_route_enabled = slash_via_shell && config.native_mode;
     let driver_thread = spawn_driver(
         input_master,
         session.child.id(),
@@ -268,6 +317,8 @@ where
         input_classifier,
         Arc::clone(&input_mode),
         input_generation.clone(),
+        main_prompt_gate,
+        slash_route_enabled,
     );
     let watchdog = action_watchdog.map(|grace| {
         let driver_done = Arc::new(Mutex::new(None));
@@ -419,6 +470,16 @@ struct RawModeGuard {
 }
 
 impl RawModeGuard {
+    /// #1932 F4: modifyOtherKeys level 1 makes the terminal report
+    /// modifier-carrying editing keys (Shift+Enter -> `CSI 27;2;13~`)
+    /// that already sit on the soft-newline whitelist, with zero terminal
+    /// configuration. Level 1 leaves every conventionally-encoded key
+    /// (Esc, Alt+letter, Ctrl+letter) untouched, and terminals without
+    /// the feature ignore the sequence entirely. The enable is written on
+    /// the relay's ordered stdout path; this guard only owns the
+    /// withdrawal so the tty never keeps the mode after exit.
+    const MODIFY_OTHER_KEYS_DISABLE: &'static [u8] = b"\x1b[>4;0m";
+
     fn activate_stdin() -> io::Result<Option<Self>> {
         Self::activate_fd(0)
     }
@@ -471,7 +532,14 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.active {
             if let Some(original) = &self.original_termios {
+                // Withdraw the keyboard negotiation before handing the tty
+                // back (#1932 F4); paired with the enable in activate_fd.
                 unsafe {
+                    libc::write(
+                        self.fd,
+                        Self::MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
+                        Self::MODIFY_OTHER_KEYS_DISABLE.len(),
+                    );
                     libc::tcsetattr(self.fd, libc::TCSANOW, original);
                 }
             }

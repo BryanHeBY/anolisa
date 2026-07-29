@@ -352,6 +352,13 @@ fn uninstall_component(
         }
     })?;
     ensure_no_adapter_claims(&store, target, &command)?;
+    let legacy_manifest_dir = store
+        .find(ObjectKind::Component, target)
+        .map(|installation| {
+            common::legacy_component_manifest_dir_for_installation(&layout, installation, &command)
+        })
+        .transpose()?
+        .flatten();
     let (native_package, record_is_managed) = match store
         .find(ObjectKind::Component, target)
         .map(|record| &record.binding)
@@ -547,6 +554,11 @@ fn uninstall_component(
     // The manifest snapshot travels with the record. Best-effort: the
     // record drop is already committed.
     if let Err(err) = remove_component_manifest_snapshot(&layout, target, &command) {
+        eprintln!("warning: {err}");
+    }
+    if let Some(dir) = legacy_manifest_dir
+        && let Err(err) = remove_manifest_snapshot_dir(&dir, &command)
+    {
         eprintln!("warning: {err}");
     }
 
@@ -989,7 +1001,7 @@ fn ensure_no_adapter_claims(
 /// way out; this mapping only renders it.
 fn plan_error_to_cli(err: PlanError, target: &str, command: &str, store: &StateStore) -> CliError {
     match err {
-        PlanError::NotInstalled => CliError::InvalidArgument {
+        PlanError::NotInstalled => CliError::NotInstalled {
             command: command.to_string(),
             reason: format!(
                 "component '{target}' is not installed — nothing to uninstall (run `anolisa status` to see what is installed)",
@@ -1144,7 +1156,11 @@ fn remove_component_manifest_snapshot(
     command: &str,
 ) -> Result<(), CliError> {
     let dir = common::installed_component_manifest_dir(layout, component, command)?;
-    match std::fs::remove_dir_all(&dir) {
+    remove_manifest_snapshot_dir(&dir, command)
+}
+
+fn remove_manifest_snapshot_dir(dir: &std::path::Path, command: &str) -> Result<(), CliError> {
+    match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(CliError::Runtime {
@@ -1418,11 +1434,11 @@ mod tests {
         );
     }
 
-    /// Asking to uninstall a component that is not installed must
-    /// surface `INVALID_ARGUMENT` (exit 2), not `EXECUTION_FAILED`,
-    /// so wrapping scripts can rely on the routing.
+    /// Asking to uninstall a component that is not installed must surface
+    /// `NOT_INSTALLED` (exit 2), not `EXECUTION_FAILED` — the machine did
+    /// not fail, there was simply nothing to act on.
     #[test]
-    fn uninstall_unknown_component_routes_to_invalid_argument_exit_2() {
+    fn uninstall_unknown_component_routes_to_not_installed_exit_2() {
         let tmp = tempdir().expect("tmpdir");
         let err = handle(
             args("agentsight", false),
@@ -1434,7 +1450,7 @@ mod tests {
             ),
         )
         .expect_err("must error");
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.code(), "NOT_INSTALLED");
         assert_eq!(err.exit_code(), 2);
         assert!(
             err.reason().contains("not installed"),
@@ -1519,7 +1535,7 @@ mod tests {
             ),
         )
         .expect_err("dry-run must report the same refusal as a real run");
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.code(), "NOT_INSTALLED");
         assert!(err.reason().contains("not installed"), "{}", err.reason());
     }
 
@@ -2127,6 +2143,50 @@ mod tests {
             scope_guard_command(&both, "system-tool"),
             "uninstall --purge --remove-system-package system-tool"
         );
+    }
+
+    #[test]
+    fn uninstall_repaired_cosh_ng_removes_the_legacy_snapshot() {
+        let tmp = tempdir().expect("tmpdir");
+        let c = ctx_with_prefix(
+            false,
+            false,
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+        );
+        seed(
+            &c,
+            vec![rpm_object("cosh", "cosh-ng", Ownership::RpmObserved)],
+            Vec::new(),
+        );
+        let layout = common::resolve_layout(&c);
+        let legacy_snapshot = common::installed_component_manifest_path(&layout, "cosh", COMMAND)
+            .expect("legacy snapshot path");
+        std::fs::create_dir_all(legacy_snapshot.parent().expect("snapshot dir"))
+            .expect("create snapshot dir");
+        std::fs::write(
+            &legacy_snapshot,
+            r#"
+            [component]
+            name = "cosh"
+            version = "0.13.0"
+
+            [backends.rpm]
+            package = "cosh-ng"
+            "#,
+        )
+        .expect("write legacy snapshot");
+
+        let rpm = FakeRpm::present("cosh-ng");
+        run(args("cosh-ng", false), &c, &rpm, true).expect("record-only uninstall succeeds");
+
+        assert!(!legacy_snapshot.exists());
+        assert!(
+            load_state(&c)
+                .find(ObjectKind::Component, "cosh-ng")
+                .is_none()
+        );
+        assert_eq!(rpm.remove_calls.get(), 0);
     }
 
     fn run(

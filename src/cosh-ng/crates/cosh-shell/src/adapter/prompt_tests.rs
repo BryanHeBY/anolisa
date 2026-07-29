@@ -318,7 +318,7 @@ fn bound_insight_in_recommend_mode_names_missing_evidence_without_requesting_too
 }
 
 #[test]
-fn provider_prompt_redacts_all_user_and_runtime_text_boundaries() {
+fn provider_prompt_preserves_user_input_and_redacts_runtime_text() {
     let github_token = "ghp_abcdefghijklmnopqrstuvwxyz123456";
     let request = AgentRequest {
         id: "agent-request-secret".to_string(),
@@ -347,17 +347,13 @@ fn provider_prompt_redacts_all_user_and_runtime_text_boundaries() {
 
     let prompt = prompt_from_request(&request);
 
-    for secret in [
-        "user-secret",
-        github_token,
-        "hint-secret",
-        "hook-secret",
-        "description-secret",
-    ] {
+    for secret in ["user-secret", github_token] {
+        assert!(prompt.contains(secret), "{prompt}");
+    }
+    for secret in ["hint-secret", "hook-secret", "description-secret"] {
         assert!(!prompt.contains(secret), "{prompt}");
     }
-    assert!(prompt.contains("password=<redacted>"), "{prompt}");
-    assert!(prompt.contains("api_key=<redacted>"), "{prompt}");
+    assert!(prompt.contains("<redacted>"), "{prompt}");
 }
 
 #[test]
@@ -973,9 +969,28 @@ fn provider_prompt_contract_includes_language_hint_without_losing_governance() {
         crate::Language::ZhCn,
     );
 
-    assert!(en.contains("Respond in English"), "{en}");
+    assert!(
+        en.contains("If the user explicitly asks for replies in a specific language"),
+        "{en}"
+    );
+    assert!(
+        en.contains("reply in the language of the user's message"),
+        "{en}"
+    );
+    assert!(en.contains("respond in English by default"), "{en}");
     assert!(en.contains("do not emit tool calls"), "{en}");
-    assert!(zh.contains("Respond in Simplified Chinese"), "{zh}");
+    assert!(
+        zh.contains("If the user explicitly asks for replies in a specific language"),
+        "{zh}"
+    );
+    assert!(
+        zh.contains("reply in the language of the user's message"),
+        "{zh}"
+    );
+    assert!(
+        zh.contains("respond in Simplified Chinese by default"),
+        "{zh}"
+    );
     assert!(
         zh.contains("approval system is handled by cosh-shell"),
         "{zh}"
