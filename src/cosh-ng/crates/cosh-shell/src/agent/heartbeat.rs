@@ -38,13 +38,13 @@ pub(crate) fn render_agent_heartbeat<W: Write>(
         let elapsed = now.duration_since(active_run.started_at).as_secs();
         if elapsed >= AGENT_HEARTBEAT_AFTER.as_secs() {
             let detail = if let Some(pending_tools) = pending_tools.as_deref() {
-                pending_tools
+                pending_tools.to_string()
             } else if active_run.current_message.is_empty() {
-                active_run.current_phase.as_str()
+                active_run.current_phase.clone()
             } else {
-                active_run.current_message.as_str()
+                sanitize_spinner_detail(&active_run.current_message)
             };
-            let text = elapsed_thinking_text(&i18n, active_run.language, elapsed, detail);
+            let text = elapsed_thinking_text(&i18n, active_run.language, elapsed, &detail);
             return active_run.status_animation.render(output, &text);
         }
         if let Some(pending_tools) = pending_tools {
@@ -104,6 +104,26 @@ fn elapsed_thinking_text(i18n: &I18n, language: Language, elapsed: u64, detail: 
             MessageId::AgentThinkingElapsed,
             &[("elapsed", &elapsed.to_string()), ("detail", detail)],
         )
+    }
+}
+
+fn sanitize_spinner_detail(text: &str) -> String {
+    let sanitized: String = text
+        .chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            c => c,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    const MAX_DETAIL_LEN: usize = 50;
+    if sanitized.chars().count() > MAX_DETAIL_LEN {
+        let truncated: String = sanitized.chars().take(MAX_DETAIL_LEN).collect();
+        format!("{truncated}…")
+    } else {
+        sanitized
     }
 }
 
@@ -848,6 +868,20 @@ mod tests {
             elapsed_thinking_text(&en, Language::EnUs, 7, "thinking"),
             "Thinking... 7s"
         );
+    }
+
+    #[test]
+    fn sanitize_spinner_detail_strips_newlines_and_truncates() {
+        assert_eq!(sanitize_spinner_detail("hello world"), "hello world");
+        assert_eq!(
+            sanitize_spinner_detail("line one\nline two\r\nline three"),
+            "line one line two line three"
+        );
+        assert_eq!(sanitize_spinner_detail("a\tb"), "a b");
+        let long = "x".repeat(80);
+        let sanitized = sanitize_spinner_detail(&long);
+        assert_eq!(sanitized.chars().count(), 51);
+        assert!(sanitized.ends_with('…'));
     }
 
     #[test]
