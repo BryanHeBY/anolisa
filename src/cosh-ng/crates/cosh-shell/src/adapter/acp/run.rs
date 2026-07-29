@@ -175,9 +175,14 @@ pub(super) fn start_bridge_run(
         approval_sender: Some(approval_tx),
         question_answer_confirmation: None,
         auth_sender: None,
-        control_capabilities: Arc::new(Mutex::new(
-            control_protocol::ControlProtocolCapabilities::default(),
-        )),
+        control_capabilities: Arc::new(Mutex::new(control_protocol::ControlProtocolCapabilities {
+            // A foreground command's result is replayed to the agent as a
+            // terminal lifecycle (`acp/terminal.rs`), so the shell can hand
+            // it back inline and keep the turn alive instead of cancelling
+            // and re-prompting with an analysis-only continuation.
+            can_handle_host_executed_shell_tool_result: true,
+            ..Default::default()
+        })),
         pending_provider_session: None,
         cancellation_artifacts: ProviderCancellationArtifactStore::default(),
     }

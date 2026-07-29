@@ -46,6 +46,13 @@ fn render_raw_inline_events<W: Write>(
         .shell_handoff_mut()
         .emit_next_approved(snapshot.events().len())
     {
+        // The command is about to own the terminal. The agent run survives a
+        // foreground handoff, so its spinner has to be retired here or it
+        // repaints over the command's output; the poll loop restores it once
+        // the handoff clears.
+        if let Some(active_run) = inline_state.agent_run.active.as_mut() {
+            active_run.status_animation.clear(&mut terminal_output)?;
+        }
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
             inline_state.pending_input_ghost = None;

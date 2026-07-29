@@ -23,7 +23,7 @@ use crate::types::{
     COMMAND_OUTPUT_REF_MAX_BYTES,
 };
 
-use super::super::control_protocol::{ApprovalDecision, ApprovalResponse};
+use super::super::control_protocol::{ApprovalDecision, ApprovalResponse, HostExecutedShellResult};
 use super::super::AdapterError;
 use super::terminal::{choose_lane, ApprovalRouter, Lane};
 
@@ -115,12 +115,33 @@ fn execute_run_command(
                     blocks,
                     output_dir,
                 ),
+                // The approval was satisfied by the user's foreground PTY, which
+                // already recorded its own command block; report that result
+                // rather than running the command a second time.
+                Some(ApprovalDecision::HostExecutedShell { result }) => {
+                    foreground_response(command, &result)
+                }
                 Some(ApprovalDecision::Deny { message }) => error_response("denied", &message),
                 Some(_) => error_response("denied", "approval returned an unrelated decision"),
                 None => error_response("denied", "command was not approved in time"),
             }
         }
     }
+}
+
+/// Maps a foreground execution onto the same shape `run_captured` returns, so
+/// the agent sees one response contract regardless of which lane ran it.
+fn foreground_response(command: &str, result: &HostExecutedShellResult) -> Value {
+    let (text, truncated) = truncate_utf8(&result.llm_content, MAX_OUTPUT_BYTES);
+    data_response(json!({
+        "command": command,
+        "exit_code": result.metadata.exit_code,
+        "signal": result.metadata.signal,
+        "output": text,
+        "truncated": truncated,
+        "redaction_status": result.metadata.redaction_status,
+        "executed_in_foreground": true,
+    }))
 }
 
 fn run_captured(
@@ -301,6 +322,7 @@ fn next_correlation_id() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::control_protocol::HostExecutedShellMetadata;
     use super::super::terminal::RunCommandExecutor;
     use super::*;
 
@@ -437,5 +459,37 @@ mod tests {
         assert_eq!(guard.len(), 1);
         assert_eq!(guard[0].status, CommandStatus::Failed);
         assert_ne!(guard[0].exit_code, 0);
+    }
+
+    #[test]
+    fn foreground_result_is_reported_not_denied() {
+        let result = HostExecutedShellResult {
+            llm_content: "kernel-6.6\n".to_string(),
+            return_display: None,
+            metadata: HostExecutedShellMetadata {
+                command: "uname -r && uptime".to_string(),
+                status: "completed".to_string(),
+                exit_code: 0,
+                signal: None,
+                cwd: "/work".to_string(),
+                end_cwd: "/work".to_string(),
+                duration_ms: 12,
+                output_ref: None,
+                redaction_status: "ref_only".to_string(),
+                approval_id: Some("req-1".to_string()),
+                tool_use_id: Some("cosh-terminal-1".to_string()),
+            },
+        };
+
+        let response = foreground_response("uname -r && uptime", &result);
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["data"]["exit_code"], 0);
+        assert_eq!(response["data"]["executed_in_foreground"], true);
+        assert!(
+            response["data"]["output"]
+                .as_str()
+                .is_some_and(|text| text.contains("kernel-6.6")),
+            "{response}"
+        );
     }
 }
