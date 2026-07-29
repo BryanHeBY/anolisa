@@ -56,7 +56,7 @@ pub(crate) struct EvidenceService {
     socket_path: PathBuf,
     token: String,
     blocks: Arc<Mutex<Vec<CommandBlock>>>,
-    executor: Arc<Mutex<Option<RunCommandExecutor>>>,
+    executor: Arc<Mutex<Option<(String, RunCommandExecutor)>>>,
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -135,11 +135,22 @@ impl EvidenceService {
         Arc::clone(&self.blocks)
     }
 
-    /// Installs the executor backing `run_command` for the current turn.
-    /// Passing `None` clears it so requests fail closed after the turn ends.
-    pub(crate) fn set_executor(&self, executor: Option<RunCommandExecutor>) {
+    /// Installs the executor backing `run_command` for `run_id`.
+    pub(crate) fn set_executor(&self, run_id: &str, executor: RunCommandExecutor) {
         if let Ok(mut guard) = self.executor.lock() {
-            *guard = executor;
+            *guard = Some((run_id.to_string(), executor));
+        }
+    }
+
+    /// Clears the executor while `run_id` still owns it, so `run_command` fails
+    /// closed once that turn ends. A cancelled turn tears its bridge down after
+    /// the shell already started the follow-up turn, so an unconditional clear
+    /// would strip the live turn's executor.
+    pub(crate) fn clear_executor(&self, run_id: &str) {
+        if let Ok(mut guard) = self.executor.lock() {
+            if guard.as_ref().is_some_and(|(owner, _)| owner == run_id) {
+                *guard = None;
+            }
         }
     }
 }
@@ -165,7 +176,7 @@ fn accept_loop(
     listener: &UnixListener,
     token: &str,
     blocks: Arc<Mutex<Vec<CommandBlock>>>,
-    executor: Arc<Mutex<Option<RunCommandExecutor>>>,
+    executor: Arc<Mutex<Option<(String, RunCommandExecutor)>>>,
     shutdown: &AtomicBool,
 ) {
     while !shutdown.load(Ordering::Acquire) {
@@ -194,7 +205,7 @@ fn handle_connection(
     stream: UnixStream,
     token: &str,
     blocks: &Mutex<Vec<CommandBlock>>,
-    executor: &Mutex<Option<RunCommandExecutor>>,
+    executor: &Mutex<Option<(String, RunCommandExecutor)>>,
 ) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
@@ -228,7 +239,10 @@ fn handle_connection(
     }
 
     let snapshot = blocks.lock().map(|guard| guard.clone()).unwrap_or_default();
-    let executor_ref = executor.lock().ok().and_then(|guard| guard.clone());
+    let executor_ref = executor
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|(_, executor)| Arc::clone(executor)));
     let response = handle_request_line(&line, token, &snapshot, executor_ref.as_ref());
     respond(&stream, &response);
 }
@@ -490,6 +504,29 @@ mod tests {
             response["error"]["code"], "run_command_unavailable",
             "{response}"
         );
+    }
+
+    #[test]
+    fn stale_turn_teardown_keeps_the_live_executor() {
+        let dir = std::env::temp_dir().join(format!("cosh-evidence-exec-{}", std::process::id()));
+        let service = EvidenceService::start_in_dir(&dir).expect("start service");
+        let held = || {
+            service
+                .executor
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|(_, exec)| Arc::clone(exec)))
+        };
+        service.set_executor("run-2", Arc::new(|_| data_response(json!({ "ran": true }))));
+        // run-1 was cancelled and only tears down after run-2 installed its own.
+        service.clear_executor("run-1");
+        let line = request_line(service.token(), "run_command", json!({}));
+        let answer = handle_request_line(&line, service.token(), &[], held().as_ref());
+        assert_eq!(answer["data"]["ran"], true, "{answer}");
+        service.clear_executor("run-2");
+        assert!(held().is_none(), "owning turn must retract its executor");
+        drop(service);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

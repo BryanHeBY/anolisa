@@ -128,15 +128,18 @@ pub(super) fn start_bridge_run(
                         .parent()
                         .unwrap_or_else(|| Path::new("."))
                         .join("output-refs");
-                    service.set_executor(Some(mcp_run_command_executor(
+                    service.set_executor(
                         &run_id,
-                        &request.session_id,
-                        blocks_handle,
-                        output_dir,
-                        sender.clone(),
-                        Arc::clone(&router),
-                        Arc::clone(&cancelled),
-                    )));
+                        mcp_run_command_executor(
+                            &run_id,
+                            &request.session_id,
+                            blocks_handle,
+                            output_dir,
+                            sender.clone(),
+                            Arc::clone(&router),
+                            Arc::clone(&cancelled),
+                        ),
+                    );
                 }
                 mcp
             }
@@ -154,10 +157,12 @@ pub(super) fn start_bridge_run(
             &writer_slot,
             &cancelled,
         );
-        // Clear the per-turn executor but keep the service alive for reuse.
+        // Retract only this turn's executor: a cancelled turn tears down after
+        // the shell already started the follow-up turn, and clearing that
+        // successor's executor would fail its `cosh_terminal` calls closed.
         if let Ok(slot) = adapter.evidence.lock() {
             if let Some(service) = slot.as_ref() {
-                service.set_executor(None);
+                service.clear_executor(&run_id);
             }
         }
         if let Ok(mut slot) = writer_slot.lock() {
