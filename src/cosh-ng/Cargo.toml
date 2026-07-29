@@ -19,7 +19,11 @@ repository = "https://github.com/alibaba/anolisa"
 [workspace.dependencies]
 agent-client-protocol = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order is declared, not inherited: agent-client-protocol enables it and
+# Cargo unifies features workspace-wide, so every `Value` here is already
+# insertion-ordered. Naming it keeps that wire-visible ordering ours instead of a
+# dependency's silent side effect.
+serde_json = { version = "1", features = ["preserve_order"] }
 chrono = { version = "0.4", default-features = false }
 glob = "0.3"
 bincode = "1"
