@@ -16,6 +16,10 @@ pub struct DiscoverCommand {
     /// List all known agents and show currently matched PIDs
     #[structopt(long)]
     pub list_known: bool,
+
+    /// Output as JSON
+    #[structopt(long)]
+    pub json: bool,
 }
 
 impl DiscoverCommand {
@@ -38,28 +42,41 @@ impl DiscoverCommand {
         let mut scanner = AgentScanner::from_rules(&rules, &[]);
         let running_agents = scanner.scan();
 
+        if self.json {
+            let items: Vec<serde_json::Value> = matchers
+                .iter()
+                .map(|matcher| {
+                    let agent = matcher.info();
+                    serde_json::json!({
+                        "name": agent.name,
+                        "category": agent.category,
+                        "description": agent.description,
+                        "patterns": matcher.patterns(),
+                        "running_pids": matched_pids(matcher, &running_agents),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
+            );
+            return;
+        }
+
         println!("已知 AI Agent（共 {} 条规则）:", matchers.len());
         println!("{}", "=".repeat(60));
         println!();
 
         for matcher in &matchers {
             let agent = matcher.info();
-            let matched_pids: Vec<String> = running_agents
+            let matched: Vec<String> = matched_pids(matcher, &running_agents)
                 .iter()
-                .filter(|running_agent| {
-                    let ctx = ProcessContext {
-                        comm: String::new(),
-                        cmdline_args: running_agent.cmdline_args.clone(),
-                        exe_path: running_agent.exe_path.clone(),
-                    };
-                    matcher.matches(&ctx)
-                })
-                .map(|running_agent| running_agent.pid.to_string())
+                .map(u32::to_string)
                 .collect();
-            let running_pids = if matched_pids.is_empty() {
+            let running_pids = if matched.is_empty() {
                 "无".to_string()
             } else {
-                matched_pids.join(", ")
+                matched.join(", ")
             };
 
             println!("  {} ({})", agent.name, agent.category);
@@ -74,6 +91,27 @@ impl DiscoverCommand {
     fn scan_agents(&self) {
         let mut scanner = AgentScanner::from_rules(&agentsight::default_cmdline_rules(), &[]);
         let agents = scanner.scan();
+
+        if self.json {
+            let items: Vec<serde_json::Value> = agents
+                .iter()
+                .map(|agent| {
+                    serde_json::json!({
+                        "pid": agent.pid,
+                        "name": agent.agent_info.name,
+                        "category": agent.agent_info.category,
+                        "description": agent.agent_info.description,
+                        "cmdline": agent.cmdline_args,
+                        "exe_path": agent.exe_path,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
+            );
+            return;
+        }
 
         if agents.is_empty() {
             println!("未发现正在运行的 AI Agent。");
@@ -108,4 +146,23 @@ impl DiscoverCommand {
 
         println!("总计: {} 个 Agent", agents.len());
     }
+}
+
+/// Return PIDs of running agents whose process context matches `matcher`.
+fn matched_pids(
+    matcher: &CmdlineGlobMatcher,
+    running_agents: &[agentsight::DiscoveredAgent],
+) -> Vec<u32> {
+    running_agents
+        .iter()
+        .filter(|agent| {
+            let ctx = ProcessContext {
+                comm: String::new(),
+                cmdline_args: agent.cmdline_args.clone(),
+                exe_path: agent.exe_path.clone(),
+            };
+            matcher.matches(&ctx)
+        })
+        .map(|agent| agent.pid)
+        .collect()
 }
