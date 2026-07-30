@@ -208,6 +208,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::latest_grader)
                 .service(handlers::list_agent_names)
                 .service(handlers::get_timeseries)
+                // Batch per-PID token summaries for local integrations (herdr)
+                .service(handlers::get_panes_summary)
                 .service(handlers::export_atif_trace)
                 .service(handlers::export_atif_session)
                 .service(handlers::export_atif_conversation)

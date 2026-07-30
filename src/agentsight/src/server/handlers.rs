@@ -495,6 +495,122 @@ pub async fn get_timeseries(
     }
 }
 
+// ─── Panes summary endpoint (herdr integration) ─────────────────────────────
+
+/// Query parameters for /api/panes/summary
+#[derive(Debug, Deserialize)]
+pub struct PanesSummaryQuery {
+    /// Comma-separated root PIDs, e.g. `pids=1234,5678`
+    pub pids: String,
+    /// Roll up token usage of descendant processes into each root PID
+    pub descendants: Option<bool>,
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+}
+
+/// Per-PID token usage summary for the herdr agents panel.
+///
+/// `model` / `provider` / `agent` come from the most recent record in range.
+#[derive(Debug, Serialize)]
+pub struct PaneSummary {
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub agent: Option<String>,
+    pub last_call_ns: Option<u64>,
+}
+
+/// GET /api/panes/summary?pids=1234,5678&descendants=true
+///
+/// Batch per-PID token summaries keyed by the requested PIDs. Localhost-only;
+/// intended for local integrations (herdr pane metadata bridge). Defaults to
+/// the last 24 hours when no time range is given. PIDs with no records in
+/// range are returned with zeroed counters.
+#[get("/panes/summary")]
+pub async fn get_panes_summary(
+    data: web::Data<AppState>,
+    query: web::Query<PanesSummaryQuery>,
+) -> impl Responder {
+    let mut roots: Vec<u32> = Vec::new();
+    for part in query.pids.split(',').filter(|s| !s.trim().is_empty()) {
+        match part.trim().parse::<u32>() {
+            Ok(pid) => roots.push(pid),
+            Err(_) => {
+                return HttpResponse::BadRequest().json(json!({
+                    "error": "invalid_pids",
+                    "message": format!("'{}' is not a valid PID", part.trim()),
+                }));
+            }
+        }
+    }
+    if roots.is_empty() {
+        return HttpResponse::BadRequest().json(json!({
+            "error": "invalid_pids",
+            "message": "query parameter 'pids' must contain at least one PID",
+        }));
+    }
+
+    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64).max(0) as u64;
+    let start_ns = query
+        .start_ns
+        .unwrap_or_else(|| end_ns as i64 - 86_400_000_000_000i64)
+        .max(0) as u64;
+    let descendants = query.descendants.unwrap_or(false);
+
+    // token_records live in agentsight.db, not in the GenAI events DB that
+    // `storage_path` points at; resolve the sibling file next to it.
+    let token_db = match data.storage_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join("agentsight.db"),
+        _ => crate::storage::sqlite::sibling_db_path("agentsight.db"),
+    };
+    if !token_db.exists() {
+        return HttpResponse::NotFound().json(json!({
+            "error": "token_database_not_found",
+            "message": format!(
+                "token database not found at {token_db:?}; run `agentsight trace` to start collecting"
+            ),
+        }));
+    }
+    let store = match crate::storage::sqlite::TokenStore::try_new_readonly(&token_db) {
+        Ok(store) => store,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+        }
+    };
+
+    let mut summaries = std::collections::BTreeMap::new();
+    for &root in &roots {
+        let pids = if descendants {
+            crate::utils::proc_tree::expand_with_descendants(&[root])
+        } else {
+            vec![root]
+        };
+        // Newest first, so the first record carries the latest model/agent.
+        let records = store.by_pids(&pids, start_ns, end_ns);
+
+        let latest = records.first();
+        let summary = PaneSummary {
+            tokens_in: records
+                .iter()
+                .map(|r| {
+                    r.input_tokens
+                        + r.cache_creation_tokens.unwrap_or(0)
+                        + r.cache_read_tokens.unwrap_or(0)
+                })
+                .sum(),
+            tokens_out: records.iter().map(|r| r.output_tokens).sum(),
+            model: latest.and_then(|r| r.model.clone()),
+            provider: latest.map(|r| r.provider.clone()),
+            agent: latest.and_then(|r| r.agent.clone()),
+            last_call_ns: latest.map(|r| r.timestamp_ns),
+        };
+        summaries.insert(root.to_string(), summary);
+    }
+
+    HttpResponse::Ok().json(summaries)
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Current UNIX time in nanoseconds
@@ -849,6 +965,7 @@ mod tests {
     use actix_web::test as awtest;
 
     use crate::agent_sec::DaemonErrorPayload;
+    use crate::analyzer::TokenRecord;
     use crate::genai::GenAIExporter;
     use crate::genai::semantic::{
         GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage,
@@ -1649,6 +1766,132 @@ mod tests {
             serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
                 .unwrap();
         assert_eq!(body["authenticated"], true);
+    }
+
+    fn pane_token_record(pid: u32, timestamp_ns: u64, input: u64, output: u64) -> TokenRecord {
+        TokenRecord {
+            id: 0,
+            timestamp_ns,
+            pid,
+            comm: "node".to_string(),
+            agent: Some("Claude Code".to_string()),
+            model: Some("claude-sonnet".to_string()),
+            provider: "anthropic".to_string(),
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_tokens: None,
+            cache_read_tokens: Some(5),
+            request_id: None,
+            endpoint: None,
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+        }
+    }
+
+    /// Unique temp dir mimicking the storage layout: `genai_events.db` (the
+    /// serve storage_path) next to `agentsight.db` (token records).
+    fn pane_test_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_panes_{label}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[actix_web::test]
+    async fn panes_summary_aggregates_tokens_per_requested_pid() {
+        let dir = pane_test_dir("agg");
+        let now = super::now_ns();
+        {
+            let store = crate::storage::sqlite::TokenStore::new(dir.join("agentsight.db"));
+            store
+                .insert(&pane_token_record(100, now - 2_000, 100, 50))
+                .unwrap();
+            store
+                .insert(&pane_token_record(100, now - 1_000, 30, 20))
+                .unwrap();
+            // Not requested — must not leak into the response.
+            store
+                .insert(&pane_token_record(200, now - 1_000, 999, 999))
+                .unwrap();
+        }
+
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(dir.join("genai_events.db")))
+                .service(get_panes_summary),
+        )
+        .await;
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/panes/summary?pids=100,999")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = service_response_json(resp).await;
+
+        // 100: two records, inputs include cache_read (5 each)
+        assert_eq!(body["100"]["tokens_in"], 140);
+        assert_eq!(body["100"]["tokens_out"], 70);
+        assert_eq!(body["100"]["model"], "claude-sonnet");
+        assert_eq!(body["100"]["provider"], "anthropic");
+        assert_eq!(body["100"]["agent"], "Claude Code");
+        assert_eq!(body["100"]["last_call_ns"], now - 1_000);
+
+        // 999: no records → zeroed entry
+        assert_eq!(body["999"]["tokens_in"], 0);
+        assert_eq!(body["999"]["tokens_out"], 0);
+        assert!(body["999"]["model"].is_null());
+        assert!(body["999"]["last_call_ns"].is_null());
+
+        // 200 was not requested
+        assert!(body.get("200").is_none());
+    }
+
+    #[actix_web::test]
+    async fn panes_summary_returns_404_when_token_db_missing() {
+        let dir = pane_test_dir("missing");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(dir.join("genai_events.db")))
+                .service(get_panes_summary),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/panes/summary?pids=100")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // The read-only path must not create agentsight.db as a side effect.
+        assert!(!dir.join("agentsight.db").exists());
+    }
+
+    #[actix_web::test]
+    async fn panes_summary_rejects_invalid_pids() {
+        let dir = pane_test_dir("bad");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(dir.join("genai_events.db")))
+                .service(get_panes_summary),
+        )
+        .await;
+
+        for uri in ["/panes/summary?pids=abc", "/panes/summary?pids="] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
     }
 
     fn test_app_state_with_storage(storage_path: PathBuf) -> web::Data<AppState> {

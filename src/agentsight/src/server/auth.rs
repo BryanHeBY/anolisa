@@ -284,7 +284,7 @@ const EXEMPT_PREFIXES: &[&str] = &[
 
 /// Paths that are only accessible from localhost (loopback interface).
 /// Non-loopback requests to these paths receive 403 Forbidden.
-const LOCALHOST_ONLY_PREFIXES: &[&str] = &["/health", "/metrics"];
+const LOCALHOST_ONLY_PREFIXES: &[&str] = &["/health", "/metrics", "/api/panes/summary"];
 
 fn is_exempt(path: &str) -> bool {
     EXEMPT_PREFIXES
