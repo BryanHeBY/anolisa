@@ -14,6 +14,10 @@ pub struct AuditCommand {
     #[structopt(long)]
     pub pid: Option<u32>,
 
+    /// Include descendant processes (walk ppid tree)
+    #[structopt(long, requires = "pid")]
+    pub descendants: bool,
+
     /// Filter by event type: "llm" or "process"
     #[structopt(long = "type")]
     pub event_type: Option<String>,
@@ -83,10 +87,28 @@ impl AuditCommand {
     }
 
     fn query_by_pid(&self, store: &AuditStore, pid: u32, event_type: Option<AuditEventType>) {
-        match store.query_by_pid(pid, event_type) {
-            Ok(records) => self.output_records(&records, &format!("PID {pid}")),
-            Err(e) => eprintln!("Query failed: {e}"),
+        if !self.descendants {
+            match store.query_by_pid(pid, event_type) {
+                Ok(records) => self.output_records(&records, &format!("PID {pid}")),
+                Err(e) => eprintln!("Query failed: {e}"),
+            }
+            return;
         }
+
+        let pids = agentsight::utils::proc_tree::expand_with_descendants(&[pid]);
+        let mut records = Vec::new();
+        for &p in &pids {
+            match store.query_by_pid(p, event_type) {
+                Ok(mut r) => records.append(&mut r),
+                Err(e) => {
+                    eprintln!("Query failed for PID {p}: {e}");
+                    return;
+                }
+            }
+        }
+        records.sort_by_key(|r| r.timestamp_ns);
+        let scope = format!("PID {pid} (+{} descendants)", pids.len().saturating_sub(1));
+        self.output_records(&records, &scope);
     }
 
     fn is_excluded(&self, record: &agentsight::AuditRecord) -> bool {
@@ -230,6 +252,7 @@ mod tests {
         AuditCommand {
             last: None,
             pid: None,
+            descendants: false,
             event_type: None,
             json,
             summary: false,

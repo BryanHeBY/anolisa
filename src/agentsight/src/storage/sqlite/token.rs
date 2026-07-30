@@ -226,15 +226,68 @@ pub struct TokenStore {
 
 impl TokenStore {
     /// Create a new token store with default table name
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database cannot be opened; use [`TokenStore::try_new`]
+    /// where failure must be handled gracefully.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self::with_table(path, "token_records")
     }
 
-    /// Create a new token store with custom table name
-    pub fn with_table(path: impl Into<PathBuf>, table_name: &str) -> Self {
+    /// Create a new token store with default table name, without panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be opened or the table/index
+    /// creation fails.
+    pub fn try_new(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
+        Self::try_with_table(path, "token_records")
+    }
+
+    /// Open an existing token database read-only, without creating tables.
+    ///
+    /// Intended for read paths (e.g. HTTP handlers): a missing or wrong
+    /// database file fails loudly instead of silently materializing an empty
+    /// `token_records` table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file does not exist or cannot be opened.
+    pub fn try_new_readonly(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let path = path.into();
-        let conn =
-            create_connection(&path).expect("Failed to open SQLite database for token store");
+        let conn = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to open token store read-only at {path:?}: {e}"))?;
+        Ok(TokenStore {
+            conn,
+            table_name: "token_records".to_string(),
+        })
+    }
+
+    /// Create a new token store with custom table name
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database cannot be opened; use
+    /// [`TokenStore::try_with_table`] where failure must be handled gracefully.
+    pub fn with_table(path: impl Into<PathBuf>, table_name: &str) -> Self {
+        Self::try_with_table(path, table_name)
+            .expect("Failed to open SQLite database for token store")
+    }
+
+    /// Create a new token store with custom table name, without panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be opened or the table/index
+    /// creation fails.
+    pub fn try_with_table(path: impl Into<PathBuf>, table_name: &str) -> anyhow::Result<Self> {
+        let path = path.into();
+        let conn = create_connection(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to open token store at {path:?}: {e}"))?;
         let table_name = table_name.to_string();
 
         // Create table if not exists
@@ -255,8 +308,7 @@ impl TokenStore {
                 endpoint TEXT
             )"
         );
-        conn.execute(&create_table_sql, [])
-            .expect("Failed to create token table");
+        conn.execute(&create_table_sql, [])?;
 
         // Create index on timestamp for efficient range queries
         conn.execute(
@@ -264,17 +316,15 @@ impl TokenStore {
                 "CREATE INDEX IF NOT EXISTS idx_{table_name}_timestamp ON {table_name}(timestamp_ns)"
             ),
             [],
-        )
-        .expect("Failed to create timestamp index");
+        )?;
 
         // Create index on agent for breakdown queries
         conn.execute(
             &format!("CREATE INDEX IF NOT EXISTS idx_{table_name}_agent ON {table_name}(agent)"),
             [],
-        )
-        .expect("Failed to create agent index");
+        )?;
 
-        TokenStore { conn, table_name }
+        Ok(TokenStore { conn, table_name })
     }
 
     /// Get default storage path
@@ -353,6 +403,27 @@ impl TokenStore {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Map a SELECT row (13 columns in schema order) to a `TokenRecord`.
+    fn map_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TokenRecord> {
+        Ok(TokenRecord {
+            id: row.get(0)?,
+            timestamp_ns: row.get::<_, i64>(1)? as u64,
+            pid: row.get::<_, i64>(2)? as u32,
+            comm: row.get(3)?,
+            agent: row.get(4)?,
+            model: row.get(5)?,
+            provider: row.get(6)?,
+            input_tokens: row.get::<_, i64>(7)? as u64,
+            output_tokens: row.get::<_, i64>(8)? as u64,
+            cache_creation_tokens: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+            cache_read_tokens: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+            request_id: row.get(11)?,
+            endpoint: row.get(12)?,
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+        })
+    }
+
     /// Get all records (for compatibility, but not recommended for large datasets)
     pub fn all(&self) -> Vec<TokenRecord> {
         let sql = format!(
@@ -367,28 +438,10 @@ impl TokenStore {
             .prepare(&sql)
             .expect("Failed to prepare statement");
 
-        stmt.query_map([], |row| {
-            Ok(TokenRecord {
-                id: row.get(0)?,
-                timestamp_ns: row.get::<_, i64>(1)? as u64,
-                pid: row.get::<_, i64>(2)? as u32,
-                comm: row.get(3)?,
-                agent: row.get(4)?,
-                model: row.get(5)?,
-                provider: row.get(6)?,
-                input_tokens: row.get::<_, i64>(7)? as u64,
-                output_tokens: row.get::<_, i64>(8)? as u64,
-                cache_creation_tokens: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
-                cache_read_tokens: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
-                request_id: row.get(11)?,
-                endpoint: row.get(12)?,
-                tool_calls: Vec::new(),
-                reasoning_content: None,
-            })
-        })
-        .expect("Failed to query")
-        .filter_map(|r| r.ok())
-        .collect()
+        stmt.query_map([], Self::map_record_row)
+            .expect("Failed to query")
+            .filter_map(|r| r.ok())
+            .collect()
     }
 
     /// Get records in time range
@@ -412,28 +465,57 @@ impl TokenStore {
             .prepare(&sql)
             .expect("Failed to prepare statement");
 
-        stmt.query_map(params![start_ns as i64, end_ns as i64], |row| {
-            Ok(TokenRecord {
-                id: row.get(0)?,
-                timestamp_ns: row.get::<_, i64>(1)? as u64,
-                pid: row.get::<_, i64>(2)? as u32,
-                comm: row.get(3)?,
-                agent: row.get(4)?,
-                model: row.get(5)?,
-                provider: row.get(6)?,
-                input_tokens: row.get::<_, i64>(7)? as u64,
-                output_tokens: row.get::<_, i64>(8)? as u64,
-                cache_creation_tokens: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
-                cache_read_tokens: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
-                request_id: row.get(11)?,
-                endpoint: row.get(12)?,
-                tool_calls: Vec::new(),
-                reasoning_content: None,
-            })
-        })
+        stmt.query_map(
+            params![start_ns as i64, end_ns as i64],
+            Self::map_record_row,
+        )
         .expect("Failed to query")
         .filter_map(|r| r.ok())
         .collect()
+    }
+
+    /// Get records for the given PIDs within a time range, newest first.
+    ///
+    /// Returns an empty list when `pids` is empty or the query fails
+    /// (the failure is logged).
+    pub fn by_pids(&self, pids: &[u32], start_ns: u64, end_ns: u64) -> Vec<TokenRecord> {
+        if pids.is_empty() {
+            return Vec::new();
+        }
+
+        // ?1/?2 are the time bounds; PIDs bind to ?3..?N via an IN clause.
+        let placeholders: Vec<String> = (3..3 + pids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT id, timestamp_ns, pid, comm, agent, model, provider,
+                    input_tokens, output_tokens, cache_creation_tokens,
+                    cache_read_tokens, request_id, endpoint
+             FROM {}
+             WHERE timestamp_ns >= ?1 AND timestamp_ns <= ?2 AND pid IN ({})
+             ORDER BY timestamp_ns DESC",
+            self.table_name,
+            placeholders.join(", ")
+        );
+
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                log::warn!("Failed to prepare by_pids query: {e}");
+                return Vec::new();
+            }
+        };
+
+        let mut bound: Vec<i64> = Vec::with_capacity(2 + pids.len());
+        bound.push(start_ns as i64);
+        bound.push(end_ns as i64);
+        bound.extend(pids.iter().map(|&pid| pid as i64));
+
+        match stmt.query_map(rusqlite::params_from_iter(bound), Self::map_record_row) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                log::warn!("Failed to execute by_pids query: {e}");
+                Vec::new()
+            }
+        }
     }
 
     /// Get records for last N hours
@@ -507,6 +589,20 @@ impl<'a> TokenQuery<'a> {
     pub fn by_hours(&self, hours: u64) -> TokenQueryResult {
         let records = self.store.by_last_hours(hours);
         self.build_result(records, format!("最近 {hours} 小时"))
+    }
+
+    /// Summarize usage for the given PIDs within a time range.
+    ///
+    /// `scope` is the human-readable label carried into the result's `period`.
+    pub fn by_pids(
+        &self,
+        pids: &[u32],
+        start_ns: u64,
+        end_ns: u64,
+        scope: String,
+    ) -> TokenQueryResult {
+        let records = self.store.by_pids(pids, start_ns, end_ns);
+        self.build_result(records, scope)
     }
 
     /// Query with comparison
@@ -891,6 +987,33 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].agent.as_deref(), Some("new"));
         assert_eq!(rows[1].agent.as_deref(), Some("mid"));
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_by_pids_filters_by_pid_and_time() {
+        let path = unique_db_path("by_pids");
+        let store = TokenStore::new(&path);
+        let mut rec_a = make_record(1_000, Some("a"), 10, 5);
+        rec_a.pid = 100;
+        let mut rec_b = make_record(2_000, Some("b"), 20, 10);
+        rec_b.pid = 200;
+        let mut rec_c = make_record(3_000, Some("c"), 30, 15);
+        rec_c.pid = 300;
+        let mut rec_old = make_record(10, Some("old"), 1, 1);
+        rec_old.pid = 100;
+        for rec in [&rec_a, &rec_b, &rec_c, &rec_old] {
+            store.insert(rec).unwrap();
+        }
+
+        let rows = store.by_pids(&[100, 300], 500, 5_000);
+        assert_eq!(rows.len(), 2);
+        // Newest first
+        assert_eq!(rows[0].pid, 300);
+        assert_eq!(rows[1].pid, 100);
+
+        assert!(store.by_pids(&[], 0, 5_000).is_empty());
+        assert!(store.by_pids(&[999], 0, 5_000).is_empty());
         cleanup_db(&path);
     }
 

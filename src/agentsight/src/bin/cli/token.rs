@@ -24,6 +24,14 @@ pub struct TokenCommand {
     #[structopt(long)]
     pub json: bool,
 
+    /// Filter by process ID
+    #[structopt(long)]
+    pub pid: Option<u32>,
+
+    /// Include descendant processes (walk ppid tree)
+    #[structopt(long, requires = "pid")]
+    pub descendants: bool,
+
     /// Custom data file path
     #[structopt(long)]
     pub data_file: Option<String>,
@@ -40,7 +48,54 @@ impl TokenCommand {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| SqliteConfig::default().db_path());
 
-        self.execute_summary(&data_path);
+        if let Some(pid) = self.pid {
+            self.execute_pid_summary(&data_path, pid);
+        } else {
+            self.execute_summary(&data_path);
+        }
+    }
+
+    fn execute_pid_summary(&self, data_path: &std::path::Path, pid: u32) {
+        if self.compare {
+            eprintln!("Note: --compare is not supported with --pid and is ignored.");
+        }
+
+        let (start_ns, end_ns, label) = if let Some(hours) = self.hours {
+            (
+                super::hours_ago_ns(hours),
+                super::hours_ago_ns(0),
+                format!("最近 {hours} 小时"),
+            )
+        } else {
+            let period = self
+                .period
+                .as_deref()
+                .map(super::parse_period)
+                .unwrap_or(TimePeriod::Today);
+            let (start_ns, end_ns) = period.time_range();
+            (start_ns, end_ns, period.to_string())
+        };
+
+        let pids = if self.descendants {
+            agentsight::utils::proc_tree::expand_with_descendants(&[pid])
+        } else {
+            vec![pid]
+        };
+        let scope = if self.descendants {
+            format!("{label}（PID {pid} 及后代进程）")
+        } else {
+            format!("{label}（PID {pid}）")
+        };
+
+        let store = TokenStore::new(data_path);
+        let query = agentsight::TokenQuery::new(&store);
+        let result = query.by_pids(&pids, start_ns, end_ns, scope);
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        } else {
+            print_human_readable(&result, false);
+        }
     }
 
     fn execute_summary(&self, data_path: &std::path::Path) {
