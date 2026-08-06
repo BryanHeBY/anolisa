@@ -15,6 +15,9 @@ pub struct CoshConfig {
     pub debug: bool,
     pub log_level: String,
     pub ai_enabled: bool,
+    /// #2161: seconds an agent handoff may sit in a kernel-evidenced
+    /// input-wait before the foreground group is interrupted; 0 disables.
+    pub input_wait_timeout_secs: u64,
     pub health: HealthConfig,
     pub acp: AcpConfig,
     pub recommendations: RecommendationsConfig,
@@ -123,6 +126,7 @@ impl Default for CoshConfig {
             debug: false,
             log_level: "warn".into(),
             ai_enabled: true,
+            input_wait_timeout_secs: 120,
             health: HealthConfig::default(),
             acp: AcpConfig::default(),
             recommendations: RecommendationsConfig::default(),

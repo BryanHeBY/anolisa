@@ -413,6 +413,8 @@ fn drive_bridge(
                 AgentEvent::AgentFailed {
                     run_id,
                     error: "bridge stream ended without a terminal event".to_string(),
+                    error_code: None,
+                    max_turns: None,
                 },
             );
         }

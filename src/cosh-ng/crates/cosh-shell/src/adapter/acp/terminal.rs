@@ -26,7 +26,7 @@ use crate::tools::{
 };
 use crate::types::AgentEvent;
 
-use super::super::control_protocol::{ApprovalDecision, ApprovalResponse};
+use super::super::control_protocol::{ApprovalChannelMessage, ApprovalDecision, ApprovalResponse};
 use super::super::AdapterError;
 
 /// How long an approval card may stay unanswered before the terminal is
@@ -68,12 +68,12 @@ impl TerminalCreate {
 /// by `request_id`. Late answers to a previous card are returned to a mailbox
 /// keyed by id so the rightful waiter can still collect them.
 pub(super) struct ApprovalRouter {
-    receiver: Mutex<mpsc::Receiver<ApprovalResponse>>,
+    receiver: Mutex<mpsc::Receiver<ApprovalChannelMessage>>,
     mailbox: Mutex<HashMap<String, ApprovalResponse>>,
 }
 
 impl ApprovalRouter {
-    pub(super) fn new(receiver: mpsc::Receiver<ApprovalResponse>) -> Self {
+    pub(super) fn new(receiver: mpsc::Receiver<ApprovalChannelMessage>) -> Self {
         Self {
             receiver: Mutex::new(receiver),
             mailbox: Mutex::new(HashMap::new()),
@@ -104,10 +104,16 @@ impl ApprovalRouter {
             }
             if let Ok(receiver) = self.receiver.lock() {
                 match receiver.recv_timeout(APPROVAL_POLL) {
-                    Ok(response) if response.request_id == request_id => {
+                    // A receipt only proves the request reached the main
+                    // thread; treating it as an answer would run the command
+                    // unapproved.
+                    Ok(ApprovalChannelMessage::Receipt { .. }) => {}
+                    Ok(ApprovalChannelMessage::Response(response))
+                        if response.request_id == request_id =>
+                    {
                         return Some(response.decision);
                     }
-                    Ok(response) => {
+                    Ok(ApprovalChannelMessage::Response(response)) => {
                         if let Ok(mut mailbox) = self.mailbox.lock() {
                             mailbox.insert(response.request_id.clone(), response);
                         }

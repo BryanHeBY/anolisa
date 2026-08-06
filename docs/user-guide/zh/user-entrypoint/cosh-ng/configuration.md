@@ -31,12 +31,18 @@ type = "dashscope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = ""              # 或通过 DASHSCOPE_API_KEY
 model = "qwen-plus"
+# 显式缓存开关（仅 DashScope 生效）。
+# true  = 显式缓存：主动为 system 和最后一条消息注入 cache_control
+#         标记，5 分钟内确定性命中，创建部分按 125% 计费，命中部分按 10% 计费。
+# false = 隐式缓存（默认）：自动识别公共前缀，命中率不确定，命中部分按 20% 计费，无法关闭。
+# 参考：https://help.aliyun.com/zh/model-studio/context-cache
+explicit_cache = false
 
 [agent]
 # 审批模式：trust | auto | balanced | suggest | strict
 approval_mode = "balanced"
-# 最大对话轮次
-max_turns = 20
+# 单次 Agent 请求内的最大模型轮次
+max_turns = 50
 
 [hooks]
 enabled = true
@@ -89,11 +95,33 @@ level = "warn"
 是 `--workspace` 或会话管理请求传入的路径。相对 `session.persist_dir` 从该
 工作空间解析，而不是从 Core 进程的启动目录解析。
 
+## Agent 轮次预算
+
+`agent.max_turns` 限制**单次** Agent 请求内消耗的模型轮次，不是整个会话的
+总配额：你每发送一条新消息，都会获得新的轮次预算。
+
+| 配置项 | 默认值 | 作用 |
+|--------|--------|------|
+| `agent.max_turns` | `50` | 单次 Agent 请求允许的模型轮次 |
+
+请求达到上限时，Core 会停止当前 run 并报告
+`Agent exceeded max turns (<实际配置的上限>)`，不会静默继续运行。在会话持久化
+已启用且成功的情况下，transcript 会在报告该上限之前写入，因此会话保持 active
+且可恢复。交互式 shell 随后会提供“继续”或“停止”：选择“继续”会在同一个
+provider 对话中启动新的 Agent 请求，并获得同等的配置预算；如果再次达到上限，
+仍需再次批准。选择“停止”后，会话仍可由后续手动消息继续。如果 `auto_persist`
+关闭，或会话持久化本身失败，则该 run 不可恢复。
+
+可以通过 `[agent]` 下的 `max_turns` 或 `COSH_MAX_TURNS` 环境变量覆盖该预算。
+无法解析的 `COSH_MAX_TURNS` 值会被忽略，保留配置文件已解析出的结果。
+
 ## 会话压缩
 
-压缩会保留完整的持久化 transcript，只用摘要 projection 替换模型可见前缀。
-自动和 emergency 路径会按 `preserve_recent_runs` 保留最近 run；显式执行
-`/session compact` 时可以摘要最新的完整 run。
+会话跑久以后，早先的回复和工具输出会逐渐占满模型窗口。压缩不会删除持久化的完整
+transcript，它只把模型可见的较早前缀换成摘要。常规自动压缩会原样保留
+`preserve_recent_runs` 指定的最近 run。遇到 emergency 压力时，Core 先按这个配置
+尝试。当前安全边界腾出的空间仍然不够，它才会改为保留一个已完成 run，最后允许
+摘要最新的已完成 run。进行中的 run 始终原样保留。
 
 | 配置项 | 默认值 | 作用 |
 |--------|--------|------|
@@ -103,12 +131,31 @@ level = "warn"
 | `session.compaction.trigger_ratio` | `0.70` | 触发自动压缩的可用历史比例 |
 | `session.compaction.emergency_ratio` | `0.90` | 启用 run 内 emergency 保护的比例 |
 | `session.compaction.target_ratio` | `0.30` | 压缩后保留历史的尽力目标 |
-| `session.compaction.preserve_recent_runs` | `2` | 自动和 emergency 压缩原样保留的最近完整 run 数 |
+| `session.compaction.preserve_recent_runs` | `2` | 常规自动压缩原样保留的最近完整 run 数；emergency 保护可依次改为保留一个和不再无条件保留完整 run |
 | `session.compaction.model_context_window` | 根据模型确定 | 显式覆盖模型上下文窗口 |
-| `session.compaction.model_max_output_tokens` | 根据模型确定 | 显式覆盖最大输出预留 |
+| `session.compaction.model_max_output_tokens` | 见下文 | 显式覆盖模型最大输出规模；同时决定预留的输出预算和真实 provider 请求的 `max_tokens` 上限 |
 
 比例必须满足 `target_ratio <= trigger_ratio <= emergency_ratio`。非法比例组合会
-回退到编译时默认值。命令、安全保证以及手动与自动行为差异详见
+回退到编译时默认值。
+
+### 默认输出预算
+
+回复预算有两个用途。Core 会先从上下文窗口中扣掉这部分空间，再计算可用于会话历史
+的额度；它也会把同一个值作为 provider 请求的 `max_tokens` 上限。这样，请求上限
+不会超过已经预留的输出空间。未设置 `model_max_output_tokens` 时，Core 使用下表中的
+默认值。
+
+| 情况 | 默认值 |
+|------|--------|
+| 已知模型系列 | `min(模型输出能力, 16384)` |
+| 未知模型 | `4096` |
+
+Core 还会把选出的值限制在已解析上下文窗口的一半以内。显式设置
+`model_max_output_tokens` 会替换表中的默认值，但仍受这个半窗口上限约束。调高后，
+模型可以回复得更长，留给历史的空间会减少。调低后，历史空间会增加，单次回复的
+最长长度也会随之缩短。
+
+命令、安全保证以及手动与自动行为差异详见
 [会话压缩](shell/session-compaction.md)。
 
 ## MCP Server
@@ -170,6 +217,11 @@ adapter_default = "cosh-core"
 analysis_mode = "smart"
 # 审批模式（recommend | auto | trust）
 approval_mode = "auto"
+# Agent 批准的前台命令等待终端输入超过该秒数后被打断（0 = 从不打断）。
+# 仅内核证据支撑的等待计时：会话 tty 上的密码提示、分页器与普通 stdin
+# 读取。全屏 TUI（vi、top）豁免，管道读取（如 `... | cat`）同样豁免。
+# 默认：120。
+input_wait_timeout_secs = 120
 ```
 
 ## 审计配置
@@ -197,15 +249,23 @@ max_disk_bytes = 1073741824
 | `COSH_AI_PROVIDER` | 覆盖活跃提供商 | `ai.active_provider` |
 | `COSH_OUTPUT_LANGUAGE` | 输出语言 | `ai.output_language` |
 | `COSH_MAX_TURNS` | 最大轮次 | `agent.max_turns` |
+| `COSH_SERVICE_SITE` | Coding Plan 和 Token Plan 的内置 endpoint 目录 | — |
 | `COSH_LOG` | 日志级别（全局） | `logging.level` |
 | `RUST_LOG` | Rust 日志过滤 | — |
 | `COSH_SHELL_ADAPTER` | Shell 适配器 | `shell.adapter_default` |
+| `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | 输入等待超时（秒） | `shell.input_wait_timeout_secs` |
 | `COSH_SHELL_DEBUG` | 映射为 debug 级别 | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell 语言 | — |
 | `COSH_AUDIT_DIR` | 统一审计存储根目录 | — |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | 阿里云 AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | 阿里云 SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | provider 解析链 |
+
+`COSH_SERVICE_SITE` 支持 `china`/`cn` 和
+`international`/`intl`/`global`。未设置或无法识别时使用中国站目录。该变量只
+改变 `/auth` 提供的内置 endpoint，不会改写已保存的 provider URL。旧版
+OpenAI-compatible Plan provider 仅在 endpoint 与当前站点目录匹配时恢复为 Plan
+专用编辑表单，匹配时忽略末尾斜杠。
 
 ## 日志级别优先级
 

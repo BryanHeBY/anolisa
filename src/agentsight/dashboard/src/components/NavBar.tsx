@@ -10,12 +10,15 @@ type NavItem = {
 };
 
 const navItems: NavItem[] = [
+  { path: '/health', label: 'Agent 看板', icon: '🩺', capability: 'agent_health' },
   { path: '/', label: 'Agent 可观测', icon: '📊', capability: 'agent_observability' },
   { path: '/sessions', label: '会话列表', icon: '🗂️', capability: 'sessions' },
   { path: '/savings', label: 'Token 节省', icon: '⚡', capability: 'token_savings' },
   { path: '/optimization', label: '优化分析', icon: '🔬', capability: 'optimization' },
   { path: '/skills', label: 'Skill 指标', icon: '🧩', capability: 'skills' },
   { path: '/security', label: '安全可观测', icon: '🛡️', capability: 'security' },
+  { path: '/audit', label: '系统审计', icon: '📋', capability: 'security' },
+  { path: '/enforcement', label: '风险拦截', icon: '⛔', capability: 'enforcement' },
   { path: '/atif', label: '轨迹查看', icon: '🔍', capability: 'atif' },
   { path: '/settings', label: '设置', icon: '⚙️', capability: 'settings' },
 ];

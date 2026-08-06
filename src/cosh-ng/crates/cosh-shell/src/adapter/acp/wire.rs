@@ -187,6 +187,10 @@ pub(super) fn map_bridge_event(
             Some(AgentEvent::AgentFailed {
                 run_id: run_id.to_string(),
                 error: format!("[{code}, {recoverable_note}] {message}{hint_suffix}"),
+                // Reserved for the timeout and max-turns recovery sentinels;
+                // the bridge's own code namespace stays in the message.
+                error_code: None,
+                max_turns: None,
             })
         }
         // Tier 2/3 warning: the agent ran something itself, so that command

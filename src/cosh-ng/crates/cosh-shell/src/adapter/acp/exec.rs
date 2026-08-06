@@ -23,7 +23,9 @@ use crate::types::{
     COMMAND_OUTPUT_REF_MAX_BYTES,
 };
 
-use super::super::control_protocol::{ApprovalDecision, ApprovalResponse, HostExecutedShellResult};
+use super::super::control_protocol::{
+    ApprovalChannelMessage, ApprovalDecision, HostExecutedShellResult,
+};
 use super::super::AdapterError;
 use super::terminal::{choose_lane, ApprovalRouter, Lane};
 
@@ -133,7 +135,7 @@ fn execute_run_command(
 /// the agent sees one response contract regardless of which lane ran it.
 fn foreground_response(command: &str, result: &HostExecutedShellResult) -> Value {
     let (text, truncated) = truncate_utf8(&result.llm_content, MAX_OUTPUT_BYTES);
-    data_response(json!({
+    let mut data = json!({
         "command": command,
         "exit_code": result.metadata.exit_code,
         "signal": result.metadata.signal,
@@ -141,7 +143,17 @@ fn foreground_response(command: &str, result: &HostExecutedShellResult) -> Value
         "truncated": truncated,
         "redaction_status": result.metadata.redaction_status,
         "executed_in_foreground": true,
-    }))
+    });
+    // Forwarded because it is the only signal that the command stalled on an
+    // interactive prompt rather than simply failing: without it the agent
+    // cannot know to retry non-interactively. Omitted when no wait occurred.
+    if let Some(input_wait) = result.metadata.input_wait.as_ref() {
+        data["input_wait"] = json!({
+            "waited_secs": input_wait.waited_secs,
+            "interrupted": input_wait.interrupted,
+        });
+    }
+    data_response(data)
 }
 
 fn run_captured(
@@ -322,12 +334,12 @@ fn next_correlation_id() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::control_protocol::HostExecutedShellMetadata;
+    use super::super::super::control_protocol::{HostExecutedInputWait, HostExecutedShellMetadata};
     use super::super::terminal::RunCommandExecutor;
     use super::*;
 
     fn router() -> Arc<ApprovalRouter> {
-        let (_tx, rx) = mpsc::channel::<ApprovalResponse>();
+        let (_tx, rx) = mpsc::channel::<ApprovalChannelMessage>();
         Arc::new(ApprovalRouter::new(rx))
     }
 
@@ -461,9 +473,8 @@ mod tests {
         assert_ne!(guard[0].exit_code, 0);
     }
 
-    #[test]
-    fn foreground_result_is_reported_not_denied() {
-        let result = HostExecutedShellResult {
+    fn foreground_result(input_wait: Option<HostExecutedInputWait>) -> HostExecutedShellResult {
+        HostExecutedShellResult {
             llm_content: "kernel-6.6\n".to_string(),
             return_display: None,
             metadata: HostExecutedShellMetadata {
@@ -478,10 +489,14 @@ mod tests {
                 redaction_status: "ref_only".to_string(),
                 approval_id: Some("req-1".to_string()),
                 tool_use_id: Some("cosh-terminal-1".to_string()),
+                input_wait,
             },
-        };
+        }
+    }
 
-        let response = foreground_response("uname -r && uptime", &result);
+    #[test]
+    fn foreground_result_is_reported_not_denied() {
+        let response = foreground_response("uname -r && uptime", &foreground_result(None));
         assert_eq!(response["ok"], true, "{response}");
         assert_eq!(response["data"]["exit_code"], 0);
         assert_eq!(response["data"]["executed_in_foreground"], true);
@@ -489,6 +504,29 @@ mod tests {
             response["data"]["output"]
                 .as_str()
                 .is_some_and(|text| text.contains("kernel-6.6")),
+            "{response}"
+        );
+        assert!(
+            response["data"].get("input_wait").is_none(),
+            "absent wait must stay omitted: {response}"
+        );
+    }
+
+    #[test]
+    fn foreground_input_wait_reaches_the_agent() {
+        let response = foreground_response(
+            "uname -r && uptime",
+            &foreground_result(Some(HostExecutedInputWait {
+                waited_secs: 130,
+                interrupted: true,
+            })),
+        );
+        assert_eq!(
+            response["data"]["input_wait"]["waited_secs"], 130,
+            "{response}"
+        );
+        assert_eq!(
+            response["data"]["input_wait"]["interrupted"], true,
             "{response}"
         );
     }

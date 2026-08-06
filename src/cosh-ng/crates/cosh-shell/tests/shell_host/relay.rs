@@ -43,7 +43,7 @@ fn raw_relay_bash_invalid_utf8_never_enters_event_provenance() {
 }
 
 #[test]
-fn raw_relay_zsh_adapter_uses_shared_event_contract() {
+fn routing_c4_zsh_rust_route_uses_shared_event_contract() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;
     }
@@ -98,6 +98,33 @@ fn raw_relay_zsh_adapter_uses_shared_event_contract() {
     assert!(ledger.blocks.iter().any(|block| {
         block.command.contains("/path/that/does/not/exist") && block.exit_code != 0
     }));
+}
+
+#[test]
+fn routing_c4_draft_grammar_no_drift_preserves_raw_arguments() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c4-draft-grammar-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c4-draft-grammar", &work_dir);
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line("/draft extra"),
+            RawRelayAction::line("/draft 'extra'"),
+        ],
+        Vec::new(),
+    )
+    .expect("draft grammar routing");
+
+    for input in ["/draft extra", "/draft 'extra'"] {
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.component.as_deref() == Some("slash")
+        }));
+    }
 }
 
 #[test]
@@ -164,7 +191,7 @@ fn raw_relay_zsh_buffers_fragmented_intercept_candidates() {
 }
 
 #[test]
-fn raw_relay_bash_intercepts_fragmented_slash_while_typing() {
+fn routing_c3_valid_slash_intercepts_fragmented_input() {
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-slash-completion-test-{}-{}",
         std::process::id(),
@@ -238,9 +265,9 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
         vec![
             RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::line("/skills detail xlsx"),
-            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::wait(Duration::from_millis(600)),
             RawRelayAction::write(b"\x1b[A".to_vec()),
-            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::write(b"\n".to_vec()),
             RawRelayAction::wait(Duration::from_millis(300)),
             RawRelayAction::line("exit"),
@@ -275,7 +302,7 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
 }
 
 #[test]
-fn raw_relay_bash_routed_slash_enters_native_history_file() {
+fn routing_c4_bash_route_enters_native_history_file() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-histfile-{}-{}",
         std::process::id(),
@@ -301,7 +328,7 @@ fn raw_relay_bash_routed_slash_enters_native_history_file() {
         vec![
             RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::line("/skills detail xlsx"),
-            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::wait(Duration::from_millis(1200)),
             RawRelayAction::line("exit"),
         ],
         &mut rendered,
@@ -386,7 +413,7 @@ fn raw_relay_bash_slash_route_switch_off_keeps_rust_intercept() {
 }
 
 #[test]
-fn raw_relay_bash_routed_slash_with_secret_never_persists_in_history() {
+fn routing_c4_history_privacy_secret_slash_never_persists() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-secret-{}-{}",
         std::process::id(),
@@ -707,7 +734,7 @@ fn raw_relay_hold_mode_still_observes_ctrl_c() {
 }
 
 #[test]
-fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
+fn raw_relay_capture_ack_replays_same_read_multiline_suffix() {
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-capture-drain-test-{}-{}",
         std::process::id(),
@@ -718,6 +745,7 @@ fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
     let capture = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -727,7 +755,7 @@ fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
         vec![
             RawRelayAction::wait(Duration::from_millis(50)),
             RawRelayAction::write(b"yes\necho capture-drain-ok\n".to_vec()),
-            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::wait(Duration::from_millis(400)),
         ],
         Vec::new(),
         move |events, _| {
@@ -743,12 +771,15 @@ fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
     )
     .expect("capture drain relay");
 
+    // issue #1913: the suffix typed in the same read as the submitting
+    // Enter is type-ahead, not capture input. A cleanly drained chain
+    // replays it to the shell instead of silently discarding it.
     let blocks: Vec<_> = ledger_from_output(&output)
         .blocks
         .into_iter()
         .filter(|block| block.command == "echo capture-drain-ok")
         .collect();
-    assert!(blocks.is_empty(), "{:?}", output.events);
+    assert!(!blocks.is_empty(), "{:?}", output.events);
     assert!(output.events.iter().any(|event| {
         event.message.as_deref() == Some("capture_submitted")
             && event.capture.as_ref().is_some_and(|capture| {
@@ -762,6 +793,11 @@ fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
         .events
         .iter()
         .any(|event| event.message.as_deref() == Some("capture_drained")));
+    // The replayed suffix must not surface a rejection notice.
+    assert!(!output
+        .events
+        .iter()
+        .any(|event| event.message.as_deref() == Some("capture_input_rejected")));
 }
 
 #[test]
@@ -776,6 +812,7 @@ fn raw_relay_capture_chain_discards_old_generation_suffix() {
     let first = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -783,6 +820,7 @@ fn raw_relay_capture_chain_discards_old_generation_suffix() {
     let second = RawInputCapture::Question {
         id: "question-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -845,6 +883,7 @@ fn raw_relay_capture_target_gone_discards_old_suffix_then_installs_new_target() 
     let first = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -852,6 +891,7 @@ fn raw_relay_capture_target_gone_discards_old_suffix_then_installs_new_target() 
     let second = RawInputCapture::Question {
         id: "question-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -859,6 +899,7 @@ fn raw_relay_capture_target_gone_discards_old_suffix_then_installs_new_target() 
     let third = RawInputCapture::Question {
         id: "question-3".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -946,6 +987,7 @@ fn raw_relay_capture_eof_discards_old_generation_suffix() {
     let first = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -953,6 +995,7 @@ fn raw_relay_capture_eof_discards_old_generation_suffix() {
     let second = RawInputCapture::Question {
         id: "question-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -1007,6 +1050,7 @@ fn raw_relay_capture_owned_input_overflow_is_visible_and_discarded() {
     let capture = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -1045,4 +1089,395 @@ fn raw_relay_capture_owned_input_overflow_is_visible_and_discarded() {
         .events
         .iter()
         .any(|event| event.message.as_deref() == Some("capture_overflow")));
+}
+
+#[test]
+fn routing_c3_typed_passthrough_keeps_cjk_shell_owned() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-typed-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-typed", &work_dir);
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash(
+        &config,
+        std::io::Cursor::new("printf '%s\\n' 中文\n".as_bytes().to_vec()),
+        &mut rendered,
+    )
+    .expect("typed passthrough");
+
+    assert!(String::from_utf8_lossy(&rendered).contains("中文"));
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event
+                .input
+                .as_deref()
+                .is_some_and(|input| input.contains("中文"))
+    }));
+}
+
+#[test]
+fn routing_c3_wrapped_paste_stays_shell_owned() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-wrapped-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-wrapped", &work_dir);
+    let input = b"\x1b[200~printf WRAPPED_PASTE\x1b[201~\n".to_vec();
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash(&config, std::io::Cursor::new(input), &mut rendered)
+        .expect("wrapped paste");
+
+    assert!(String::from_utf8_lossy(&rendered).contains("WRAPPED_PASTE"));
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[test]
+fn routing_c3_unwrapped_paste_uses_shell_newline_semantics() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-unwrapped-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-unwrapped", &work_dir);
+    let mut rendered = Vec::new();
+    run_raw_relay_bash(
+        &config,
+        std::io::Cursor::new(b"echo FIRST_LINE\necho SECOND_LINE\n".to_vec()),
+        &mut rendered,
+    )
+    .expect("unwrapped multiline input");
+
+    let rendered = String::from_utf8_lossy(&rendered);
+    assert!(rendered.contains("FIRST_LINE"), "{rendered}");
+    assert!(rendered.contains("SECOND_LINE"), "{rendered}");
+}
+
+#[test]
+fn routing_c3_mirror_dirty_eof_never_appends_exit() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-mirror-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let side_effect = work_dir.join("must-not-exist");
+    let config = ShellHostConfig::new("routing-c3-mirror", &work_dir);
+    let input = format!("touch {}\x1b[D", shell_arg(&side_effect)).into_bytes();
+    let output = run_raw_relay_bash(&config, std::io::Cursor::new(input), Vec::new())
+        .expect("dirty mirror shutdown");
+
+    assert!(!side_effect.exists());
+    assert_eq!(output.exit_status, Some(129));
+}
+
+#[test]
+fn routing_c3_paste_active_eof_never_executes_or_appends_exit() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-paste-eof-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-paste-eof", &work_dir);
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![RawRelayAction::write(b"\x1b[200~echo should-not-run\n")],
+        Vec::new(),
+    )
+    .expect("paste-active EOF shutdown");
+
+    assert_ne!(output.exit_status, Some(0));
+    assert!(!output.events.iter().any(|event| {
+        event
+            .command
+            .as_deref()
+            .is_some_and(|command| command.contains("should-not-run") || command == "exit")
+    }));
+}
+
+#[test]
+fn routing_c3_mirror_oversize_eof_never_appends_exit() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-oversize-eof-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-oversize-eof", &work_dir);
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![RawRelayAction::write(vec![b'x'; 4097])],
+        Vec::new(),
+    )
+    .expect("oversize mirror EOF shutdown");
+
+    assert_ne!(output.exit_status, Some(0));
+    assert!(!output
+        .events
+        .iter()
+        .any(|event| { event.command.as_deref() == Some("exit") }));
+}
+
+#[test]
+fn routing_c3_eof_partial_line_has_no_synthetic_pty_write() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-partial-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let side_effect = work_dir.join("partial-side-effect");
+    let config = ShellHostConfig::new("routing-c3-partial", &work_dir);
+    let input = format!("touch {}", shell_arg(&side_effect)).into_bytes();
+    let output = run_raw_relay_bash(&config, std::io::Cursor::new(input), Vec::new())
+        .expect("partial EOF shutdown");
+
+    assert!(!side_effect.exists());
+    assert_eq!(output.exit_status, Some(129));
+}
+
+#[test]
+fn routing_c3_eof_session_shutdown_is_bounded_in_zsh() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-zsh-eof-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-zsh-eof", &work_dir);
+    let started = Instant::now();
+    let output = run_raw_relay_zsh_with_output_control(
+        &config,
+        std::io::Cursor::new(b"echo ZSH_PARTIAL".to_vec()),
+        Vec::new(),
+        |_, _| Ok(RawObserverAction::Continue),
+    )
+    .expect("zsh EOF shutdown");
+
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_ne!(output.exit_status, Some(0));
+}
+
+#[test]
+fn routing_c3_eof_submitted_no_drift_waits_for_command() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-submitted-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-submitted", &work_dir);
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash(
+        &config,
+        std::io::Cursor::new(b"sleep 0.2; echo FULL_LINE_DONE\n".to_vec()),
+        &mut rendered,
+    )
+    .expect("submitted command then EOF");
+
+    assert!(String::from_utf8_lossy(&rendered).contains("FULL_LINE_DONE"));
+    assert_eq!(output.exit_status, Some(0));
+}
+
+struct RoutingC3ErrorReader;
+
+impl Read for RoutingC3ErrorReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "routing-c3-reader-error",
+        ))
+    }
+}
+
+struct RoutingC3BytesThenErrorReader {
+    bytes: Option<Vec<u8>>,
+}
+
+impl Read for RoutingC3BytesThenErrorReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if let Some(bytes) = self.bytes.take() {
+            let length = bytes.len().min(buffer.len());
+            buffer[..length].copy_from_slice(&bytes[..length]);
+            return Ok(length);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "routing-c3-reader-error",
+        ))
+    }
+}
+
+#[test]
+fn routing_c3_eof_error_preserves_reader_error() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-reader-error-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-reader-error", &work_dir);
+    let error = run_raw_relay_bash(&config, RoutingC3ErrorReader, Vec::new())
+        .expect_err("reader error must propagate");
+
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+    assert_eq!(error.to_string(), "routing-c3-reader-error");
+}
+
+#[test]
+fn routing_c3_driver_result_is_not_silently_discarded() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-driver-result-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-driver-result", &work_dir);
+    let error = run_raw_relay_bash(
+        &config,
+        RoutingC3BytesThenErrorReader {
+            bytes: Some(b"echo DRIVER_PREFIX_DONE\n".to_vec()),
+        },
+        Vec::new(),
+    )
+    .expect_err("driver result must reach host after relayed bytes");
+
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+}
+
+#[test]
+fn routing_c3_signal_status_reaches_all_consumers() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-signal-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-signal", &work_dir);
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line("sleep 30"),
+            RawRelayAction::wait(Duration::from_millis(150)),
+            RawRelayAction::write(b"partial"),
+        ],
+        Vec::new(),
+    )
+    .expect("signal status relay");
+
+    assert_eq!(output.exit_status, Some(129));
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::ShellExited && event.exit_code == Some(129)
+    }));
+    assert!(output.events.iter().any(|event| {
+        matches!(
+            event.kind,
+            ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+        ) && event.command.as_deref() == Some("sleep 30")
+            && event.exit_code == Some(129)
+    }));
+}
+
+#[test]
+fn routing_c3_signal_status_kill_reaches_all_consumers() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-kill-signal-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-kill-signal", &work_dir);
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line("trap '' HUP; sleep 30"),
+            RawRelayAction::wait(Duration::from_millis(150)),
+            RawRelayAction::write(b"partial"),
+        ],
+        Vec::new(),
+    )
+    .expect("kill status relay");
+
+    assert_eq!(output.exit_status, Some(137));
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::ShellExited && event.exit_code == Some(137)
+    }));
+    assert!(output.events.iter().any(|event| {
+        matches!(
+            event.kind,
+            ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+        ) && event.command.as_deref() == Some("trap '' HUP; sleep 30")
+            && event.exit_code == Some(137)
+    }));
+}
+
+#[test]
+fn routing_c3_eof_session_shutdown_kills_hup_ignoring_foreground_group() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-foreground-cleanup-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let pid_file = work_dir.join("foreground.pid");
+    let command = format!(
+        "bash -c 'trap \"\" HUP; echo $$ > {}; while :; do sleep 1; done'",
+        pid_file.display()
+    );
+    let config = ShellHostConfig::new("routing-c3-foreground-cleanup", &work_dir);
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line(command),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(b"partial"),
+        ],
+        Vec::new(),
+    )
+    .expect("foreground cleanup relay");
+
+    assert_ne!(output.exit_status, Some(0));
+    let pid = std::fs::read_to_string(&pid_file)
+        .expect("foreground pid file")
+        .trim()
+        .parse::<i32>()
+        .expect("foreground pid");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        #[cfg(target_os = "linux")]
+        if std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(") ")
+                    .map(|(_, suffix)| suffix.starts_with('Z'))
+            })
+            == Some(true)
+        {
+            return;
+        }
+        let result = unsafe { nix::libc::kill(pid, 0) };
+        if result < 0 && io::Error::last_os_error().raw_os_error() == Some(nix::libc::ESRCH) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("foreground process {pid} survived EOF shutdown");
+}
+
+#[test]
+fn routing_c3_explicit_draft_remains_the_only_multiline_agent_entry() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c3-draft-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c3-draft", &work_dir);
+    let output = run_raw_relay_bash(&config, std::io::Cursor::new(b"??\n".to_vec()), Vec::new())
+        .expect("explicit draft");
+
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("prompt_draft")
+            && event.message.as_deref() == Some("open")
+    }));
 }

@@ -30,12 +30,20 @@ type = "dashscope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = ""              # Or via DASHSCOPE_API_KEY
 model = "qwen-plus"
+# Explicit cache toggle (DashScope only).
+# true  = Explicit caching: injects cache_control markers into the system
+#         and last message. Deterministic 5-min TTL hits. Cache creation
+#         billed at 125%, hits at 10%.
+# false = Implicit caching (default): auto-detects common prefixes, hit rate
+#         is non-deterministic. Hits billed at 20%. Cannot be disabled.
+# See: https://help.aliyun.com/zh/model-studio/context-cache
+explicit_cache = false
 
 [agent]
 # Approval mode: trust | auto | balanced | suggest | strict
 approval_mode = "balanced"
-# Maximum conversation turns
-max_turns = 20
+# Maximum model turns inside a single Agent request
+max_turns = 50
 
 [hooks]
 enabled = true
@@ -90,12 +98,39 @@ through `--workspace` or the session-management request. Relative
 `session.persist_dir` values are resolved from that workspace, not from the
 Core process's launcher directory.
 
+## Agent Turn Budget
+
+`agent.max_turns` bounds the model turns spent inside a **single** Agent
+request. It is not a session-wide quota: every new prompt you send starts with
+a fresh budget.
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `agent.max_turns` | `50` | Model turns allowed in one Agent request |
+
+When a request reaches the limit, Core stops that run and reports
+`Agent exceeded max turns (<configured limit>)` instead of continuing silently.
+When session persistence is enabled and succeeds, the transcript is written
+before the limit is reported, so the session stays active and resumable. The
+interactive shell then offers `Continue` or `Stop`. `Continue` starts another
+Agent request in the same provider conversation with the same configured
+budget; reaching the limit again requires another approval. `Stop` leaves the
+session available for a later manual prompt. A run is not resumable if
+`auto_persist` is off or if session persistence itself failed.
+
+Override the budget with `max_turns` under `[agent]`, or with the
+`COSH_MAX_TURNS` environment variable. An unparsable `COSH_MAX_TURNS` value is
+ignored, leaving whatever the configuration files already resolved.
+
 ## Session Compaction
 
-Compaction keeps the persisted transcript complete and replaces only the
-model-visible prefix with a summary projection. The automatic and emergency
-paths retain recent runs according to `preserve_recent_runs`; an explicit
-`/session compact` may summarize the latest complete run.
+Long sessions eventually fill the model window with earlier replies and tool
+output. Compaction leaves the persisted transcript intact and replaces only an
+older, model-visible prefix with a summary. Normal automatic compaction keeps
+the number of recent runs set by `preserve_recent_runs`. Under emergency
+pressure, Core first uses that setting. When the safe boundary cannot reclaim
+enough space, it next protects one completed run and finally allows the latest
+completed run to be summarized. The active run always stays verbatim.
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
@@ -105,13 +140,32 @@ paths retain recent runs according to `preserve_recent_runs`; an explicit
 | `session.compaction.trigger_ratio` | `0.70` | Fraction of usable history that triggers automatic compaction |
 | `session.compaction.emergency_ratio` | `0.90` | Fraction that arms in-run emergency protection |
 | `session.compaction.target_ratio` | `0.30` | Best-effort retained-history target after compaction |
-| `session.compaction.preserve_recent_runs` | `2` | Complete recent runs kept verbatim by automatic and emergency compaction |
+| `session.compaction.preserve_recent_runs` | `2` | Complete recent runs kept verbatim during normal automatic compaction; emergency protection can retry with one and then with none reserved unconditionally |
 | `session.compaction.model_context_window` | model-derived | Explicit model context-window override |
-| `session.compaction.model_max_output_tokens` | model-derived | Explicit maximum-output reserve override |
+| `session.compaction.model_max_output_tokens` | see below | Explicit maximum model output size; sets both the reserved output budget and the `max_tokens` cap on the real provider request |
 
 Ratios must satisfy `target_ratio <= trigger_ratio <= emergency_ratio`.
-Invalid ratio groups fall back to the compiled defaults. See
-[Session Compaction](shell/session-compaction.md) for commands, safety
+Invalid ratio groups fall back to the compiled defaults.
+
+### Default output budget
+
+The reply budget does two jobs. Core subtracts it from the context window before
+pricing conversation history, and sends the same value to the provider as the
+`max_tokens` cap. The request limit therefore stays inside the output space
+already reserved for it. When `model_max_output_tokens` is unset, Core chooses
+the following default.
+
+| Case | Default |
+|------|---------|
+| Known model family | `min(model output capability, 16384)` |
+| Unknown model | `4096` |
+
+Core also limits the chosen value to half of the resolved context window. An
+explicit `model_max_output_tokens` replaces the table default but keeps this
+half-window limit. Raising it permits a longer reply and leaves less room for
+history. Lowering it gives history more room and shortens the longest reply.
+
+See [Session Compaction](shell/session-compaction.md) for commands, safety
 guarantees, and manual-versus-automatic behavior.
 
 ## MCP Servers
@@ -182,6 +236,12 @@ adapter_default = "cosh-core"
 analysis_mode = "smart"
 # Approval mode (recommend | auto | trust)
 approval_mode = "auto"
+# Seconds an agent-approved foreground command may wait for terminal
+# input before it is interrupted (0 = never interrupt). Only waits backed
+# by kernel evidence count: password prompts, pagers and plain stdin
+# reads on the session tty. Fullscreen TUIs (vi, top) are exempt, and so
+# are pipeline reads (e.g. `... | cat`). Default: 120.
+input_wait_timeout_secs = 120
 ```
 
 ## Audit Configuration
@@ -210,15 +270,24 @@ max_disk_bytes = 1073741824
 | `COSH_AI_PROVIDER` | Override active provider | `ai.active_provider` |
 | `COSH_OUTPUT_LANGUAGE` | Output language | `ai.output_language` |
 | `COSH_MAX_TURNS` | Maximum turns | `agent.max_turns` |
+| `COSH_SERVICE_SITE` | Built-in Coding Plan and Token Plan endpoint catalog | — |
 | `COSH_LOG` | Log level (global) | `logging.level` |
 | `RUST_LOG` | Rust log filter | — |
 | `COSH_SHELL_ADAPTER` | Shell adapter | `shell.adapter_default` |
+| `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Input-wait timeout (seconds) | `shell.input_wait_timeout_secs` |
 | `COSH_SHELL_DEBUG` | Maps to debug level | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell language | — |
 | `COSH_AUDIT_DIR` | Unified audit storage root | — |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | Alibaba Cloud AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Alibaba Cloud SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | Provider resolution chain |
+
+`COSH_SERVICE_SITE` accepts `china`/`cn` and
+`international`/`intl`/`global`. An unset or unrecognized value uses the
+China catalog. It changes the built-in endpoints offered by `/auth`; it does
+not rewrite saved provider URLs. Legacy OpenAI-compatible plan providers are
+restored to a plan-specific edit form only when their endpoint matches the
+selected catalog, ignoring a trailing slash.
 
 ## Log Level Priority
 

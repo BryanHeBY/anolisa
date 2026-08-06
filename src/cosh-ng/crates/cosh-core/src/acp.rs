@@ -9,6 +9,7 @@
 //! One process serves one session, matching the engine's single-transcript
 //! model and the bridge's one-agent-per-turn custody rule.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +21,7 @@ use tokio::sync::mpsc;
 
 use crate::cli::CliArgs;
 use crate::config::CoreConfig;
+use crate::tool::SessionWorkspace;
 
 mod sink;
 mod terminal;
@@ -43,9 +45,20 @@ const APPROVAL_MODES: &[&str] = &["trust", "auto", "balanced", "strict"];
 /// Serves ACP over stdio until the client disconnects.
 ///
 /// Returns the process exit code.
-pub async fn run(args: &CliArgs, config: CoreConfig) -> i32 {
+pub async fn run(
+    args: &CliArgs,
+    config: CoreConfig,
+    project_root: PathBuf,
+    workspace: SessionWorkspace,
+) -> i32 {
     let (engine_lines_tx, engine_lines_rx) = mpsc::unbounded_channel();
-    let state = Arc::new(AcpState::new(args.clone(), config, engine_lines_tx));
+    let state = Arc::new(AcpState::new(
+        args.clone(),
+        config,
+        project_root,
+        workspace,
+        engine_lines_tx,
+    ));
 
     let outcome = Agent
         .builder()
@@ -158,6 +171,10 @@ enum SessionResponder {
 pub(crate) struct AcpState {
     args: CliArgs,
     config: CoreConfig,
+    /// Workspace the turn engine resolves tools against; both are held here
+    /// because the engine starts per session, after `run` has returned them.
+    project_root: PathBuf,
+    workspace: SessionWorkspace,
     engine_lines: mpsc::UnboundedSender<String>,
     /// True when the client executes commands for us via `terminal/*`; the
     /// agent must then stop running its own shell (ADR-011 tier 1).
@@ -175,10 +192,18 @@ pub(crate) struct AcpState {
 }
 
 impl AcpState {
-    fn new(args: CliArgs, config: CoreConfig, engine_lines: mpsc::UnboundedSender<String>) -> Self {
+    fn new(
+        args: CliArgs,
+        config: CoreConfig,
+        project_root: PathBuf,
+        workspace: SessionWorkspace,
+        engine_lines: mpsc::UnboundedSender<String>,
+    ) -> Self {
         Self {
             args,
             config,
+            project_root,
+            workspace,
             engine_lines,
             client_terminal: AtomicBool::new(false),
             engine: tokio::sync::Mutex::new(None),
@@ -321,11 +346,22 @@ impl AcpState {
         engine_args.enable_shell_evidence_tool = false;
 
         let config = self.config.clone();
+        let project_root = self.project_root.clone();
+        let workspace = self.workspace.clone();
         let sink = LineSink::new(self.engine_lines.clone());
         let (engine_side, acp_side) = tokio::io::duplex(ENGINE_PIPE_BYTES);
         tokio::spawn(async move {
             let lines = BufReader::new(engine_side).lines();
-            match crate::headless::run_with_io(&engine_args, config, sink, lines).await {
+            match crate::headless::run_with_io(
+                &engine_args,
+                config,
+                project_root,
+                workspace,
+                sink,
+                lines,
+            )
+            .await
+            {
                 Ok(code) => tracing::info!(code, "acp engine finished"),
                 Err(error) => tracing::error!("acp engine failed: {error}"),
             }

@@ -78,21 +78,50 @@ cosh-shell --resume <session-id> # Select a known provider session
 ```
 
 Inside cosh-shell, use `/session` to browse sessions, `/session list` to copy
-complete session IDs, and `/session status` to inspect selected and active
-identities. `/session new` (or `/new`) detaches the current provider
+complete session IDs, `/session list --all` to list sessions across every
+workspace under the same storage root, and `/session status` to inspect selected
+and active identities. `/session new` (or `/new`) detaches the current provider
 conversation so the next Agent request starts fresh without restarting the
 shell; `/session clear ...` removes old entries after confirmation.
 `/session compact` summarizes any complete conversation prefix in the
 background, including a single completed Agent run, while the full transcript
 remains stored. Automatic compaction waits for both model-window pressure and
-a safe older-run boundary. Session recovery restores model-visible
-conversation context; historical terminal evidence is intentionally not
-restored. Records default to
+a safe older-run boundary. Core uses the same value for the reply space it
+reserves and the request's `max_tokens` cap. Without an override, a known model
+uses `min(model capability, 16384)` and an unknown model uses `4096`, with both
+limited to half the context window. Set
+`session.compaction.model_max_output_tokens` when a different reply allowance
+is needed. Session recovery restores model-visible conversation context;
+historical terminal evidence is intentionally not restored. Records default to
 `~/.copilot-shell/cosh-core/sessions/`; change the root with
 `session.persist_dir`. Project session settings and relative store paths are
 resolved from the workspace cosh-shell sends to Core. See the
 [session recovery guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-recovery.md)
 and [session compaction guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-compaction.md).
+
+Each Agent request defaults to 50 model turns. If the limit is reached after the
+session is persisted, the interactive shell offers another approved budget in
+the same provider conversation. Override the budget with `agent.max_turns` or
+`COSH_MAX_TURNS`; see the
+[configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#agent-turn-budget).
+
+The `/auth` picker includes Coding Plan and Token Plan. Their built-in
+endpoints default to the China service site; set
+`COSH_SERVICE_SITE=international` for the international endpoint catalog.
+See the
+[configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#environment-variable-overrides)
+for accepted aliases and fallback behavior.
+
+When calling LLMs, different inference requests may share overlapping input
+(e.g., multi-turn conversations). Context caching stores these common
+prefixes to reduce redundant computation, improving response speed and
+lowering cost. DashScope offers two modes: explicit caching (opt-in,
+deterministic 5-min TTL hits, higher creation cost but lower hit cost) and
+implicit caching (default automatic mode, non-deterministic hit rate,
+slightly higher hit cost). Set `explicit_cache = true` under
+`[ai.providers.dashscope]` to switch to explicit caching. See the
+[configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#cosh-core-configuration)
+for billing details.
 
 Core and Shell also write a redacted, versioned audit timeline under
 `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`. The existing

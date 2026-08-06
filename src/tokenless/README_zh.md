@@ -59,6 +59,7 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 - **Qoder CLI 插件** — Tool Ready + 命令重写 + 响应压缩
 - **Claude Code 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
+- **OpenCode 插件** — Tool Ready + 命令重写 + Schema/响应压缩 + TOON
 
 ## 快速开始
 
@@ -69,12 +70,68 @@ make setup
 
 安装完成后 `tokenless` 命令位于 `~/.local/bin`，RTK/TOON 辅助二进制同目录。
 
+### OpenCode 安装
+
+OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件执行 Tool Ready、
+RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
+压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
+
+```bash
+make opencode-install
+```
+
+安装器会在 OpenCode 全局 `plugins/` 目录中创建 `tokenless.js` 符号链接，
+不会覆盖同名的非托管文件。配置目录支持 `OPENCODE_CONFIG_DIR`、
+`XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
+安装后重启 OpenCode 即可加载插件。
+
+## npm 安装
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+自动安装适合您平台的预编译二进制文件（`tokenless`、`rtk`、`toon`）。
+支持 Linux 和 macOS 的 x86_64 和 arm64 架构。
+
+## 查看 Token 节省明细
+
+`show` 用于原样打印完整的压缩前后内容；`diff` 用于解释估算 Token
+节省，并只突出发生变化的行：
+
+```bash
+tokenless stats show 42
+tokenless stats diff 42
+tokenless stats diff --session <session-id>
+tokenless stats diff --session <session-id> --tool-use-id <tool-use-id>
+tokenless stats diff 42 --json
+```
+
+Session 总览只包含指标；单记录和 tool-use 报告包含 unified content
+diff。只有相邻 active 阶段的输出与输入内容完全一致时才会串成一条链，
+从而避免重复计算中间阶段的 Token。完整选项和度量限制见
+[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)。
+
+## 数据库位置
+
+Tokenless 默认将统计数据和可逆压缩数据分别存储在
+`~/.tokenless/stats.db` 与 `~/.tokenless/stash.db`。可为两个数据库统一
+指定目录：
+
+```bash
+export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
+```
+
+该目录必须是位于真实用户 home 下的绝对路径。若只需自定义一个数据库，
+现有的 `TOKENLESS_STATS_DB`、`TOKENLESS_STASH_DB` 和 `--stash-db` 覆盖项
+优先级更高。配置文件仍位于 `~/.tokenless/config.json`。
+
 ## 架构
 
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
 - `crates/tokenless-cli/` — CLI 二进制
-- `adapters/tokenless/` — 适配器包（OpenClaw / Hermes / Qoder / Claude Code / Codex）
+- `adapters/tokenless/` — 适配器包（OpenClaw / Hermes / Qoder / Claude Code / Codex / OpenCode）
 - `third_party/rtk/` — RTK 命令重写引擎（vendored）
 
 ## 许可证

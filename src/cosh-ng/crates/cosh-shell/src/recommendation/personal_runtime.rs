@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use super::personal_context::{build_activity_context, build_host_id};
 use super::personal_crypto::{hex, hmac_sha256, random_hex, CryptoError};
-use super::personal_effective_config::current_ai_configured;
 use super::personal_feedback::{FeedbackEvent, FeedbackLifecycle, FrozenPromptBinding};
 use super::personal_history::{
     sync_native_bash_history, HistoryControl, HistorySyncResult, HistorySyncState,

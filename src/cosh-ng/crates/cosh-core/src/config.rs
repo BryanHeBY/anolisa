@@ -59,6 +59,8 @@ pub struct ProviderConfig {
     pub access_key_secret: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explicit_cache: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,7 +94,7 @@ fn default_approval_mode() -> String {
     "balanced".to_string()
 }
 fn default_max_turns() -> u32 {
-    20
+    50
 }
 fn default_session_token_limit() -> u64 {
     128_000
@@ -271,15 +273,26 @@ pub struct CompactionConfig {
     /// Best-effort post-compaction fraction of the usable history budget.
     #[serde(default = "default_target_ratio")]
     pub target_ratio: f64,
-    /// Minimum recent complete Agent runs kept verbatim by automatic and
-    /// emergency compaction; at least one is always retained. Explicit manual
-    /// compaction may summarize the latest complete run.
+    /// Minimum recent complete Agent runs kept verbatim by normal automatic
+    /// compaction.
+    ///
+    /// Explicit manual compaction may summarize the latest complete run. So may
+    /// emergency protection as a last resort: rather than failing the request,
+    /// its fallback ladder degrades this value to one and then to
+    /// manual-compaction semantics, which reserves no complete run
+    /// unconditionally. The in-flight (incomplete) run is never summarized by
+    /// any path.
     #[serde(default = "default_preserve_recent_runs")]
     pub preserve_recent_runs: usize,
     /// Explicit user override for the model context window, in tokens.
     #[serde(default)]
     pub model_context_window: Option<u64>,
-    /// Explicit user override for the maximum model output reserve, in tokens.
+    /// Explicit user override for the model's maximum output size, in tokens.
+    ///
+    /// Drives both sides of the output accounting from one value: the reserve
+    /// `O` subtracted from the usable history budget, and the `max_tokens` cap
+    /// sent on the real provider request. Lowering it therefore frees history
+    /// budget *and* shortens the longest reply the model may produce.
     #[serde(default)]
     pub model_max_output_tokens: Option<u64>,
 }
@@ -859,6 +872,8 @@ impl CoreConfig {
             .map(expand_env_vars)
             .or_else(|| std::env::var("ALIBABA_CLOUD_SECURITY_TOKEN").ok());
 
+        let explicit_cache = provider_cfg.and_then(|p| p.explicit_cache).unwrap_or(false);
+
         ResolvedProvider {
             base_url,
             api_key,
@@ -869,6 +884,7 @@ impl CoreConfig {
             access_key_id,
             access_key_secret,
             security_token,
+            explicit_cache,
         }
     }
 }
@@ -884,6 +900,7 @@ pub struct ResolvedProvider {
     pub access_key_id: String,
     pub access_key_secret: String,
     pub security_token: Option<String>,
+    pub explicit_cache: bool,
 }
 
 impl ResolvedProvider {
@@ -1001,6 +1018,9 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
         if let Some(ref st) = provider.security_token {
             preserved.push_str(&format!("security_token = \"{}\"\n", escape_toml_value(st)));
         }
+        if let Some(true) = provider.explicit_cache {
+            preserved.push_str("explicit_cache = true\n");
+        }
         preserved.push('\n');
     }
 
@@ -1037,7 +1057,7 @@ mod tests {
     fn default_config() {
         let config = CoreConfig::default();
         assert_eq!(config.agent.approval_mode, "balanced");
-        assert_eq!(config.agent.max_turns, 20);
+        assert_eq!(config.agent.max_turns, 50);
         assert_eq!(config.agent.session_token_limit, 128_000);
         assert_eq!(config.agent.max_tool_calls_per_turn, 10);
         assert!(config.session.auto_persist);
@@ -1333,6 +1353,41 @@ model = "qwen3-235b-a22b"
     }
 
     #[test]
+    fn resolve_provider_reads_explicit_cache() {
+        let toml_str = r#"
+[ai]
+active_provider = "dashscope"
+
+[ai.providers.dashscope]
+type = "dashscope"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "sk-test"
+model = "qwen-max"
+explicit_cache = true
+"#;
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let resolved = config.resolve_provider();
+        assert!(resolved.explicit_cache);
+    }
+
+    #[test]
+    fn resolve_provider_defaults_explicit_cache_to_false() {
+        let toml_str = r#"
+[ai]
+active_provider = "dashscope"
+
+[ai.providers.dashscope]
+type = "dashscope"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "sk-test"
+model = "qwen-max"
+"#;
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let resolved = config.resolve_provider();
+        assert!(!resolved.explicit_cache);
+    }
+
+    #[test]
     fn expand_env_vars_in_api_key() {
         std::env::set_var("TEST_COSH_KEY", "sk-from-env");
         let result = expand_env_vars("${TEST_COSH_KEY}");
@@ -1354,7 +1409,7 @@ active_model = "test-model"
 "#;
         let config: CoreConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.agent.approval_mode, "balanced");
-        assert_eq!(config.agent.max_turns, 20);
+        assert_eq!(config.agent.max_turns, 50);
         assert!(config.ai.providers.is_empty());
     }
 
@@ -1364,7 +1419,9 @@ active_model = "test-model"
         // Phase 1: valid overrides
         std::env::set_var("COSH_APPROVAL_MODE", "trust");
         std::env::set_var("COSH_MODEL", "gpt-4");
-        std::env::set_var("COSH_MAX_TURNS", "50");
+        // Differs from the built-in default so the assertion proves the
+        // override took effect rather than matching it by coincidence.
+        std::env::set_var("COSH_MAX_TURNS", "75");
         std::env::set_var("COSH_OUTPUT_LANGUAGE", "zh-CN");
 
         let mut config = CoreConfig::default();
@@ -1372,14 +1429,14 @@ active_model = "test-model"
 
         assert_eq!(config.agent.approval_mode, "trust");
         assert_eq!(config.ai.active_model.as_deref(), Some("gpt-4"));
-        assert_eq!(config.agent.max_turns, 50);
+        assert_eq!(config.agent.max_turns, 75);
         assert_eq!(config.ai.output_language.as_deref(), Some("zh-CN"));
 
         // Phase 2: invalid max_turns — should be ignored
         std::env::set_var("COSH_MAX_TURNS", "not-a-number");
         let mut config2 = CoreConfig::default();
         config2.apply_env_overrides();
-        assert_eq!(config2.agent.max_turns, 20);
+        assert_eq!(config2.agent.max_turns, 50);
 
         // Cleanup
         std::env::remove_var("COSH_APPROVAL_MODE");
